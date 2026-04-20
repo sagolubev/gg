@@ -1,0 +1,2 @@
+[console_scripts]
+gg = gg.cli:cli

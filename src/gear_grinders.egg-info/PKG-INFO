@@ -1,0 +1,16 @@
+Metadata-Version: 2.4
+Name: gear-grinders
+Version: 0.1.0
+Summary: Agent orchestrator: backlog task -> pipeline -> PR
+License: MIT
+Requires-Python: >=3.10
+Description-Content-Type: text/plain
+Requires-Dist: click>=8.1
+Requires-Dist: rich>=13.0
+Requires-Dist: gitpython>=3.1
+Requires-Dist: pyyaml>=6.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0; extra == "dev"
+Requires-Dist: pytest-cov>=5.0; extra == "dev"
+
+Agent orchestrator: backlog task -> pipeline -> PR

@@ -15,13 +15,15 @@ def cli():
 @click.option("--skip-codex", is_flag=True, help="Skip Codex analysis, use local-only.")
 @click.option("--skip-knowledge", is_flag=True, help="Skip knowledge system build (faster for large repos).")
 @click.option("--non-interactive", is_flag=True, help="No interactive prompts.")
-def init(path, force, skip_codex, skip_knowledge, non_interactive):
+@click.option("--debug", is_flag=True, help="Show Codex input/output and verbose logging.")
+def init(path, force, skip_codex, skip_knowledge, non_interactive, debug):
     """Initialize project: analyze codebase, generate specs and knowledge."""
     from gg.commands.init import run_init
 
     run_init(
         path=path, force=force, skip_codex=skip_codex,
         skip_knowledge=skip_knowledge, non_interactive=non_interactive,
+        debug=debug,
     )
 
 

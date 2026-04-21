@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 from gg.agents.base import AgentBackend
@@ -11,44 +12,33 @@ from gg.agents.base import AgentBackend
 CODEX_TIMEOUT = 600
 MAX_RETRIES = 1
 
-SKIP_PREFIXES = (
-    "Reading additional",
-    "OpenAI Codex",
-    "--------",
-    "hook:",
-    "tokens used",
-)
 
-
-def _stream_stderr(proc: subprocess.Popen, console, stop_event: threading.Event) -> None:
-    """Read Codex stderr line by line and print interesting lines."""
+def _stream_stderr_debug(proc: subprocess.Popen, console, stop_event: threading.Event) -> None:
+    """In debug mode: print all Codex stderr output."""
     if not proc.stderr:
         return
     for raw_line in proc.stderr:
         if stop_event.is_set():
             break
-        line = raw_line.strip()
-        if not line:
-            continue
-        if any(line.startswith(p) for p in SKIP_PREFIXES):
-            continue
-        if line.startswith("workdir:") or line.startswith("model:") or line.startswith("provider:"):
+        line = raw_line.rstrip()
+        if line:
             console.print(f"    [dim]{line}[/dim]")
-        elif line.startswith("approval:") or line.startswith("sandbox:") or line.startswith("session id:"):
-            continue
-        elif line.startswith("reasoning"):
-            continue
-        elif line.startswith("user"):
-            console.print(f"    [blue]> prompt sent[/blue]")
-        elif line.startswith("codex"):
-            console.print(f"    [green]< generating response...[/green]")
-        else:
-            console.print(f"    [dim]{line[:120]}[/dim]")
+
+
+def _progress_ticker(console, stop_event: threading.Event) -> None:
+    """In normal mode: just show elapsed time."""
+    start = time.monotonic()
+    while not stop_event.is_set():
+        stop_event.wait(15)
+        if not stop_event.is_set():
+            elapsed = int(time.monotonic() - start)
+            console.print(f"    [dim]... Codex working ({elapsed}s elapsed)[/dim]")
 
 
 class CodexAgent(AgentBackend):
-    def __init__(self, console=None):
+    def __init__(self, console=None, debug: bool = False):
         self._console = console
+        self._debug = debug
 
     def generate(self, prompt: str, *, cwd: str | None = None) -> str:
         out_path = Path(tempfile.mktemp(suffix=".md"))
@@ -56,7 +46,7 @@ class CodexAgent(AgentBackend):
         for attempt in range(MAX_RETRIES + 1):
             try:
                 if self._console:
-                    output = self._run_streaming(prompt, out_path, cwd)
+                    output = self._run_with_progress(prompt, out_path, cwd)
                 else:
                     output = self._run_silent(prompt, out_path, cwd)
 
@@ -77,7 +67,7 @@ class CodexAgent(AgentBackend):
                 raise
         return ""
 
-    def _run_streaming(self, prompt: str, out_path: Path, cwd: str | None) -> str:
+    def _run_with_progress(self, prompt: str, out_path: Path, cwd: str | None) -> str:
         stop_event = threading.Event()
         proc = subprocess.Popen(
             ["codex", "exec", "-o", str(out_path), prompt],
@@ -87,12 +77,19 @@ class CodexAgent(AgentBackend):
             cwd=cwd,
         )
 
-        reader = threading.Thread(
-            target=_stream_stderr,
-            args=(proc, self._console, stop_event),
-            daemon=True,
-        )
-        reader.start()
+        if self._debug:
+            worker = threading.Thread(
+                target=_stream_stderr_debug,
+                args=(proc, self._console, stop_event),
+                daemon=True,
+            )
+        else:
+            worker = threading.Thread(
+                target=_progress_ticker,
+                args=(self._console, stop_event),
+                daemon=True,
+            )
+        worker.start()
 
         try:
             proc.wait(timeout=CODEX_TIMEOUT)
@@ -103,7 +100,7 @@ class CodexAgent(AgentBackend):
             raise
 
         stop_event.set()
-        reader.join(timeout=2)
+        worker.join(timeout=2)
 
         output = ""
         if out_path.exists():

@@ -35,18 +35,21 @@ def _progress_ticker(console, stop_event: threading.Event) -> None:
             console.print(f"    [dim]... Codex working ({elapsed}s elapsed)[/dim]")
 
 
-def _get_mcp_disable_flags() -> list[str]:
-    """Read ~/.codex/config.toml and generate -c flags to disable all MCP servers."""
+def _get_fast_mode_flags() -> list[str]:
+    """Generate -c flags to disable hooks and all MCP servers for fast mode."""
+    flags = ["features.codex_hooks=false"]
+
     config_path = Path.home() / ".codex" / "config.toml"
-    if not config_path.exists():
-        return []
-    try:
-        text = config_path.read_text(encoding="utf-8")
-        import re
-        servers = re.findall(r"\[mcp_servers\.(\w+)\]", text)
-        return [f"mcp_servers.{s}.enabled=false" for s in servers]
-    except OSError:
-        return []
+    if config_path.exists():
+        try:
+            text = config_path.read_text(encoding="utf-8")
+            import re
+            servers = re.findall(r"\[mcp_servers\.(\w+)\]", text)
+            flags = [*flags, *[f"mcp_servers.{s}.enabled=false" for s in servers]]
+        except OSError:
+            pass
+
+    return flags
 
 
 class CodexAgent(AgentBackend):
@@ -102,8 +105,8 @@ class CodexAgent(AgentBackend):
             "--skip-git-repo-check",
             "--ephemeral",
         ]
-        for disable_flag in _get_mcp_disable_flags():
-            cmd = [*cmd, "-c", disable_flag]
+        for flag in _get_fast_mode_flags():
+            cmd = [*cmd, "-c", flag]
         cmd = [*cmd, "-o", str(out_path), "-"]
 
         proc = subprocess.Popen(
@@ -131,13 +134,11 @@ class CodexAgent(AgentBackend):
             worker.start()
 
         try:
-            proc.stdin.write(full_input)
-            proc.stdin.close()
-            proc.wait(timeout=timeout)
+            proc.communicate(input=full_input, timeout=timeout)
         except subprocess.TimeoutExpired:
             stop_event.set()
             proc.kill()
-            proc.wait()
+            proc.communicate()
             raise
         finally:
             stop_event.set()

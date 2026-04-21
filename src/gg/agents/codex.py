@@ -119,22 +119,15 @@ class CodexAgent(AgentBackend):
         )
 
         if self._console:
-            if self._debug:
-                worker = threading.Thread(
-                    target=_stream_stderr_debug,
-                    args=(proc, self._console, stop_event),
-                    daemon=True,
-                )
-            else:
-                worker = threading.Thread(
-                    target=_progress_ticker,
-                    args=(self._console, stop_event),
-                    daemon=True,
-                )
+            worker = threading.Thread(
+                target=_progress_ticker,
+                args=(self._console, stop_event),
+                daemon=True,
+            )
             worker.start()
 
         try:
-            proc.communicate(input=full_input, timeout=timeout)
+            stdout, stderr = proc.communicate(input=full_input, timeout=timeout)
         except subprocess.TimeoutExpired:
             stop_event.set()
             proc.kill()
@@ -142,6 +135,11 @@ class CodexAgent(AgentBackend):
             raise
         finally:
             stop_event.set()
+
+        if self._debug and self._console and stderr:
+            from rich.text import Text
+            for line in stderr.strip().splitlines()[-10:]:
+                self._console.print(Text(f"    {line}", style="dim"))
 
         output = ""
         if out_path.exists():

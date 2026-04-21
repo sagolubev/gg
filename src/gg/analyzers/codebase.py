@@ -102,14 +102,22 @@ def _extract_description(root: Path) -> str:
                 if line.startswith("#") and not past_title:
                     past_title = True
                     continue
-                if past_title and line.strip():
-                    if line.startswith("#") or line.startswith("```") or line.startswith("["):
+                if not past_title:
+                    continue
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                if stripped.startswith("#") or stripped.startswith("```") or stripped.startswith("["):
+                    break
+                if stripped.startswith("- ") or stripped.startswith("* ") or stripped.startswith("|"):
+                    continue
+                if stripped.startswith("![") or stripped.startswith("<"):
+                    continue
+                cleaned = _strip_markdown(stripped)
+                if cleaned and len(cleaned) > 20:
+                    desc_lines = [*desc_lines, cleaned]
+                    if len(desc_lines) >= 2:
                         break
-                    cleaned = _strip_markdown(line.strip())
-                    if cleaned and len(cleaned) > 10:
-                        desc_lines = [*desc_lines, cleaned]
-                        if len(desc_lines) >= 2:
-                            break
             if desc_lines:
                 return " ".join(desc_lines)[:200]
 

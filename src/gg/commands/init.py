@@ -109,40 +109,44 @@ def run_init(
 
     engine = KnowledgeEngine(project_path)
 
-    with Progress(SpinnerColumn(), TextColumn("{task.description}"), console=console) as progress:
-        t = progress.add_task("Building knowledge system...", total=None)
-        stats = engine.rebuild()
-        engine.record_init(data={
-            "total_commits": git_profile.total_commits,
-            "contributors_count": len(git_profile.contributors),
-            "top_level_dirs": structure.top_level_dirs,
-            "is_monorepo": structure.is_monorepo,
-            "primary_language": languages.primary_language,
-            "package_manager": dependencies.package_manager,
-        })
-        progress.update(t, description=f"[green]Knowledge: {stats['entities']} entities, {stats['facts']} facts[/green]")
+    # 8a. Knowledge system
+    console.print("  [dim][1/3][/dim] Building knowledge system...")
+    console.print("    Analyzing git history for entities...")
+    stats = engine.rebuild()
+    console.print(f"    Recording init event ({languages.primary_language}, {dependencies.package_manager})...")
+    engine.record_init(data={
+        "total_commits": git_profile.total_commits,
+        "contributors_count": len(git_profile.contributors),
+        "top_level_dirs": structure.top_level_dirs,
+        "is_monorepo": structure.is_monorepo,
+        "primary_language": languages.primary_language,
+        "package_manager": dependencies.package_manager,
+    })
+    console.print(f"  [green]  -> {stats['entities']} entities, {stats['facts']} facts, "
+                  f"{stats['events_processed']} events[/green]")
 
-        t2 = progress.add_task("Generating specs and constitution...", total=None)
-        generate_specs(
-            project_path=project_path,
-            agent=agent,
-            analyzer_context=analyzer_context,
-            user_ctx=user_ctx,
-            interactive=not non_interactive,
-            console=console,
-        )
-        progress.update(t2, description="[green]Specs generated[/green]")
+    # 8b. Specs and constitution
+    console.print("  [dim][2/3][/dim] Generating specs and constitution...")
+    generate_specs(
+        project_path=project_path,
+        agent=agent,
+        analyzer_context=analyzer_context,
+        user_ctx=user_ctx,
+        interactive=not non_interactive,
+        console=console,
+    )
 
-        t3 = progress.add_task("Generating agent instruction files...", total=None)
-        constitution_path = gg_dir / "constitution.md"
-        generate_agent_files(
-            project_path=project_path,
-            languages=languages,
-            dependencies=dependencies,
-            structure=structure,
-            constitution_path=constitution_path if constitution_path.exists() else None,
-        )
-        progress.update(t3, description="[green]AGENTS.md + CLAUDE.md generated[/green]")
+    # 8c. Agent instruction files
+    console.print("  [dim][3/3][/dim] Generating agent instruction files...")
+    constitution_path = gg_dir / "constitution.md"
+    generate_agent_files(
+        project_path=project_path,
+        languages=languages,
+        dependencies=dependencies,
+        structure=structure,
+        constitution_path=constitution_path if constitution_path.exists() else None,
+    )
+    console.print("  [green]  -> AGENTS.md + CLAUDE.md[/green]")
 
     # 9. Suggestions
     if not non_interactive:

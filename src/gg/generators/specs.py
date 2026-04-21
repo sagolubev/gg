@@ -258,23 +258,36 @@ def generate_specs(
     elif user_ctx is None:
         user_ctx = UserContext()
 
+    console.print("    Initializing openspec directory...")
     if not _init_openspec(root, console):
         _create_openspec_dirs(root)
+        console.print("    Created openspec/ manually")
 
+    console.print("    Writing openspec config...")
     _write_openspec_config(root, user_ctx)
 
     if agent and agent.is_available():
-        console.print("  [bold]Running Codex analysis...[/bold]")
+        console.print("    Sending project to Codex for analysis (this may take a minute)...")
         prompt = _build_full_prompt(user_ctx, analyzer_context)
         try:
             raw = agent.generate(prompt, cwd=str(root))
+            console.print("    Parsing Codex response...")
             sections = _parse_codex_output(raw)
+            console.print(f"    Found {len(sections)} sections: {', '.join(sections.keys())}")
+            console.print("    Writing constitution...")
             _write_constitution(root, raw, sections)
+            console.print("    Writing specs...")
             _write_specs(root, sections, user_ctx)
-            console.print("  [green]Specs and constitution generated via Codex[/green]")
+            console.print("    Writing concept...")
+            spec_files = [f for f in (root / "openspec" / "specs").iterdir() if f.is_file()]
+            console.print(f"  [green]  -> constitution.md + {len(spec_files)} spec files via Codex[/green]")
         except RuntimeError as e:
-            console.print(f"  [yellow]Codex failed: {e}. Using local fallback.[/yellow]")
+            console.print(f"    [yellow]Codex failed: {e}[/yellow]")
+            console.print("    Falling back to local analysis...")
             _generate_local_fallback(root, analyzer_context, user_ctx)
+            console.print("  [green]  -> constitution.md from local analysis[/green]")
     else:
-        console.print("  [yellow]Codex not available, using local analysis only[/yellow]")
+        console.print("    [yellow]Codex not available[/yellow]")
+        console.print("    Generating from local analysis...")
         _generate_local_fallback(root, analyzer_context, user_ctx)
+        console.print("  [green]  -> constitution.md from local analysis[/green]")

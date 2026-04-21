@@ -345,21 +345,37 @@ def generate_specs(
         console.print(f"    Found existing CLAUDE.md ({len(existing_claude_md)} chars), will incorporate")
 
     if agent and agent.is_available():
-        console.print("    Sending compact context to Codex (fast mode, no file reads)...")
+        console.print("    Sending minimal context to Codex...")
         from gg.analyzers.languages import analyze_languages as _al
         from gg.analyzers.dependencies import analyze_dependencies as _ad
         from gg.analyzers.structure import analyze_structure as _as
-        compact_context = "\n\n".join([
-            _al(root).to_prompt_context(),
-            _ad(root).to_prompt_context(),
-            _as(root).to_prompt_context(),
-        ])
-        if existing_agents_md:
-            compact_context += f"\n\n## Existing project rules (from AGENTS.md, first 1500 chars)\n\n{existing_agents_md[:1500]}"
-        prompt = _build_full_prompt(user_ctx, "", existing_agents_md="")
+
+        langs_info = _al(root)
+        deps_info = _ad(root)
+        struct_info = _as(root)
+
+        facts: list[str] = [f"Language: {langs_info.primary_language} ({langs_info.total_files} files)"]
+        if langs_info.frameworks:
+            facts.append(f"Stack: {', '.join(langs_info.frameworks)}")
+        facts.append(f"Package manager: {deps_info.package_manager}")
+        if struct_info.is_monorepo:
+            facts.append("Type: monorepo")
+        facts.append(f"Directories: {', '.join(struct_info.top_level_dirs)}")
+        if langs_info.styling:
+            facts.append(f"Styling: {', '.join(langs_info.styling)}")
+        tools = deps_info.existing_tools
+        if "linters" in tools:
+            facts.append(f"Linters: {', '.join(tools['linters'])}")
+        if "test_frameworks" in tools:
+            facts.append(f"Tests: {', '.join(tools['test_frameworks'])}")
+        if "ci" in tools:
+            facts.append(f"CI: {', '.join(tools['ci'])}")
+
+        compact_context = "\n".join(facts)
+        prompt = "Сформулируй 7 ключевых правил-конституцию для разработчика этого проекта. Markdown с ## секциями."
+        console.print(f"    Context: {len(compact_context)} chars")
         try:
-            import tempfile
-            raw = agent.generate(prompt, context=compact_context, timeout=90)
+            raw = agent.generate(prompt, context=compact_context, timeout=60)
             console.print("    Parsing Codex response...")
             sections = _parse_codex_output(raw)
             console.print(f"    Found {len(sections)} sections: {', '.join(sections.keys())}")

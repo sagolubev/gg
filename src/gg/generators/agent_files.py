@@ -116,6 +116,11 @@ def _smart_merge(
         if test_info:
             gaps.append(test_info)
 
+    if not _has_section(existing_lower, ["grepai", "semantic search"]):
+        import shutil
+        if shutil.which("grepai"):
+            gaps.append(_build_grepai_section())
+
     if constitution and not _has_section(existing_lower, ["constitution", "project rules"]):
         gaps.append("## GG References\n\n"
                     "- Constitution: `.gg/constitution.md`\n"
@@ -143,6 +148,36 @@ def _has_section(text: str, keywords: list[str]) -> bool:
         if kw in text:
             return True
     return False
+
+
+def _build_grepai_section() -> str:
+    return """\
+## Semantic Code Search (grepai)
+
+This project has grepai configured for semantic code search.
+Use it BEFORE reading files to find relevant code efficiently.
+
+### Search by meaning
+```
+grepai search "authentication logic"     # finds handleUserSession, etc.
+grepai search "database connection pool"  # finds pool setup even if named differently
+grepai search "error handling pattern"    # finds try/catch conventions
+```
+
+### Trace call graphs (before changing a function)
+```
+grepai trace callers "functionName"   # who calls this function?
+grepai trace callees "functionName"   # what does this function call?
+```
+
+### When to use grepai vs grep
+- **grepai**: when you know WHAT you're looking for conceptually but not the exact name
+- **grep/ripgrep**: when you know the exact string, variable name, or pattern
+
+### Rules
+- Always run `grepai search` before modifying unfamiliar code areas
+- Use `grepai trace callers` before refactoring any public function
+- Prefer grepai over reading entire files to save tokens"""
 
 
 def _build_testing_section(deps: DependencyReport) -> str:
@@ -208,6 +243,11 @@ def _build_agents_md(
         sections.append(test_section)
         sections.append("")
 
+    import shutil
+    if shutil.which("grepai"):
+        sections.append(_build_grepai_section())
+        sections.append("")
+
     if constitution:
         sections.append("## Project Rules")
         sections.append("")
@@ -261,6 +301,10 @@ def _build_claude_md(
     test_section = _build_testing_section(deps)
     if test_section:
         sections.append(test_section)
+        sections.append("")
+
+    if shutil.which("grepai"):
+        sections.append(_build_grepai_section())
         sections.append("")
 
     if constitution:

@@ -159,6 +159,11 @@ def run_init(
     )
     console.print("  [green]  -> AGENTS.md + CLAUDE.md[/green]")
 
+    # 8d. Initialize grepai if available
+    grepai_available = check_map.get("grepai", type("", (), {"ok": False})).ok
+    if grepai_available:
+        _init_grepai(project_path, console)
+
     # 9. Suggestions
     if not non_interactive:
         console.print()
@@ -281,6 +286,24 @@ def _offer_suggestions(
     if not (project_path / ".github" / "workflows").exists() and not (project_path / ".gitlab-ci.yml").exists():
         if Confirm.ask("  Add CI config template?", default=False):
             console.print("    Will be generated with future [bold]gg ci[/bold] command.")
+
+
+def _init_grepai(project_path: Path, console: Console) -> None:
+    import subprocess
+    console.print("  Initializing [bold]grepai[/bold] semantic search...")
+    try:
+        result = subprocess.run(
+            ["grepai", "init"],
+            capture_output=True, text=True, timeout=30,
+            cwd=str(project_path),
+        )
+        if result.returncode == 0:
+            console.print("  [green]  -> grepai index initialized[/green]")
+            console.print("  [dim]  Tip: run 'grepai watch' to keep the index updated[/dim]")
+        else:
+            console.print(f"  [yellow]grepai init failed: {result.stderr.strip()[:100]}[/yellow]")
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        console.print(f"  [yellow]grepai init failed: {e}[/yellow]")
 
 
 def _write_config(project_path: Path, platform: str, console: Console) -> None:

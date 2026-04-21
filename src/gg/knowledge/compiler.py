@@ -54,6 +54,7 @@ class KnowledgeCompiler:
         decision_count = self._compile_decisions(events, git_profile)
         risk_count = self._compile_risk_register(git_profile, structure, events)
         self._compile_codebase_insights(codebase)
+        self._compile_project_intel()
         self._compile_error_patterns(events)
         self._compile_pipeline_stats(events)
 
@@ -612,6 +613,131 @@ class KnowledgeCompiler:
             (self._knowledge / "codebase-insights.md").write_text(
                 "\n".join(lines), encoding="utf-8",
             )
+
+    def _compile_project_intel(self) -> None:
+        from gg.analyzers.dependencies import analyze_dependencies
+        from gg.analyzers.project_intel import (
+            generate_pr_checklist,
+            scan_api_inventory,
+            scan_components,
+            scan_db_schema,
+            scan_style_exemplars,
+            scan_test_examples,
+        )
+
+        intel_dir = self._knowledge / "intel"
+        intel_dir.mkdir(exist_ok=True)
+
+        # API inventory
+        endpoints = scan_api_inventory(self._root)
+        if endpoints:
+            lines = ["# API Inventory", "", f"{len(endpoints)} endpoints found.", ""]
+            lines.append("| Name | Method | Type | File | Line |")
+            lines.append("|------|--------|------|------|------|")
+            for ep in endpoints:
+                lines.append(f"| {ep.name} | {ep.method} | {ep.endpoint_type} | {ep.file} | {ep.line} |")
+            lines.append("")
+            (intel_dir / "api-inventory.md").write_text("\n".join(lines), encoding="utf-8")
+
+        # DB schema
+        tables = scan_db_schema(self._root)
+        if tables:
+            lines = ["# Database Schema", "", f"{len(tables)} tables found.", ""]
+            for t in tables:
+                lines.append(f"## {t.name}")
+                lines.append(f"- File: `{t.file}`")
+                lines.append(f"- ORM: {t.orm}")
+                if t.columns:
+                    lines.append(f"- Columns: {', '.join(t.columns[:15])}")
+                    if len(t.columns) > 15:
+                        lines.append(f"  ... and {len(t.columns) - 15} more")
+                if t.relations:
+                    lines.append(f"- Relations: {', '.join(t.relations)}")
+                lines.append("")
+            (intel_dir / "db-schema.md").write_text("\n".join(lines), encoding="utf-8")
+
+        # Components
+        components = scan_components(self._root)
+        if components:
+            by_dir: dict[str, list] = {}
+            for c in components:
+                d = str(Path(c.file).parent)
+                if d not in by_dir:
+                    by_dir[d] = []
+                by_dir[d] = [*by_dir[d], c]
+
+            lines = ["# Component Tree", "", f"{len(components)} components found.", ""]
+            for d, comps in sorted(by_dir.items()):
+                lines.append(f"## {d}/")
+                for c in comps:
+                    default = " (default)" if c.is_default else ""
+                    lines.append(f"- `{c.name}`{default} -- {c.file}")
+                lines.append("")
+            (intel_dir / "components.md").write_text("\n".join(lines), encoding="utf-8")
+
+        # Test examples
+        test_examples = scan_test_examples(self._root)
+        if test_examples:
+            lines = ["# Test Examples", "", "Representative test files for this project.", ""]
+            for ex in test_examples:
+                lines.append(f"## {ex.file} ({ex.framework}, {ex.line_count} lines)")
+                lines.append("")
+                lines.append("```")
+                lines.append(ex.snippet)
+                lines.append("```")
+                lines.append("")
+            (intel_dir / "test-examples.md").write_text("\n".join(lines), encoding="utf-8")
+
+        # Style exemplars
+        exemplars = scan_style_exemplars(self._root)
+        if exemplars:
+            lines = [
+                "# Style Exemplars", "",
+                "Reference files showing the project's coding patterns.",
+                "Use these as templates when writing new code.", "",
+            ]
+            for ex in exemplars:
+                lines.append(f"## {ex.file_type}: {ex.description}")
+                lines.append(f"File: `{ex.file}` ({ex.line_count} lines)")
+                lines.append("")
+                lines.append("```")
+                lines.append(ex.preview)
+                lines.append("```")
+                lines.append("")
+            (intel_dir / "style-exemplars.md").write_text("\n".join(lines), encoding="utf-8")
+
+        # PR checklist
+        deps = analyze_dependencies(self._root)
+        tools = deps.existing_tools
+        has_i18n = any(
+            (self._root / d).exists()
+            for d in ("apps/web/src/locales", "src/locales", "locales", "i18n")
+        )
+        has_migrations = any(
+            (self._root / d).exists()
+            for d in ("migrations", "packages/db/migrations", "prisma/migrations", "db/migrations")
+        )
+
+        lint_cmd = ""
+        test_cmd = ""
+        pm = deps.package_manager
+        if "linters" in tools:
+            lint_cmd = f"{pm} run lint" if pm in ("npm", "yarn", "pnpm", "bun") else "lint"
+        if "test_frameworks" in tools:
+            test_cmd = f"{pm} run test" if pm in ("npm", "yarn", "pnpm", "bun") else "pytest"
+
+        checklist = generate_pr_checklist(
+            has_linter="linters" in tools,
+            has_tests="test_frameworks" in tools,
+            has_ci="ci" in tools,
+            has_i18n=has_i18n,
+            has_migrations=has_migrations,
+            lint_command=lint_cmd,
+            test_command=test_cmd,
+        )
+        (intel_dir / "pr-checklist.md").write_text(
+            f"# PR Checklist\n\n{checklist}\n", encoding="utf-8",
+        )
 
     def _compile_error_patterns(self, events: list[Event]) -> None:
         patterns = collect_error_patterns(events)

@@ -304,7 +304,7 @@ def _extract_coupled_files(
                 diff = c.diff(c.parents[0])
             else:
                 diff = c.diff(None)
-            files_in_commit = {d.b_path or d.a_path for d in diff if (d.b_path or d.a_path)}
+            files_in_commit = {d.b_path or d.a_path for d in diff if (d.b_path or d.a_path) and not _is_noise_file(d.b_path or d.a_path)}
             for f in files_in_commit:
                 if f not in file_sets:
                     file_sets[f] = set()

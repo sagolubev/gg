@@ -345,6 +345,9 @@ def _strip_markdown(text: str) -> str:
     text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
     text = re.sub(r"!\[[^\]]*\]\([^)]+\)", "", text)
     text = re.sub(r"[*_~`#>]", "", text)
+    # Strip emoji
+    text = re.sub(r"[\U0001F000-\U0001FFFF]", "", text)
+    text = re.sub(r"- +- +", "- ", text)
     text = re.sub(r"\s{2,}", " ", text)
     return text.strip()
 

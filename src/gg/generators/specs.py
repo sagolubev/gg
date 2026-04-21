@@ -90,8 +90,12 @@ def ask_user_context(console: Console) -> UserContext:
     return UserContext(description=description.strip())
 
 
-def _build_full_prompt(user_ctx: UserContext, analyzer_context: str) -> str:
+def _build_full_prompt(
+    user_ctx: UserContext, analyzer_context: str, existing_agents_md: str = "",
+) -> str:
     parts = [CODEX_ANALYSIS_PROMPT]
+    if existing_agents_md:
+        parts = [*parts, f"\nВ проекте уже есть AGENTS.md. Учитывай его при формировании конституции:\n{existing_agents_md}"]
     if user_ctx.description:
         parts = [*parts, f"\nОписание проекта от разработчика: {user_ctx.description}"]
     if user_ctx.domains:
@@ -266,9 +270,21 @@ def generate_specs(
     console.print("    Writing openspec config...")
     _write_openspec_config(root, user_ctx)
 
+    existing_agents_md = ""
+    agents_path = root / "AGENTS.md"
+    if agents_path.exists():
+        existing_agents_md = agents_path.read_text(encoding="utf-8").strip()
+        console.print(f"    Found existing AGENTS.md ({len(existing_agents_md)} chars), will incorporate")
+
+    existing_claude_md = ""
+    claude_path = root / "CLAUDE.md"
+    if claude_path.exists():
+        existing_claude_md = claude_path.read_text(encoding="utf-8").strip()
+        console.print(f"    Found existing CLAUDE.md ({len(existing_claude_md)} chars), will incorporate")
+
     if agent and agent.is_available():
         console.print("    Sending project to Codex for analysis (this may take a minute)...")
-        prompt = _build_full_prompt(user_ctx, analyzer_context)
+        prompt = _build_full_prompt(user_ctx, analyzer_context, existing_agents_md)
         try:
             raw = agent.generate(prompt, cwd=str(root))
             console.print("    Parsing Codex response...")

@@ -14,6 +14,7 @@ def generate_agent_files(
     dependencies: DependencyReport,
     structure: StructureMap,
     constitution_path: Path | None = None,
+    preserve_existing: bool = True,
 ) -> None:
     root = Path(project_path).resolve()
     project_name = root.name
@@ -23,10 +24,22 @@ def generate_agent_files(
     if constitution_path and constitution_path.exists():
         constitution_ref = constitution_path.read_text(encoding="utf-8")
 
+    existing_agents = ""
+    if preserve_existing and (root / "AGENTS.md").exists():
+        existing_agents = (root / "AGENTS.md").read_text(encoding="utf-8")
+
+    existing_claude = ""
+    if preserve_existing and (root / "CLAUDE.md").exists():
+        existing_claude = (root / "CLAUDE.md").read_text(encoding="utf-8")
+
     agents_md = _build_agents_md(project_name, languages, dependencies, structure, commands, constitution_ref)
+    if existing_agents:
+        agents_md = _merge_with_existing(existing_agents, agents_md, "AGENTS.md")
     (root / "AGENTS.md").write_text(agents_md, encoding="utf-8")
 
     claude_md = _build_claude_md(project_name, languages, dependencies, structure, commands, constitution_ref)
+    if existing_claude:
+        claude_md = _merge_with_existing(existing_claude, claude_md, "CLAUDE.md")
     (root / "CLAUDE.md").write_text(claude_md, encoding="utf-8")
 
 
@@ -157,3 +170,18 @@ def _build_claude_md(
         sections.append("")
 
     return "\n".join(sections)
+
+
+def _merge_with_existing(existing: str, generated: str, filename: str) -> str:
+    """Preserve user-written sections from existing file, append generated content."""
+    marker = "<!-- gg:auto-generated below -->"
+    if marker in existing:
+        user_part = existing.split(marker)[0].rstrip()
+        return f"{user_part}\n\n{marker}\n\n{generated}\n"
+
+    return (
+        f"<!-- gg:existing {filename} preserved -->\n"
+        f"{existing}\n\n"
+        f"{marker}\n\n"
+        f"{generated}\n"
+    )

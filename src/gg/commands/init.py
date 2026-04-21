@@ -72,7 +72,7 @@ def run_init(
     platform = _detect_and_confirm_platform(project_path, check_map, non_interactive, console)
 
     # 4. Discover project context
-    agent = CodexAgent() if codex_available else None
+    agent = CodexAgent(console=console) if codex_available else None
     user_ctx: UserContext | None = None
     if agent and agent.is_available():
         console.print()

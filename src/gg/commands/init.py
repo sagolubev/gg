@@ -14,8 +14,8 @@ from gg.analyzers.git_history import GitProfile, analyze_git_history
 from gg.analyzers.languages import LanguageProfile, analyze_languages
 from gg.analyzers.structure import StructureMap, analyze_structure
 from gg.generators.agent_files import generate_agent_files
-from gg.generators.knowledge import build_knowledge
 from gg.generators.specs import UserContext, ask_user_context, generate_specs
+from gg.knowledge.engine import KnowledgeEngine
 from gg.platforms.base import detect_platform
 from gg.utils.git_ops import find_repo_root, get_main_branch, get_remote_url, parse_remote_url
 from gg.utils.system import run_all_checks
@@ -99,14 +99,20 @@ def run_init(
 
     agent = CodexAgent() if codex_available else None
 
+    engine = KnowledgeEngine(project_path)
+
     with Progress(SpinnerColumn(), TextColumn("{task.description}"), console=console) as progress:
         t = progress.add_task("Building knowledge system...", total=None)
-        build_knowledge(
-            project_path=project_path,
-            git_profile=git_profile,
-            structure=structure,
-        )
-        progress.update(t, description="[green]Knowledge system built[/green]")
+        stats = engine.rebuild()
+        engine.record_init(data={
+            "total_commits": git_profile.total_commits,
+            "contributors_count": len(git_profile.contributors),
+            "top_level_dirs": structure.top_level_dirs,
+            "is_monorepo": structure.is_monorepo,
+            "primary_language": languages.primary_language,
+            "package_manager": dependencies.package_manager,
+        })
+        progress.update(t, description=f"[green]Knowledge: {stats['entities']} entities, {stats['facts']} facts[/green]")
 
         t2 = progress.add_task("Generating specs and constitution...", total=None)
         generate_specs(

@@ -42,14 +42,18 @@ class KnowledgeCompiler:
         for sub in ("entities", "decisions", "sessions"):
             (self._knowledge / sub).mkdir(exist_ok=True)
 
+        from gg.analyzers.codebase import analyze_codebase
+
         git_profile = analyze_git_history(self._root)
         structure = analyze_structure(self._root)
+        codebase = analyze_codebase(self._root)
         events = self._event_log.read_all()
 
         entity_count = self._compile_entities(events, structure, git_profile)
-        fact_count = self._compile_fact_registry(events, git_profile)
+        fact_count = self._compile_fact_registry(events, git_profile, codebase)
         decision_count = self._compile_decisions(events, git_profile)
         risk_count = self._compile_risk_register(git_profile, structure, events)
+        self._compile_codebase_insights(codebase)
         self._compile_error_patterns(events)
         self._compile_pipeline_stats(events)
 
@@ -180,7 +184,7 @@ class KnowledgeCompiler:
 
         return len(all_names)
 
-    def _compile_fact_registry(self, events: list[Event], git: GitProfile) -> int:
+    def _compile_fact_registry(self, events: list[Event], git: GitProfile, codebase: dict | None = None) -> int:
         event_facts = collect_facts_from_events(events)
         pipeline_freq = collect_file_touch_frequency(events)
 
@@ -570,6 +574,44 @@ class KnowledgeCompiler:
 
         (self._knowledge / "risk-register.md").write_text("\n".join(lines), encoding="utf-8")
         return len(risks)
+
+    def _compile_codebase_insights(self, codebase: dict) -> None:
+        lines = ["# Codebase Insights", "", "Auto-generated from fast local analysis.", ""]
+
+        if codebase.get("todos"):
+            lines.append("## TODO/FIXME/HACK Markers")
+            lines.append("")
+            lines.append("```")
+            lines.append(codebase["todos"])
+            lines.append("```")
+            lines.append("")
+
+        if codebase.get("routes"):
+            lines.append("## API Routes")
+            lines.append("")
+            lines.append("```")
+            lines.append(codebase["routes"])
+            lines.append("```")
+            lines.append("")
+
+        if codebase.get("env_vars"):
+            lines.append("## Environment Variables")
+            lines.append("")
+            lines.append("```")
+            lines.append(codebase["env_vars"])
+            lines.append("```")
+            lines.append("")
+
+        if codebase.get("imports"):
+            lines.append("## Top External Imports")
+            lines.append("")
+            lines.append(codebase["imports"])
+            lines.append("")
+
+        if any(codebase.get(k) for k in ("todos", "routes", "env_vars", "imports")):
+            (self._knowledge / "codebase-insights.md").write_text(
+                "\n".join(lines), encoding="utf-8",
+            )
 
     def _compile_error_patterns(self, events: list[Event]) -> None:
         patterns = collect_error_patterns(events)

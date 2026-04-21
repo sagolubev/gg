@@ -14,7 +14,7 @@ from gg.analyzers.git_history import GitProfile, analyze_git_history
 from gg.analyzers.languages import LanguageProfile, analyze_languages
 from gg.analyzers.structure import StructureMap, analyze_structure
 from gg.generators.agent_files import generate_agent_files
-from gg.generators.specs import UserContext, ask_user_context, discover_context_via_codex, generate_specs
+from gg.generators.specs import UserContext, generate_specs
 from gg.knowledge.engine import KnowledgeEngine
 from gg.platforms.base import detect_platform
 from gg.utils.git_ops import find_repo_root, get_main_branch, get_remote_url, parse_remote_url
@@ -74,25 +74,32 @@ def run_init(
     # 3. Detect platform
     platform = _detect_and_confirm_platform(project_path, check_map, non_interactive, console)
 
-    # 4. Discover project context
-    agent = CodexAgent(console=console, debug=debug) if codex_available else None
-    user_ctx: UserContext | None = None
-    if agent and agent.is_available():
-        console.print()
-        user_ctx = discover_context_via_codex(agent, str(project_path), console)
-        if user_ctx.description:
-            console.print(f"  [green]Description:[/green] {user_ctx.description}")
-        if user_ctx.domains:
-            console.print(f"  [green]Domains:[/green] {user_ctx.domains}")
-        if user_ctx.integrations:
-            console.print(f"  [green]Integrations:[/green] {user_ctx.integrations}")
-    elif not non_interactive:
-        console.print()
-        user_ctx = ask_user_context(console)
+    # 4. Initialize grepai if available
+    grepai_available = check_map.get("grepai", type("", (), {"ok": False})).ok
+    if grepai_available:
+        _init_grepai(project_path, console)
 
-    # 5. Run analyzers
+    # 5. Run analyzers (local, fast -- no LLM)
     console.print()
     languages, dependencies, structure, git_profile = _run_analyzers(project_path, console)
+
+    # 6. Build context from local analysis (replaces Codex research)
+    from gg.analyzers.codebase import analyze_codebase
+    codebase_insights = analyze_codebase(project_path)
+
+    user_ctx = UserContext(
+        description=codebase_insights.get("description", ""),
+        domains=codebase_insights.get("domains", ""),
+        integrations=codebase_insights.get("integrations", ""),
+    )
+    if user_ctx.description:
+        console.print(f"  [green]Description:[/green] {user_ctx.description}")
+    if user_ctx.domains:
+        console.print(f"  [green]Domains:[/green] {user_ctx.domains}")
+    if user_ctx.integrations:
+        console.print(f"  [green]Integrations:[/green] {user_ctx.integrations}")
+
+    agent = CodexAgent(console=console, debug=debug) if codex_available else None
 
     # 6. Display summary
     _print_summary(languages, dependencies, structure, git_profile, console)
@@ -160,12 +167,7 @@ def run_init(
     )
     console.print("  [green]  -> AGENTS.md + CLAUDE.md[/green]")
 
-    # 8d. Initialize grepai if available
-    grepai_available = check_map.get("grepai", type("", (), {"ok": False})).ok
-    if grepai_available:
-        _init_grepai(project_path, console)
-
-    # 8e. Deep code audit (optional)
+    # 8d. Deep code audit (optional)
     if deep and agent and agent.is_available():
         from gg.generators.observations import run_deep_observations
         console.print("  [bold]Running deep code audit...[/bold]")

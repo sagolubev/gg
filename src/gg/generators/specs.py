@@ -345,10 +345,14 @@ def generate_specs(
         console.print(f"    Found existing CLAUDE.md ({len(existing_claude_md)} chars), will incorporate")
 
     if agent and agent.is_available():
-        console.print("    Sending project to Codex for analysis (this may take a minute)...")
-        prompt = _build_full_prompt(user_ctx, analyzer_context, existing_agents_md)
+        console.print("    Sending collected context to Codex (no file reads)...")
+        context_parts = [analyzer_context]
+        if existing_agents_md:
+            context_parts = [*context_parts, f"\n## Existing AGENTS.md\n\n{existing_agents_md[:3000]}"]
+        full_context = "\n\n".join(context_parts)
+        prompt = _build_full_prompt(user_ctx, "", existing_agents_md="")
         try:
-            raw = agent.generate(prompt, cwd=str(root))
+            raw = agent.generate(prompt, cwd=str(root), context=full_context, timeout=120)
             console.print("    Parsing Codex response...")
             sections = _parse_codex_output(raw)
             console.print(f"    Found {len(sections)} sections: {', '.join(sections.keys())}")

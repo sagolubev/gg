@@ -14,7 +14,6 @@ MAX_RETRIES = 1
 
 
 def _stream_stderr_debug(proc: subprocess.Popen, console, stop_event: threading.Event) -> None:
-    """In debug mode: print all Codex stderr output."""
     from rich.text import Text
 
     if not proc.stderr:
@@ -28,7 +27,6 @@ def _stream_stderr_debug(proc: subprocess.Popen, console, stop_event: threading.
 
 
 def _progress_ticker(console, stop_event: threading.Event) -> None:
-    """In normal mode: just show elapsed time."""
     start = time.monotonic()
     while not stop_event.is_set():
         stop_event.wait(15)
@@ -42,14 +40,18 @@ class CodexAgent(AgentBackend):
         self._console = console
         self._debug = debug
 
-    def generate(self, prompt: str, *, cwd: str | None = None, timeout: int | None = None) -> str:
+    def generate(self, prompt: str, *, cwd: str | None = None, timeout: int | None = None,
+                 context: str | None = None) -> str:
+        """Generate with Codex. If context is provided, pipe it via stdin (no file reads)."""
         effective_timeout = timeout or CODEX_TIMEOUT
         retries = 0 if timeout else MAX_RETRIES
         out_path = Path(tempfile.mktemp(suffix=".md"))
 
         for attempt in range(retries + 1):
             try:
-                if self._console:
+                if context:
+                    output = self._run_with_context(prompt, context, out_path, cwd, effective_timeout)
+                elif self._console:
                     output = self._run_with_progress(prompt, out_path, cwd, effective_timeout)
                 else:
                     output = self._run_silent(prompt, out_path, cwd, effective_timeout)
@@ -57,6 +59,8 @@ class CodexAgent(AgentBackend):
                 if output:
                     return output
                 if attempt < retries:
+                    if self._console:
+                        self._console.print(f"    [yellow]Empty response, retrying...[/yellow]")
                     continue
                 return ""
             except subprocess.TimeoutExpired:
@@ -73,7 +77,62 @@ class CodexAgent(AgentBackend):
                 raise
         return ""
 
-    def _run_with_progress(self, prompt: str, out_path: Path, cwd: str | None, timeout: int = CODEX_TIMEOUT) -> str:
+    def _run_with_context(self, prompt: str, context: str, out_path: Path,
+                          cwd: str | None, timeout: int) -> str:
+        """Pipe context via stdin -- Codex won't read files, just processes the input."""
+        stop_event = threading.Event()
+
+        full_input = f"{context}\n\n---\n\n{prompt}"
+
+        proc = subprocess.Popen(
+            ["codex", "exec", "-o", str(out_path), "-"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=cwd,
+        )
+
+        if self._console:
+            if self._debug:
+                worker = threading.Thread(
+                    target=_stream_stderr_debug,
+                    args=(proc, self._console, stop_event),
+                    daemon=True,
+                )
+            else:
+                worker = threading.Thread(
+                    target=_progress_ticker,
+                    args=(self._console, stop_event),
+                    daemon=True,
+                )
+            worker.start()
+
+        try:
+            proc.stdin.write(full_input)
+            proc.stdin.close()
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            stop_event.set()
+            proc.kill()
+            proc.wait()
+            raise
+        finally:
+            stop_event.set()
+
+        output = ""
+        if out_path.exists():
+            output = out_path.read_text(encoding="utf-8").strip()
+            out_path.unlink(missing_ok=True)
+
+        if not output and proc.returncode != 0:
+            stderr = proc.stderr.read() if proc.stderr else ""
+            raise RuntimeError(f"Codex failed (rc={proc.returncode}): {stderr[:200]}")
+
+        return output
+
+    def _run_with_progress(self, prompt: str, out_path: Path, cwd: str | None,
+                           timeout: int = CODEX_TIMEOUT) -> str:
         stop_event = threading.Event()
         proc = subprocess.Popen(
             ["codex", "exec", "-o", str(out_path), prompt],
@@ -119,7 +178,8 @@ class CodexAgent(AgentBackend):
 
         return output
 
-    def _run_silent(self, prompt: str, out_path: Path, cwd: str | None, timeout: int = CODEX_TIMEOUT) -> str:
+    def _run_silent(self, prompt: str, out_path: Path, cwd: str | None,
+                    timeout: int = CODEX_TIMEOUT) -> str:
         result = subprocess.run(
             ["codex", "exec", "-o", str(out_path), prompt],
             capture_output=True,

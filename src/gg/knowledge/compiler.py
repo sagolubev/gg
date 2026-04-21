@@ -48,7 +48,7 @@ class KnowledgeCompiler:
 
         entity_count = self._compile_entities(events, structure, git_profile)
         fact_count = self._compile_fact_registry(events, git_profile)
-        decision_count = self._compile_decisions(events)
+        decision_count = self._compile_decisions(events, git_profile)
         self._compile_error_patterns(events)
         self._compile_pipeline_stats(events)
 
@@ -111,11 +111,17 @@ class KnowledgeCompiler:
                 key=lambda x: -x[1],
             )[:5]
 
+            ownership = [o for o in git.file_ownership if o.path.startswith(f"{name}/")]
             owner = ""
             if event_entity and event_entity.owner:
                 owner = event_entity.owner
+            elif ownership:
+                owner = ownership[0].primary_owner
             elif git.contributors:
                 owner = git.contributors[0].name
+
+            bus = git.bus_factor.get(name, 0)
+            risk_entries = [(p, s) for p, s in git.risk_scores if p.startswith(f"{name}/")]
 
             lines = [f"# {name}", "", f"Type: {role}"]
 
@@ -147,8 +153,26 @@ class KnowledgeCompiler:
                     lines.append(f"  - {f}")
                 lines.append("")
 
-            if owner:
+            if ownership:
+                lines.append("## Code Ownership")
+                for o in ownership[:5]:
+                    contribs = ", ".join(f"{a}({n})" for a, n in o.contributors[:3])
+                    lines.append(f"  - {o.path}: {o.primary_owner} ({o.ownership_pct:.0f}%) [{contribs}]")
+                lines.append("")
+            elif owner:
                 lines.append(f"## Owner\n\n- {owner}\n")
+
+            if bus > 0:
+                lines.append(f"## Bus Factor: {bus} contributor(s)")
+                if bus <= 1:
+                    lines.append("  **Risk: single contributor -- knowledge transfer needed**")
+                lines.append("")
+
+            if risk_entries:
+                lines.append("## Risk Scores")
+                for p, s in sorted(risk_entries, key=lambda x: -x[1])[:5]:
+                    lines.append(f"  - {p}: {s:.2f}")
+                lines.append("")
 
             (entities_dir / f"{name}.md").write_text("\n".join(lines), encoding="utf-8")
 
@@ -217,6 +241,102 @@ class KnowledgeCompiler:
                 lines.append(f"| {fact.key} | {fact.value} | {fact.source} | {fact.confidence} |")
             lines.append("")
 
+        # Code ownership
+        if git.file_ownership:
+            lines.append("## Code Ownership")
+            lines.append("")
+            lines.append("| File | Owner | Ownership % | Contributors |")
+            lines.append("|------|-------|-------------|-------------|")
+            for o in git.file_ownership[:15]:
+                contribs = ", ".join(f"{a}({n})" for a, n in o.contributors[:3])
+                lines.append(f"| {o.path} | {o.primary_owner} | {o.ownership_pct:.0f}% | {contribs} |")
+            lines.append("")
+
+        # Bus factor
+        if git.bus_factor:
+            low_bus = [(m, n) for m, n in git.bus_factor.items() if n <= 1]
+            if low_bus:
+                lines.append("## Bus Factor Risk")
+                lines.append("")
+                lines.append("Modules with single contributor:")
+                for m, n in low_bus:
+                    lines.append(f"- **{m}**: {n} contributor(s)")
+                lines.append("")
+
+        # Churn analysis
+        if git.churn_analysis:
+            lines.append("## Code Churn")
+            lines.append("")
+            lines.append("| File | Changes | +Lines | -Lines | Churn Ratio |")
+            lines.append("|------|---------|--------|--------|-------------|")
+            for ci in git.churn_analysis[:15]:
+                lines.append(f"| {ci.path} | {ci.change_count} | {ci.lines_added} | {ci.lines_removed} | {ci.churn_ratio} |")
+            lines.append("")
+
+        # Risk scores
+        if git.risk_scores:
+            lines.append("## Change Risk Scores")
+            lines.append("")
+            lines.append("Composite of churn, coupling, and bus factor:")
+            lines.append("")
+            lines.append("| File | Risk Score |")
+            lines.append("|------|------------|")
+            for path_name, score in git.risk_scores:
+                lines.append(f"| {path_name} | {score:.2f} |")
+            lines.append("")
+
+        # Dormant files
+        if git.dormant_files:
+            lines.append("## Dormant Files (>6 months)")
+            lines.append("")
+            for path_name, last_date in git.dormant_files[:10]:
+                lines.append(f"- {path_name} (last changed: {last_date})")
+            lines.append("")
+
+        # Architectural commits
+        if git.architectural_commits:
+            lines.append("## Architectural Changes")
+            lines.append("")
+            lines.append("| Date | Type | Message | Files |")
+            lines.append("|------|------|---------|-------|")
+            for ac in git.architectural_commits:
+                lines.append(f"| {ac.date} | {ac.commit_type} | {ac.message[:50]} | {ac.files_changed} |")
+            lines.append("")
+
+        # Dependency changes
+        if git.dependency_changes:
+            lines.append("## Dependency History")
+            lines.append("")
+            lines.append("| Date | Action | File | Commit |")
+            lines.append("|------|--------|------|--------|")
+            for dc in git.dependency_changes:
+                lines.append(f"| {dc.date} | {dc.action} | {dc.file} | {dc.message[:40]} |")
+            lines.append("")
+
+        # Feature velocity
+        if git.feature_velocity:
+            lines.append("## Feature Velocity")
+            lines.append("")
+            lines.append("| Month | Features | Fixes | Refactors | Tests | Other |")
+            lines.append("|-------|----------|-------|-----------|-------|-------|")
+            for month, counts in git.feature_velocity.items():
+                feat = counts.get("feat", 0)
+                fix = counts.get("fix", 0)
+                refactor = counts.get("refactor", 0)
+                test = counts.get("test", 0)
+                other = sum(v for k, v in counts.items() if k not in ("feat", "fix", "refactor", "test"))
+                lines.append(f"| {month} | {feat} | {fix} | {refactor} | {test} | {other} |")
+            lines.append("")
+
+        # Work patterns
+        if git.work_patterns:
+            lines.append("## Work Patterns (commits by hour)")
+            lines.append("")
+            for hour, count in git.work_patterns.items():
+                bar = "#" * min(count, 30)
+                lines.append(f"  {hour}:00  {bar} ({count})")
+            lines.append("")
+
         # Timeline
         if git.first_commit_date:
             lines.append("## Timeline")
@@ -228,12 +348,25 @@ class KnowledgeCompiler:
 
         path = self._knowledge / "fact-registry.md"
         path.write_text("\n".join(lines), encoding="utf-8")
-        return len(git.hot_files) + len(event_facts)
+        return len(git.hot_files) + len(event_facts) + len(git.file_ownership) + len(git.risk_scores)
 
-    def _compile_decisions(self, events: list[Event]) -> int:
+    def _compile_decisions(self, events: list[Event], git: GitProfile | None = None) -> int:
         decisions = collect_decisions_from_events(events)
         for d in decisions:
             self._write_decision(d)
+
+        if git and git.architectural_commits:
+            for ac in git.architectural_commits:
+                if ac.commit_type in ("dependency_change", "refactor", "breaking_change", "restructuring"):
+                    self._write_decision(Decision(
+                        title=f"[auto] {ac.commit_type}: {ac.message[:50]}",
+                        context=f"Detected from git commit {ac.sha} ({ac.date}), {ac.files_changed} files changed.",
+                        decision=ac.message,
+                        consequences=f"Type: {ac.commit_type}",
+                        timestamp=ac.date,
+                    ))
+                    decisions = [*decisions, None]  # type: ignore[list-item]
+
         return len(decisions)
 
     def _write_decision(self, d: Decision) -> None:

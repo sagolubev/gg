@@ -352,7 +352,7 @@ def generate_specs(
         full_context = "\n\n".join(context_parts)
         prompt = _build_full_prompt(user_ctx, "", existing_agents_md="")
         try:
-            raw = agent.generate(prompt, cwd=str(root), context=full_context, timeout=120)
+            raw = agent.generate(prompt, cwd=str(root), context=full_context, timeout=180)
             console.print("    Parsing Codex response...")
             sections = _parse_codex_output(raw)
             console.print(f"    Found {len(sections)} sections: {', '.join(sections.keys())}")

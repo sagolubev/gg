@@ -83,7 +83,15 @@ class CodexAgent(AgentBackend):
         full_input = f"{context}\n\n---\n\n{prompt}"
 
         proc = subprocess.Popen(
-            ["codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral", "-o", str(out_path), "-"],
+            [
+                "codex", "exec",
+                "--sandbox", "read-only",
+                "--skip-git-repo-check",
+                "--ephemeral",
+                "--disable", "mcp",
+                "-o", str(out_path),
+                "-",
+            ],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

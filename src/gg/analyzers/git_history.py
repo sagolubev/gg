@@ -152,6 +152,28 @@ CONVENTIONAL_RE = re.compile(
     r"^(feat|fix|refactor|docs|test|chore|perf|ci|style|build|revert)(\(.+?\))?!?:\s"
 )
 
+NOISE_PATTERNS = {
+    "messages.ts", "messages.js", "messages.json", "messages.po",
+    "pnpm-lock.yaml", "package-lock.json", "yarn.lock", "bun.lockb",
+    "poetry.lock", "Pipfile.lock", "Cargo.lock", "Gemfile.lock", "go.sum",
+    "i18n.lock",
+}
+
+NOISE_DIRS = {"locales", "locale", "translations", "i18n", "__pycache__", "node_modules"}
+
+
+def _is_noise_file(path: str) -> bool:
+    parts = Path(path).parts
+    name = Path(path).name
+    if name in NOISE_PATTERNS:
+        return True
+    if any(p in NOISE_DIRS for p in parts):
+        return True
+    if name.endswith(".lock"):
+        return True
+    return False
+
+
 DEP_FILES = {
     "package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
     "requirements.txt", "pyproject.toml", "poetry.lock", "Pipfile", "Pipfile.lock",
@@ -264,7 +286,7 @@ def _extract_hot_files(commits: list, top_n: int = 20) -> list[tuple[str, int]]:
                 diff = c.diff(None)
             for d in diff:
                 path = d.b_path or d.a_path
-                if path:
+                if path and not _is_noise_file(path):
                     file_counts[path] += 1
         except Exception:
             continue
@@ -585,8 +607,10 @@ def _calculate_bus_factor(
 
     for path, entries in file_map.items():
         parts = Path(path).parts
-        module = parts[0] if len(parts) >= 2 else path
-        if module.startswith("."):
+        if len(parts) < 2:
+            continue
+        module = parts[0]
+        if module.startswith(".") or _is_noise_file(path):
             continue
         if module not in module_authors:
             module_authors[module] = set()

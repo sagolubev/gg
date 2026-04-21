@@ -103,11 +103,13 @@ def _extract_description(root: Path) -> str:
                     past_title = True
                     continue
                 if past_title and line.strip():
-                    if line.startswith("#") or line.startswith("```"):
+                    if line.startswith("#") or line.startswith("```") or line.startswith("["):
                         break
-                    desc_lines = [*desc_lines, line.strip()]
-                    if len(desc_lines) >= 2:
-                        break
+                    cleaned = _strip_markdown(line.strip())
+                    if cleaned and len(cleaned) > 10:
+                        desc_lines = [*desc_lines, cleaned]
+                        if len(desc_lines) >= 2:
+                            break
             if desc_lines:
                 return " ".join(desc_lines)[:200]
 
@@ -334,6 +336,17 @@ def scan_imports(project_path: str | Path, max_files: int = 200) -> str:
 
     top = sorted(external_imports.items(), key=lambda x: -x[1])[:20]
     return ", ".join(f"{pkg}({n})" for pkg, n in top)
+
+
+def _strip_markdown(text: str) -> str:
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+    text = re.sub(r"\*(.+?)\*", r"\1", text)
+    text = re.sub(r"`(.+?)`", r"\1", text)
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    text = re.sub(r"!\[[^\]]*\]\([^)]+\)", "", text)
+    text = re.sub(r"[*_~`#>]", "", text)
+    text = re.sub(r"\s{2,}", " ", text)
+    return text.strip()
 
 
 def _is_code_file(fname: str) -> bool:

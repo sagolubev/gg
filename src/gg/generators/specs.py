@@ -232,17 +232,79 @@ def _write_openspec_config(project_path: Path, user_ctx: UserContext) -> None:
 def _generate_local_fallback(
     project_path: Path, analyzer_context: str, user_ctx: UserContext,
 ) -> None:
-    """Generate basic specs without Codex, from local analysis only."""
+    """Generate structured specs and constitution from local analysis."""
     _write_specs(project_path, {}, user_ctx)
 
-    gg_dir = project_path / ".gg"
+    from gg.analyzers.dependencies import analyze_dependencies
+    from gg.analyzers.languages import analyze_languages
+    from gg.analyzers.structure import analyze_structure
+
+    root = project_path
+    langs = analyze_languages(root)
+    deps = analyze_dependencies(root)
+    struct = analyze_structure(root)
+
+    rules: list[str] = ["# Project Constitution", ""]
+
+    rules.append("## Technology Stack")
+    rules.append(f"- Primary language: **{langs.primary_language}**")
+    if langs.frameworks:
+        rules.append(f"- Frameworks: {', '.join(langs.frameworks)}")
+    if deps.package_manager != "unknown":
+        rules.append(f"- Package manager: **{deps.package_manager}**")
+    if langs.styling:
+        rules.append(f"- Styling: {', '.join(langs.styling)}")
+    rules.append("")
+
+    rules.append("## Architecture")
+    if struct.is_monorepo:
+        rules.append("- This is a **monorepo**. Each package has its own dependencies.")
+    rules.append(f"- Top-level directories: {', '.join(f'`{d}/`' for d in struct.top_level_dirs)}")
+    if struct.classifications:
+        for d, role in struct.classifications.items():
+            rules.append(f"  - `{d}/`: {role}")
+    rules.append("- New code should be placed in the appropriate existing directory.")
+    rules.append("- Do not create new top-level directories without explicit approval.")
+    rules.append("")
+
+    if langs.styling:
+        rules.append("## Styling")
+        for s in langs.styling:
+            rules.append(f"- Use **{s}** for styling. Do not introduce alternative CSS approaches.")
+        rules.append("")
+
+    if struct.data_patterns:
+        rules.append("## Data Management")
+        for p in struct.data_patterns:
+            rules.append(f"- {p}")
+        rules.append("")
+
+    rules.append("## Development Practices")
+    existing = deps.existing_tools
+    if "linters" in existing:
+        rules.append(f"- Linters: {', '.join(existing['linters'])}. Run before committing.")
+    if "test_frameworks" in existing:
+        rules.append(f"- Tests: {', '.join(existing['test_frameworks'])}. All changes must pass tests.")
+    if "ci" in existing:
+        rules.append(f"- CI/CD: {', '.join(existing['ci'])}. Do not bypass CI checks.")
+    if "pre_commit" in existing:
+        rules.append("- Pre-commit hooks are configured. Do not skip them.")
+
+    # Commit style from git
+    rules.append("- Follow the existing commit message style of this project.")
+    rules.append("")
+
+    rules.append("## File Conventions")
+    rules.append(f"- Source files: {langs.total_files} {langs.primary_language} files")
+    if deps.runtime_deps:
+        top_deps = list(deps.runtime_deps.keys())[:10]
+        rules.append(f"- Key dependencies: {', '.join(top_deps)}")
+    rules.append("- Do not add new dependencies without justification.")
+    rules.append("")
+
+    gg_dir = root / ".gg"
     gg_dir.mkdir(parents=True, exist_ok=True)
-    (gg_dir / "constitution.md").write_text(
-        f"# Project Constitution\n\n"
-        f"Generated from local analysis (Codex unavailable).\n\n"
-        f"{analyzer_context}\n",
-        encoding="utf-8",
-    )
+    (gg_dir / "constitution.md").write_text("\n".join(rules), encoding="utf-8")
 
 
 def generate_specs(

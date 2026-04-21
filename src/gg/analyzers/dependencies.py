@@ -139,6 +139,9 @@ def _detect_tools(
     root: Path, runtime: dict[str, str], dev: dict[str, str],
 ) -> dict[str, list[str]]:
     all_deps = {**runtime, **dev}
+
+    workspace_deps = _scan_workspace_deps(root)
+    all_deps = {**all_deps, **workspace_deps}
     all_dep_names = {name.lower() for name in all_deps}
 
     tools: dict[str, list[str]] = {}
@@ -174,6 +177,26 @@ def _detect_tools(
         tools = {**tools, "pre_commit": ["pre-commit"]}
 
     return tools
+
+
+def _scan_workspace_deps(root: Path) -> dict[str, str]:
+    """Scan monorepo workspace packages for dependencies."""
+    workspace_deps: dict[str, str] = {}
+    for search_dir in ("packages", "apps", "libs"):
+        pkg_dir = root / search_dir
+        if not pkg_dir.is_dir():
+            continue
+        for child in pkg_dir.iterdir():
+            pkg_json = child / "package.json"
+            if pkg_json.exists():
+                try:
+                    data = json.loads(pkg_json.read_text())
+                    for section in ("dependencies", "devDependencies"):
+                        for name, ver in data.get(section, {}).items():
+                            workspace_deps = {**workspace_deps, name: ver}
+                except (json.JSONDecodeError, OSError):
+                    continue
+    return workspace_deps
 
 
 def analyze_dependencies(project_path: str | Path) -> DependencyReport:

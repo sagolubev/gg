@@ -359,7 +359,7 @@ def generate_specs(
         prompt = _build_full_prompt(user_ctx, "", existing_agents_md="")
         try:
             import tempfile
-            raw = agent.generate(prompt, cwd=tempfile.gettempdir(), context=compact_context, timeout=90)
+            raw = agent.generate(prompt, cwd=tempfile.gettempdir(), context=compact_context, timeout=120)
             console.print("    Parsing Codex response...")
             sections = _parse_codex_output(raw)
             console.print(f"    Found {len(sections)} sections: {', '.join(sections.keys())}")

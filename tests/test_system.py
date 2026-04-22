@@ -1,0 +1,47 @@
+from unittest.mock import patch
+
+from gg.utils.system import (
+    CheckResult,
+    check_codex,
+    check_git,
+    check_glab,
+    check_python_version,
+)
+
+
+def test_check_python_version():
+    result = check_python_version()
+    assert result.ok is True
+    assert result.name == "python"
+    assert result.required is True
+
+
+def test_check_git_found():
+    result = check_git()
+    assert result.name == "git"
+    assert result.required is True
+
+
+@patch("gg.utils.system.shutil.which", return_value=None)
+def test_check_codex_not_found(mock_which):
+    result = check_codex()
+    assert result.ok is False
+    assert result.name == "codex"
+    assert "npm install" in result.install_hint
+
+
+@patch("gg.utils.system.shutil.which", return_value=None)
+def test_check_glab_not_found(mock_which):
+    result = check_glab()
+    assert result.ok is False
+    assert result.name == "glab"
+    assert result.install_hint != ""
+
+
+def test_check_result_frozen():
+    r = CheckResult("test", True, "ok", required=False)
+    try:
+        r.name = "changed"  # type: ignore[misc]
+        assert False, "Should be frozen"
+    except AttributeError:
+        pass

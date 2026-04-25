@@ -77,7 +77,7 @@ class OrchestratorPipeline:
                 if dry_run:
                     return {"run_id": state.run_id, "state": state.state.value, "dry_run": True}
 
-            return self._execute_ready_state(state, issue, brief, no_pr=no_pr)
+                return self._execute_ready_state(state, issue, brief, no_pr=no_pr)
         except RateLimitThrottleError as exc:
             if state is None:
                 return self._throttled_response(exc)
@@ -138,6 +138,8 @@ class OrchestratorPipeline:
                 brief_data = json.loads((self.project_path / brief_path).read_text(encoding="utf-8"))
                 brief = TaskBrief.from_dict(brief_data)
                 issue = self.platform.get_issue(issue_number)
+                if state.artifacts.get("last_input"):
+                    brief = self._refresh_task_analysis(state, issue)
                 if state.state is TaskState.OUTCOME_PUBLISHING:
                     return self._resume_publishing(state, issue, no_pr=no_pr)
                 for candidate in state.candidate_states.values():

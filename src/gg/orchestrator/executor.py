@@ -412,7 +412,20 @@ class CandidateExecutor:
         return output
 
     def _sandbox_policy(self) -> SandboxPolicy:
-        return self.config.runtime.sandbox_policy
+        policy = self.config.runtime.sandbox_policy
+        network = self.config.runtime.network
+        allowed = list(policy.allowed_domains)
+        if network.default == "deny":
+            for host in network.allowed_hosts:
+                if host not in allowed:
+                    allowed.append(host)
+        return SandboxPolicy(
+            allowed_domains=allowed,
+            denied_domains=list(policy.denied_domains),
+            deny_read=list(policy.deny_read),
+            allow_write=list(policy.allow_write),
+            deny_write=list(policy.deny_write),
+        )
 
     def _candidate_env(self, worktree: Path, *, port: int | None = None) -> dict[str, str]:
         cache_root = worktree / ".gg-cache"

@@ -31,10 +31,11 @@ def _inputs_text(inputs: list[dict]) -> str:
 
 
 class ContextSnapshotStore:
-    def __init__(self, project_path: str | Path):
+    def __init__(self, project_path: str | Path, *, hash_artifacts: bool = False):
         self.project_path = Path(project_path).resolve()
         self.objects_dir = self.project_path / ".gg" / "objects"
         self.objects_dir.mkdir(parents=True, exist_ok=True)
+        self.hash_artifacts = hash_artifacts
 
     def write_task_snapshot(self, run_id: str, brief: TaskBrief) -> str:
         run_artifacts = self.project_path / ".gg" / "runs" / run_id / "artifacts"
@@ -85,6 +86,8 @@ class ContextSnapshotStore:
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(snapshot, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         tmp.replace(path)
+        if self.hash_artifacts:
+            _write_snapshot_hash(path)
         return str(path.relative_to(self.project_path))
 
     def read_text(self, sha256: str) -> str:
@@ -152,3 +155,15 @@ def _prior_answer_refs(brief: TaskBrief) -> list[dict]:
         }
         for item in list(brief.issue.get("inputs", []))
     ]
+
+
+def _write_snapshot_hash(path: Path) -> None:
+    payload = {
+        "schema_version": 1,
+        "algorithm": "sha256",
+        "hash": hashlib.sha256(path.read_bytes()).hexdigest(),
+    }
+    tmp = path.with_name(f"{path.name}.sha256.tmp")
+    target = path.with_name(f"{path.name}.sha256")
+    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(target)

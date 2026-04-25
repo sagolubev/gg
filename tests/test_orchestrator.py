@@ -2158,6 +2158,32 @@ def test_mark_interrupted_terminates_known_candidate_processes(monkeypatch, tmp_
     interrupted = pipeline.store.load(ready["run_id"])
     assert killed == [43210, 54321]
     assert interrupted.candidate_states["candidate-1"].status == "failed"
+
+
+def test_signal_handler_marks_active_run_interrupted(monkeypatch, tmp_path):
+    init_repo(tmp_path)
+    handlers = {}
+
+    def fake_signal(signum, handler):
+        handlers[signum] = handler
+
+    monkeypatch.setattr("gg.orchestrator.pipeline.signal.signal", fake_signal)
+    pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
+    ready = create_ready_run(pipeline)
+    state = pipeline.store.load(ready["run_id"])
+    state.transition(TaskState.AGENT_SELECTION, reason="test select")
+    state.transition(TaskState.AGENT_RUNNING, reason="test running")
+    state.candidate_states["candidate-1"] = CandidateState(status="running")
+    pipeline.store.write(state)
+    pipeline._active_run_id = ready["run_id"]
+
+    pipeline._install_signal_handlers()
+    handlers[signal.SIGTERM](signal.SIGTERM, None)
+
+    interrupted = pipeline.store.load(ready["run_id"])
+    assert pipeline._shutdown_requested is True
+    assert interrupted.state is TaskState.READY_FOR_EXECUTION
+    assert interrupted.candidate_states["candidate-1"].error == "interrupted by signal"
     assert interrupted.last_error["code"] == "interrupted"
 
 
@@ -3199,6 +3225,10 @@ def test_cli_doctor_fails_when_params_contain_obvious_secret(tmp_path):
 
 def test_clean_dry_run_lists_only_terminal_runs(tmp_path):
     init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        "verify:\n  tests: ''\ncleanup:\n  keep_last: 0\n  ttl_days: null\n",
+        encoding="utf-8",
+    )
     pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
     completed = pipeline.run_issue(42, no_pr=True)
     ready = create_ready_run(pipeline)
@@ -3206,6 +3236,8 @@ def test_clean_dry_run_lists_only_terminal_runs(tmp_path):
     result = pipeline.clean(dry_run=True)
 
     assert result["runs"] == [completed["run_id"]]
+    assert result["cleanup_policy"]["keep_last"] == 0
+    assert result["reclaimed_bytes"] > 0
     assert ready["run_id"] not in result["runs"]
     assert (tmp_path / ".gg" / "runs" / completed["run_id"]).exists()
 
@@ -3232,6 +3264,10 @@ def test_clean_lists_and_removes_stale_waiting_runs(tmp_path):
 
 def test_clean_execute_removes_terminal_run_and_worktree(tmp_path):
     init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        "verify:\n  tests: ''\ncleanup:\n  keep_last: 0\n  ttl_days: null\n",
+        encoding="utf-8",
+    )
     pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
     completed = pipeline.run_issue(42, no_pr=True)
     state = pipeline.store.load(completed["run_id"])
@@ -3256,6 +3292,10 @@ def test_clean_execute_removes_terminal_run_and_worktree(tmp_path):
 
 def test_clean_removes_orphan_worktrees(tmp_path):
     init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        "verify:\n  tests: ''\ncleanup:\n  keep_last: 0\n  ttl_days: null\n",
+        encoding="utf-8",
+    )
     orphan = tmp_path.parent / ".gg-worktrees" / tmp_path.name / "orphan-run" / "candidate-1"
     orphan.mkdir(parents=True)
     (orphan / "scratch.txt").write_text("orphan\n", encoding="utf-8")
@@ -3264,6 +3304,28 @@ def test_clean_removes_orphan_worktrees(tmp_path):
 
     assert str(orphan.resolve()) in result["orphan_worktrees"]
     assert not orphan.exists()
+
+
+def test_clean_respects_keep_last_and_ttl_policy(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        "verify:\n  tests: ''\ncleanup:\n  keep_last: 1\n  ttl_days: 14\n",
+        encoding="utf-8",
+    )
+    pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
+    first = pipeline.run_issue(42, no_pr=True)
+    first_path = tmp_path / ".gg" / "runs" / first["run_id"] / "state.json"
+    first_data = json.loads(first_path.read_text(encoding="utf-8"))
+    first_data["updated_at"] = "2000-01-01T00:00:00Z"
+    first_path.write_text(json.dumps(first_data, indent=2) + "\n", encoding="utf-8")
+    second = pipeline.store.create(Issue(number=43, title="Done", body="", labels=["ai-ready"]))
+    second.recover_to(TaskState.COMPLETED, reason="test completion")
+    pipeline.store.write(second)
+
+    result = pipeline.clean(dry_run=True)
+
+    assert result["runs"] == [first["run_id"]]
+    assert second.run_id not in result["runs"]
 
 
 def test_cancel_non_terminal_run(tmp_path):
@@ -4371,6 +4433,38 @@ agent:
     assert sandbox.commands[0][:5] == ["python", "-m", "codex_cli", "exec", "-o"]
 
 
+def test_candidate_executor_merges_runtime_network_policy_into_sandbox(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        """verify:
+  tests: ''
+runtime:
+  network:
+    default: deny
+    allowed_hosts:
+      - pypi.org
+  sandbox_policy:
+    allowed_domains:
+      - registry.npmjs.org
+""",
+        encoding="utf-8",
+    )
+    sandbox = FakeSandbox()
+    executor = CandidateExecutor(tmp_path, CodexAgent(), load_config(tmp_path), sandbox=sandbox)
+    from gg.orchestrator.task_analysis import TaskBrief
+    brief = TaskBrief(
+        schema_version=1,
+        issue={"number": 42, "title": "Add greeting", "body": "", "labels": ["ai-ready"], "url": ""},
+        summary="Do it",
+        acceptance_criteria=["Add file"],
+    )
+
+    result = executor.run(run_id="run-network-policy", issue_number=42, brief=brief)
+
+    assert result.status == "success"
+    assert sandbox.policies[0].allowed_domains == ["registry.npmjs.org", "pypi.org"]
+
+
 def test_candidate_setup_failure_is_persisted_without_running_agent(tmp_path):
     init_repo(tmp_path)
     (tmp_path / ".gg" / "params.yaml").write_text(
@@ -4556,8 +4650,10 @@ def test_artifact_hashing_detects_tampered_persisted_bytes(tmp_path):
     result = pipeline.run_issue(42, no_pr=True)
     state = pipeline.store.load(result["run_id"])
     outcome_path = tmp_path / state.artifacts["run_outcome"]
+    snapshot_path = tmp_path / state.artifacts["context_snapshot"]
 
     assert outcome_path.with_name(f"{outcome_path.name}.sha256").exists()
+    assert snapshot_path.with_name(f"{snapshot_path.name}.sha256").exists()
 
     outcome_path.write_text('{"schema_version": 1, "tampered": true}\n', encoding="utf-8")
     try:
@@ -4566,6 +4662,36 @@ def test_artifact_hashing_detects_tampered_persisted_bytes(tmp_path):
         assert "artifact_checksum_failed" in str(exc)
     else:
         raise AssertionError("tampered artifact should fail checksum verification")
+
+
+def test_projected_cost_budget_enforces_available_metrics(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        "verify:\n  tests: ''\ncost:\n  max_tokens_per_run: 10\n  max_usd_per_run: 1.0\n",
+        encoding="utf-8",
+    )
+    pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
+    state = pipeline.store.create(Issue(number=42, title="Budget", body="", labels=["ai-ready"]))
+    pipeline.store.append_cost(
+        state.run_id,
+        {
+            "event": "candidate_metrics",
+            "total_usd": 0.25,
+            "token_usage": {"total_tokens": 8},
+        },
+    )
+
+    token_error = pipeline._projected_budget_error(
+        state.run_id,
+        {"total_usd": None, "token_usage": {"total_tokens": 3}},
+    )
+    usd_error = pipeline._projected_budget_error(
+        state.run_id,
+        {"total_usd": 0.9, "token_usage": None},
+    )
+
+    assert "token usage 11 exceeds limit 10" in token_error
+    assert "USD cost 1.1500 exceeds limit 1.0000" in usd_error
 
 
 def test_security_policy_can_block_dependency_file_changes(tmp_path):

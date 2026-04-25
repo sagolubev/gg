@@ -89,10 +89,13 @@ class OrchestratorPipeline:
         self._shutdown_requested = False
         self._port_allocations: dict[str, int] = {}
         self._explicit_base_ref: str | None = None
+        self._active_run_id: str | None = None
 
     def _install_signal_handlers(self) -> None:
         def _handler(signum, frame):
             self._shutdown_requested = True
+            if self._active_run_id:
+                self._mark_interrupted_by_id(self._active_run_id)
         try:
             signal.signal(signal.SIGINT, _handler)
             signal.signal(signal.SIGTERM, _handler)
@@ -155,6 +158,7 @@ class OrchestratorPipeline:
                         }
                 issue = self.platform.get_issue(issue_number)
                 state = self.store.create(issue, dry_run=dry_run)
+                self._active_run_id = state.run_id
                 state.max_attempts = self.config.runtime.max_attempts
                 self.knowledge.record_issue_picked(issue_number=issue.number, title=issue.title, labels=issue.labels)
                 state.transition(TaskState.CLAIMING, reason="issue selected")
@@ -213,6 +217,8 @@ class OrchestratorPipeline:
                 return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
             except Exception:
                 raise
+        finally:
+            self._active_run_id = None
 
     def _dirty_workspace_preflight(self, state) -> str | None:
         changes = git_workspace_changes(self.project_path)
@@ -273,7 +279,10 @@ class OrchestratorPipeline:
                 brief = analyzer.analyze(issue, inputs=[])
                 self._write_task_analysis_artifacts(shadow_store, state, issue, brief)
                 self._write_analysis_agent_response_artifact(shadow_store, state, analyzer)
-                snapshot_path = ContextSnapshotStore(shadow_root).write_task_snapshot(state.run_id, brief)
+                snapshot_path = ContextSnapshotStore(
+                    shadow_root,
+                    hash_artifacts=self.config.audit.hash_artifacts,
+                ).write_task_snapshot(state.run_id, brief)
                 state.artifacts["context_snapshot"] = snapshot_path
                 if brief.blocked:
                     state.transition(TaskState.BLOCKED, reason="dry-run task analysis missing information")
@@ -488,7 +497,12 @@ class OrchestratorPipeline:
 
     def clean(self, *, dry_run: bool = True, run_id: str | None = None) -> dict[str, Any]:
         with self.locks.queue():
-            target_runs = self.store.clean_terminal_runs(dry_run=True, run_id=run_id)
+            target_runs = self.store.clean_terminal_runs(
+                dry_run=True,
+                run_id=run_id,
+                keep_last=self.config.cleanup.keep_last,
+                ttl_days=self.config.cleanup.ttl_days,
+            )
             stale_runs = self.store.clean_stale_waiting_runs(
                 blocked_timeout_days=self.config.cleanup.blocked_timeout_days,
                 dry_run=True,
@@ -503,7 +517,12 @@ class OrchestratorPipeline:
                 stale_targets = stale_runs
                 orphans = self.store.clean_orphan_worktrees(dry_run=True)
             else:
-                targets = self.store.clean_terminal_runs(dry_run=False, run_id=run_id)
+                targets = self.store.clean_terminal_runs(
+                    dry_run=False,
+                    run_id=run_id,
+                    keep_last=self.config.cleanup.keep_last,
+                    ttl_days=self.config.cleanup.ttl_days,
+                )
                 stale_targets = self.store.clean_stale_waiting_runs(
                     blocked_timeout_days=self.config.cleanup.blocked_timeout_days,
                     dry_run=False,
@@ -517,6 +536,16 @@ class OrchestratorPipeline:
             "orphan_worktrees": orphans,
             "cas_objects": cas_objects,
             "count": len(targets) + len(stale_targets),
+            "cleanup_policy": {
+                "keep_last": self.config.cleanup.keep_last,
+                "ttl_days": self.config.cleanup.ttl_days,
+                "blocked_timeout_days": self.config.cleanup.blocked_timeout_days,
+            },
+            "reclaimed_bytes": self.store.estimate_reclaimed_bytes(
+                [*targets, *stale_targets],
+                orphans,
+                cas_objects,
+            ),
         }
 
     def _mark_running_candidates_failed(self, state, *, reason: str) -> None:
@@ -1193,28 +1222,32 @@ class OrchestratorPipeline:
             f"{candidate_dir}/candidate-result.json",
             {**candidate_data, "patch": ""},
         )
-        self.store.append_cost(
-            state.run_id,
-            {
-                "event": "candidate_metrics",
-                "at": _now_placeholder(),
-                "run_id": state.run_id,
-                "candidate_id": candidate.candidate_id,
-                "attempt": state.attempt,
-                "strategy": strategy,
-                "status": effective_status,
-                "error": error,
-                "duration_seconds": candidate.duration_seconds,
-                "verification_duration_seconds": round(time.monotonic() - verification_started, 3),
-                "verification_passed": verification_passed,
-                "verification_mutated_worktree": verification_mutated_worktree,
-                "verification_failed_commands": _failed_commands(verification),
-                "changed_files": final_files,
-                "changed_files_count": len(final_files),
-                "total_usd": None,
-                "token_usage": None,
-            },
-        )
+        cost_payload = {
+            "event": "candidate_metrics",
+            "at": _now_placeholder(),
+            "run_id": state.run_id,
+            "candidate_id": candidate.candidate_id,
+            "attempt": state.attempt,
+            "strategy": strategy,
+            "status": effective_status,
+            "error": error,
+            "duration_seconds": candidate.duration_seconds,
+            "verification_duration_seconds": round(time.monotonic() - verification_started, 3),
+            "verification_passed": verification_passed,
+            "verification_mutated_worktree": verification_mutated_worktree,
+            "verification_failed_commands": _failed_commands(verification),
+            "changed_files": final_files,
+            "changed_files_count": len(final_files),
+            "total_usd": None,
+            "token_usage": None,
+        }
+        budget_error = self._projected_budget_error(state.run_id, cost_payload)
+        if budget_error:
+            effective_status = "failed"
+            error = budget_error
+            cost_payload["status"] = effective_status
+            cost_payload["error"] = error
+        self.store.append_cost(state.run_id, cost_payload)
         return {
             "index": index,
             "candidate": candidate,
@@ -1229,6 +1262,30 @@ class OrchestratorPipeline:
             "error": error,
             "final_files": final_files,
         }
+
+    def _projected_budget_error(self, run_id: str, event: dict[str, Any]) -> str | None:
+        cost = self.store.aggregate_cost(run_id)
+        max_usd = self.config.cost.max_usd_per_run
+        event_usd = event.get("total_usd")
+        if max_usd is not None and isinstance(event_usd, (int, float)):
+            current = cost.get("total_usd") if isinstance(cost.get("total_usd"), (int, float)) else 0.0
+            if current + float(event_usd) > max_usd:
+                return f"budget_exceeded: projected USD cost {current + float(event_usd):.4f} exceeds limit {max_usd:.4f}"
+        max_tokens = self.config.cost.max_tokens_per_run
+        token_usage = event.get("token_usage")
+        if max_tokens is not None and isinstance(token_usage, dict):
+            event_tokens = (
+                token_usage.get("total_tokens")
+                or (token_usage.get("input_tokens") or 0) + (token_usage.get("output_tokens") or 0)
+            )
+            if isinstance(event_tokens, int):
+                current_tokens = cost.get("total_tokens") if isinstance(cost.get("total_tokens"), int) else 0
+                if current_tokens + event_tokens > max_tokens:
+                    return (
+                        f"budget_exceeded: projected token usage {current_tokens + event_tokens} "
+                        f"exceeds limit {max_tokens}"
+                    )
+        return None
 
     def _run_baseline_verification(self, state) -> list[CheckResult]:
         if state.artifacts.get("baseline_verification"):
@@ -1918,8 +1975,11 @@ class OrchestratorPipeline:
             state.last_error = latest.last_error or state.last_error
 
     def _mark_interrupted(self, state) -> None:
+        self._mark_interrupted_by_id(state.run_id)
+
+    def _mark_interrupted_by_id(self, run_id: str) -> None:
         try:
-            latest = self.store.load(state.run_id)
+            latest = self.store.load(run_id)
         except FileNotFoundError:
             return
         self._terminate_running_candidate_processes(latest)
@@ -2235,7 +2295,10 @@ class OrchestratorPipeline:
         brief = analyzer.analyze(issue, inputs=self._load_inputs(state.run_id))
         self._write_task_analysis_artifacts(self.store, state, issue, brief)
         self._write_analysis_agent_response_artifact(self.store, state, analyzer)
-        snapshot_path = ContextSnapshotStore(self.project_path).write_task_snapshot(state.run_id, brief)
+        snapshot_path = ContextSnapshotStore(
+            self.project_path,
+            hash_artifacts=self.config.audit.hash_artifacts,
+        ).write_task_snapshot(state.run_id, brief)
         state.artifacts["context_snapshot"] = snapshot_path
         return brief
 

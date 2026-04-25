@@ -179,17 +179,53 @@ class RunStore:
         except Exception as exc:
             raise ValueError(validation_error_message(str(path), exc)) from exc
 
-    def clean_terminal_runs(self, *, dry_run: bool = True, run_id: str | None = None) -> list[str]:
-        target_runs = [
-            run for run in self.list_runs()
-            if run.state in TERMINAL_STATES and (run_id is None or run.run_id == run_id)
-        ]
+    def clean_terminal_runs(
+        self,
+        *,
+        dry_run: bool = True,
+        run_id: str | None = None,
+        keep_last: int = 0,
+        ttl_days: int | None = None,
+    ) -> list[str]:
+        target_runs = self._terminal_clean_targets(
+            run_id=run_id,
+            keep_last=keep_last,
+            ttl_days=ttl_days,
+        )
         targets = [run.run_id for run in target_runs]
         if not dry_run:
             for run in target_runs:
                 self._archive_run(run)
                 self._remove_worktrees(run)
                 shutil.rmtree(self.path_for(run.run_id), ignore_errors=True)
+        return targets
+
+    def _terminal_clean_targets(
+        self,
+        *,
+        run_id: str | None,
+        keep_last: int,
+        ttl_days: int | None,
+    ) -> list[RunState]:
+        terminal_runs = [
+            run
+            for run in self.list_runs()
+            if run.state in TERMINAL_STATES and (run_id is None or run.run_id == run_id)
+        ]
+        if run_id is not None:
+            return terminal_runs
+        retained = {
+            run.run_id
+            for run in sorted(terminal_runs, key=lambda item: item.updated_at, reverse=True)[:max(0, keep_last)]
+        }
+        cutoff = datetime.now(timezone.utc) - timedelta(days=ttl_days) if ttl_days is not None else None
+        targets = []
+        for run in terminal_runs:
+            if run.run_id in retained:
+                continue
+            if cutoff is not None and _parse_utc(run.updated_at) > cutoff:
+                continue
+            targets.append(run)
         return targets
 
     def clean_stale_waiting_runs(
@@ -319,6 +355,19 @@ class RunStore:
         ArchiveSummaryModel.model_validate(summary)
         _atomic_write_text(archive_path, json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
 
+    def estimate_reclaimed_bytes(
+        self,
+        run_ids: list[str],
+        orphan_worktrees: list[str],
+        cas_objects: list[str],
+    ) -> int:
+        total = 0
+        for run_id in run_ids:
+            total += _path_size_bytes(self.path_for(run_id), timeout_seconds=5)
+        for raw_path in [*orphan_worktrees, *cas_objects]:
+            total += _path_size_bytes(Path(raw_path), timeout_seconds=5)
+        return total
+
     def _read_outcome(self, run: RunState) -> dict[str, Any] | None:
         outcome_path = run.artifacts.get("run_outcome")
         if not outcome_path:
@@ -400,6 +449,9 @@ class RunStore:
 
     def append_cost(self, run_id: str, payload: dict) -> None:
         append_jsonl(self.path_for(run_id) / "cost.jsonl", payload)
+
+    def aggregate_cost(self, run_id: str) -> dict[str, Any]:
+        return self._aggregate_cost(run_id)
 
     def _aggregate_cost(self, run_id: str) -> dict[str, Any]:
         cost_path = self.path_for(run_id) / "cost.jsonl"
@@ -802,6 +854,36 @@ def _verify_artifact_hash(path: Path) -> None:
     actual = hashlib.sha256(path.read_bytes()).hexdigest()
     if expected and expected != actual:
         raise ValueError(f"artifact_checksum_failed: {path}")
+
+
+def _path_size_bytes(path: Path, *, timeout_seconds: float) -> int:
+    if not path.exists():
+        return 0
+    if path.is_file():
+        try:
+            return path.stat().st_size
+        except OSError:
+            return 0
+    deadline = datetime.now(timezone.utc).timestamp() + timeout_seconds
+    total = 0
+    pending = [path]
+    while pending:
+        if datetime.now(timezone.utc).timestamp() > deadline:
+            return total
+        current = pending.pop()
+        try:
+            entries = list(os.scandir(current))
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(Path(entry.path))
+                elif entry.is_file(follow_symlinks=False):
+                    total += entry.stat(follow_symlinks=False).st_size
+            except OSError:
+                continue
+    return total
 
 
 def _atomic_write_bytes(path: Path, data: bytes) -> None:

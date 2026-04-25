@@ -169,7 +169,7 @@ class SecurityConfigModel(StrictArtifactModel):
 class CleanupConfigModel(StrictArtifactModel):
     blocked_timeout_days: int | None = Field(default=14, ge=0)
     keep_last: int = Field(default=20, ge=0)
-    ttl_days: int = Field(default=14, ge=0)
+    ttl_days: int | None = Field(default=14, ge=0)
 
 
 class LogConfigModel(StrictArtifactModel):

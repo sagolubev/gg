@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
@@ -18,10 +19,18 @@ def _slug(value: str) -> str:
 
 
 class RunStore:
-    def __init__(self, project_path: str | Path):
+    def __init__(
+        self,
+        project_path: str | Path,
+        *,
+        audit_hash_events: bool = False,
+        audit_sink_path: str | Path | None = None,
+    ):
         self.project_path = Path(project_path).resolve()
         self.runs_dir = self.project_path / ".gg" / "runs"
         self.runs_dir.mkdir(parents=True, exist_ok=True)
+        self.audit_hash_events = audit_hash_events
+        self.audit_sink_path = self._resolve_audit_sink(audit_sink_path)
 
     def create(self, issue: Issue, *, dry_run: bool = False) -> RunState:
         stamp = utc_now().replace("-", "").replace(":", "").replace("T", "-").rstrip("Z")
@@ -189,7 +198,11 @@ class RunStore:
         append_jsonl(self.path_for(run_id) / "cost.jsonl", payload)
 
     def append_event(self, run_id: str, payload: dict) -> None:
-        append_jsonl(self.path_for(run_id) / "pipeline.jsonl", payload)
+        log_path = self.path_for(run_id) / "pipeline.jsonl"
+        event = self._audit_payload(log_path, payload) if self.audit_hash_events else payload
+        append_jsonl(log_path, event)
+        if self.audit_sink_path is not None:
+            append_jsonl(self.audit_sink_path, event)
 
     def append_error(self, run_id: str, payload: dict) -> None:
         append_jsonl(self.path_for(run_id) / "errors.jsonl", payload)
@@ -337,3 +350,44 @@ class RunStore:
         tmp = summary_path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(mask_secrets(payload), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         tmp.replace(summary_path)
+
+    def _resolve_audit_sink(self, audit_sink_path: str | Path | None) -> Path | None:
+        if not audit_sink_path:
+            return None
+        path = Path(audit_sink_path)
+        if not path.is_absolute():
+            path = self.project_path / path
+        return path
+
+    def _audit_payload(self, log_path: Path, payload: dict) -> dict:
+        sanitized = mask_secrets(payload)
+        previous_hash = self._last_audit_hash(log_path)
+        digest = hashlib.sha256(
+            (
+                previous_hash
+                + "\n"
+                + json.dumps(sanitized, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            ).encode("utf-8"),
+        ).hexdigest()
+        return {
+            **sanitized,
+            "audit": {
+                "schema_version": 1,
+                "hash": digest,
+                "previous_hash": previous_hash,
+                "algorithm": "sha256",
+            },
+        }
+
+    def _last_audit_hash(self, log_path: Path) -> str:
+        if not log_path.exists():
+            return ""
+        try:
+            for line in reversed(log_path.read_text(encoding="utf-8").splitlines()):
+                if not line.strip():
+                    continue
+                audit = json.loads(line).get("audit", {})
+                return str(audit.get("hash", ""))
+        except (OSError, json.JSONDecodeError):
+            return ""
+        return ""

@@ -40,6 +40,6 @@
 ## P3 Production
 
 - [x] Add plugin interfaces for task systems and executor backends.
-- [ ] Add audit signing / external audit sink options.
+- [x] Add audit hashing / external audit sink options.
 - [ ] Add advanced LFS, supply-chain, and compliance policies.
 - [ ] Add daemon/parallel batch mode with shared resource budgets.

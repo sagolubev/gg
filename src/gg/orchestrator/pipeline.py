@@ -38,7 +38,11 @@ class OrchestratorPipeline:
         root = find_repo_root(project_path) or Path(project_path).resolve()
         self.project_path = Path(root).resolve()
         self.config: GGConfig = load_config(self.project_path)
-        self.store = RunStore(self.project_path)
+        self.store = RunStore(
+            self.project_path,
+            audit_hash_events=self.config.audit.hash_events,
+            audit_sink_path=self.config.audit.external_sink or None,
+        )
         self.locks = LockManager(self.project_path)
         self.platform = platform or create_platform(self.config.task_system.platform, self.project_path)
         self.agent = agent or create_agent_backend(self.config.runtime.agent_backend)

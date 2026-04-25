@@ -57,12 +57,19 @@ class GitConfig:
 
 
 @dataclass(frozen=True)
+class AuditConfig:
+    hash_events: bool = False
+    external_sink: str = ""
+
+
+@dataclass(frozen=True)
 class GGConfig:
     git: GitConfig
     task_system: TaskSystemConfig = field(default_factory=TaskSystemConfig)
     selection: SelectionConfig = field(default_factory=SelectionConfig)
     verify: VerifyConfig = field(default_factory=VerifyConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
+    audit: AuditConfig = field(default_factory=AuditConfig)
 
 
 def _mapping(value: Any) -> dict[str, Any]:
@@ -87,6 +94,7 @@ def load_config(project_path: str | Path) -> GGConfig:
     selection = _mapping(raw.get("selection"))
     verify = _mapping(raw.get("verify"))
     runtime = _mapping(raw.get("runtime"))
+    audit = _mapping(raw.get("audit"))
     sandbox_policy = _mapping(runtime.get("sandbox_policy"))
     default_branch = project.get("default_branch") or git.get("default_branch") or get_main_branch(root)
     return GGConfig(
@@ -128,6 +136,10 @@ def load_config(project_path: str | Path) -> GGConfig:
                 allow_write=_string_list(sandbox_policy.get("allow_write"), default=["."]),
                 deny_write=_string_list(sandbox_policy.get("deny_write"), default=[".env"]),
             ),
+        ),
+        audit=AuditConfig(
+            hash_events=bool(audit.get("hash_events", False)),
+            external_sink=str(audit.get("external_sink", "")),
         ),
     )
 

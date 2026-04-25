@@ -444,6 +444,10 @@ def _write_params(project_path: Path, console: Console) -> None:
                 "deny_write": [".env"],
             },
         },
+        "audit": {
+            "hash_events": False,
+            "external_sink": "",
+        },
         "git": {
             "author_name": "gg-orchestrator",
             "author_email": "gg-orchestrator@users.noreply.local",

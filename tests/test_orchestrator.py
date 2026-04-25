@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import threading
@@ -989,6 +990,8 @@ def test_init_params_generation(tmp_path):
     assert config.runtime.agent_backend == "codex"
     assert config.runtime.candidates == 1
     assert config.runtime.sandbox_policy.deny_read == ["~/.ssh", ".env"]
+    assert config.audit.hash_events is False
+    assert config.audit.external_sink == ""
     assert config.verify.tests == "pytest"
 
 
@@ -1242,6 +1245,41 @@ def test_observability_artifacts_mask_secrets(tmp_path):
     assert "***" in cost
     assert "***" in errors
     assert "***" in summary
+
+
+def test_audit_hashes_pipeline_events_and_mirrors_sink(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        """verify:
+  tests: ''
+audit:
+  hash_events: true
+  external_sink: .gg/audit-events.jsonl
+""",
+        encoding="utf-8",
+    )
+    pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
+
+    ready = pipeline.run_issue(42, dry_run=True)
+
+    run_dir = tmp_path / ".gg" / "runs" / ready["run_id"]
+    events = read_jsonl(run_dir / "pipeline.jsonl")
+    mirrored = read_jsonl(tmp_path / ".gg" / "audit-events.jsonl")
+
+    assert mirrored == events
+    previous_hash = ""
+    for event in events:
+        audit = event.pop("audit")
+        expected = hashlib.sha256(
+            (
+                previous_hash
+                + "\n"
+                + json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            ).encode("utf-8"),
+        ).hexdigest()
+        assert audit["previous_hash"] == previous_hash
+        assert audit["hash"] == expected
+        previous_hash = audit["hash"]
 
 
 def test_file_lock_times_out_for_second_holder(tmp_path):

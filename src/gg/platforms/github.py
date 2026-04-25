@@ -70,7 +70,7 @@ class GitHubPlatform(GitPlatform):
             "issue", "view", str(number),
             "--comments",
             "--json", "number,title,body,labels,assignees,state,url,comments",
-        ])
+        ], bucket=self._bucket("issues:read"))
         i = json.loads(raw)
         return Issue(
             number=i["number"],

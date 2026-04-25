@@ -364,6 +364,7 @@ class OrchestratorPipeline:
                 candidate_records.append(record)
                 if selected is None and effective_status == "success":
                     selected = record
+                self._merge_cancel_request(state)
                 self.store.write(state)
 
             cancelled = self._cancelled_response(state)
@@ -709,6 +710,15 @@ class OrchestratorPipeline:
             self.store.write(latest)
             return {"run_id": state.run_id, "state": latest.state.value, "cancelled": True}
         return None
+
+    def _merge_cancel_request(self, state) -> None:
+        try:
+            latest = self.store.load(state.run_id)
+        except FileNotFoundError:
+            return
+        if latest.cancel_requested and not state.cancel_requested:
+            state.cancel_requested = True
+            state.last_error = latest.last_error or state.last_error
 
     def _mark_interrupted(self, state) -> None:
         try:

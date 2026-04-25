@@ -20,7 +20,9 @@ from gg.orchestrator.pipeline import OrchestratorPipeline
 from gg.orchestrator.rate_limit import RateLimitStore
 from gg.orchestrator.sandbox import SandboxPolicy, SandboxRunResult, SandboxRuntime
 from gg.orchestrator.state import CandidateState, InvalidTransitionError, RunState, TaskState
+from gg.orchestrator.store import RunStore
 from gg.platforms.base import GitPlatform, Issue, IssueComment
+from gg.platforms.github import GitHubPlatform
 from gg.platforms.gitlab import GitLabPlatform
 
 
@@ -617,7 +619,10 @@ def test_task_analysis_includes_issue_comments_and_local_inputs(tmp_path):
 
     ready = pipeline.run_issue(42, dry_run=True)
     state = pipeline.store.load(ready["run_id"])
-    pipeline.provide(ready["run_id"], message="Use Spanish")
+    state.recover_to(TaskState.BLOCKED, reason="test input before task analysis refresh")
+    pipeline.store.write(state)
+    provided = pipeline.provide(ready["run_id"], message="Use Spanish")
+    assert provided["accepted"] is True
     refreshed = pipeline.resume(ready["run_id"], no_pr=True)
 
     assert refreshed["state"] == "Completed"
@@ -774,7 +779,8 @@ def test_pipeline_transitions_to_needs_input_and_resume_uses_provided_input(tmp_
 
 def test_provide_accepts_blocked_run_input(tmp_path):
     init_repo(tmp_path)
-    pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
+    platform = FakePlatform()
+    pipeline = OrchestratorPipeline(tmp_path, platform=platform, agent=FakeAgent())
     ready = pipeline.run_issue(42, dry_run=True)
     state = pipeline.store.load(ready["run_id"])
     state.recover_to(TaskState.BLOCKED, reason="test blocked")
@@ -803,7 +809,7 @@ def test_provide_rejects_non_blocked_run(tmp_path):
 
 def test_github_platform_get_issue_parses_comments():
     platform = GitHubPlatform(".")
-    platform._run = lambda args: json.dumps(  # type: ignore[method-assign]
+    platform._run = lambda args, **kwargs: json.dumps(  # type: ignore[method-assign]
         {
             "number": 7,
             "title": "Add comments",
@@ -831,7 +837,7 @@ def test_github_platform_get_issue_parses_comments():
 
 def test_gitlab_platform_get_issue_parses_comments():
     platform = GitLabPlatform(".")
-    platform._run = lambda args: json.dumps(  # type: ignore[method-assign]
+    platform._run = lambda args, **kwargs: json.dumps(  # type: ignore[method-assign]
         {
             "iid": 7,
             "title": "Add comments",
@@ -1126,11 +1132,11 @@ def test_file_lock_times_out_for_second_holder(tmp_path):
 def test_gitlab_find_pr_does_not_use_unsupported_state_flag(monkeypatch, tmp_path):
     seen: list[str] = []
 
-    def fake_run(args, **kwargs):
+    def fake_platform_run(self, args, **kwargs):
         seen.extend(args)
-        return subprocess.CompletedProcess(args, 0, stdout="[]", stderr="")
+        return "[]"
 
-    monkeypatch.setattr("gg.platforms.gitlab.subprocess.run", fake_run)
+    monkeypatch.setattr(GitLabPlatform, "_run", fake_platform_run)
 
     result = GitLabPlatform(str(tmp_path)).find_pr(head="gg/test")
 

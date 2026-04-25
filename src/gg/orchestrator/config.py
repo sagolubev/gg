@@ -6,6 +6,7 @@ from typing import Any
 
 import yaml
 
+from gg.orchestrator.sandbox import SandboxPolicy
 from gg.utils.git_ops import get_main_branch
 
 
@@ -32,6 +33,7 @@ class RuntimeConfig:
     require_sandbox_runtime: bool = False
     candidate_timeout_seconds: int = 1800
     command_timeout_seconds: int = 600
+    sandbox_policy: SandboxPolicy = field(default_factory=SandboxPolicy)
 
 
 @dataclass(frozen=True)
@@ -65,6 +67,12 @@ def _mapping(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _string_list(value: Any, *, default: list[str]) -> list[str]:
+    if not isinstance(value, list):
+        return list(default)
+    return [str(item) for item in value]
+
+
 def load_config(project_path: str | Path) -> GGConfig:
     root = Path(project_path).resolve()
     params_path = root / ".gg" / "params.yaml"
@@ -77,6 +85,7 @@ def load_config(project_path: str | Path) -> GGConfig:
     selection = _mapping(raw.get("selection"))
     verify = _mapping(raw.get("verify"))
     runtime = _mapping(raw.get("runtime"))
+    sandbox_policy = _mapping(runtime.get("sandbox_policy"))
     default_branch = project.get("default_branch") or git.get("default_branch") or get_main_branch(root)
     return GGConfig(
         git=GitConfig(
@@ -108,6 +117,13 @@ def load_config(project_path: str | Path) -> GGConfig:
             require_sandbox_runtime=bool(runtime.get("require_sandbox_runtime", False)),
             candidate_timeout_seconds=int(runtime.get("candidate_timeout_seconds", 1800)),
             command_timeout_seconds=int(runtime.get("command_timeout_seconds", 600)),
+            sandbox_policy=SandboxPolicy(
+                allowed_domains=_string_list(sandbox_policy.get("allowed_domains"), default=[]),
+                denied_domains=_string_list(sandbox_policy.get("denied_domains"), default=[]),
+                deny_read=_string_list(sandbox_policy.get("deny_read"), default=["~/.ssh", ".env"]),
+                allow_write=_string_list(sandbox_policy.get("allow_write"), default=["."]),
+                deny_write=_string_list(sandbox_policy.get("deny_write"), default=[".env"]),
+            ),
         ),
     )
 

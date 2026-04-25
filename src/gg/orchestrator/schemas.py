@@ -763,12 +763,14 @@ class PublishingIntegrationModel(CompatibleArtifactModel):
 
 class PatchConflictModel(CompatibleArtifactModel):
     schema_version: Literal[1] = 1
+    code: str = "patch_conflict"
     candidate_id: str
     patch_path: str
     integration_branch: str
     worktree_path: str
     message: str
     changed_files: list[str] = Field(default_factory=list)
+    lfs_unavailable: bool = False
     created_at: str
 
     @field_validator("created_at")

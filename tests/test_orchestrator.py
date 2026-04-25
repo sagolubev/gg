@@ -21,6 +21,7 @@ from gg.orchestrator.config import load_config
 from gg.orchestrator.context import ContextSnapshotStore
 from gg.orchestrator.evaluation import CandidateEvaluator
 from gg.orchestrator.executor import CandidateExecutor
+from gg.orchestrator import git as git_module
 from gg.orchestrator.git import commit_all
 from gg.orchestrator.lock import FileLock, LockManager
 from gg.orchestrator.pipeline import OrchestratorPipeline, _verification_passed
@@ -1904,6 +1905,76 @@ def test_publish_records_patch_conflict_before_pr(monkeypatch, tmp_path):
     assert result["state"] == "TerminalFailure"
     assert result["error"]["code"] == "patch_conflict"
     assert "patch" in conflict["message"].lower()
+    assert platform.prs == []
+
+
+def test_git_apply_patch_uses_index_check(monkeypatch, tmp_path):
+    calls: list[list[str]] = []
+
+    def fake_run(args, **_kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(git_module.subprocess, "run", fake_run)
+
+    applied, _message = git_module.apply_patch(tmp_path, "diff --git a/a.txt b/a.txt\n")
+
+    assert applied is True
+    assert calls[0][:4] == ["git", "apply", "--3way", "--index"]
+
+
+def test_publish_fails_before_apply_when_lfs_patch_requires_missing_lfs(monkeypatch, tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gitattributes").write_text("*.bin filter=lfs diff=lfs merge=lfs -text\n", encoding="utf-8")
+    commit_repo(tmp_path, "add lfs attributes")
+    monkeypatch.setattr("gg.orchestrator.pipeline.push_branch", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("gg.orchestrator.pipeline.git_lfs_available", lambda _worktree: False)
+
+    def fail_apply(*_args, **_kwargs):
+        raise AssertionError("patch apply should not run without git lfs")
+
+    monkeypatch.setattr("gg.orchestrator.pipeline.git_apply_patch", fail_apply)
+    platform = FakePlatform()
+    pipeline = OrchestratorPipeline(tmp_path, platform=platform, agent=FakeAgent())
+    ready = create_ready_run(pipeline)
+    state = pipeline.store.load(ready["run_id"])
+    state.recover_to(TaskState.OUTCOME_PUBLISHING, reason="test lfs preflight")
+    state.publishing_step = "started"
+    pipeline.store.write(state)
+    patch_path = pipeline.store.write_text(
+        state.run_id,
+        "candidates/candidate-1/patch.diff",
+        "diff --git a/asset.bin b/asset.bin\n"
+        "new file mode 100644\n"
+        "index 0000000..e69de29\n"
+        "--- /dev/null\n"
+        "+++ b/asset.bin\n"
+        "@@ -0,0 +1 @@\n"
+        "+lfs pointer candidate\n",
+    )
+
+    result = pipeline._publish_winner(
+        state,
+        platform.issue,
+        {
+            "candidate_id": "candidate-1",
+            "worktree_path": str(tmp_path),
+            "branch": "gg/source",
+            "base_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True).strip(),
+            "patch_path": patch_path,
+            "summary": "done",
+            "verification_path": "verify.json",
+        },
+        no_pr=False,
+    )
+
+    failed = pipeline.store.load(ready["run_id"])
+    conflict = json.loads((tmp_path / failed.artifacts["patch_conflict"]).read_text(encoding="utf-8"))
+    assert result["state"] == "TerminalFailure"
+    assert result["error"]["code"] == "patch_conflict"
+    assert conflict["code"] == "lfs_unavailable"
+    assert conflict["lfs_unavailable"] is True
+    assert conflict["changed_files"] == ["asset.bin"]
     assert platform.prs == []
 
 

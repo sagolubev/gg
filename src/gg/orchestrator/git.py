@@ -116,6 +116,34 @@ def lfs_changed_files(cwd: str | Path, files: list[str]) -> list[str]:
     return lfs_paths
 
 
+def lfs_available(cwd: str | Path) -> bool:
+    completed = subprocess.run(
+        ["git", "lfs", "version"],
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return completed.returncode == 0
+
+
+def patch_changed_files(patch_text: str) -> list[str]:
+    files: list[str] = []
+    seen: set[str] = set()
+    for line in patch_text.splitlines():
+        if not line.startswith("diff --git a/"):
+            continue
+        left_right = line.removeprefix("diff --git a/")
+        if " b/" not in left_right:
+            continue
+        _left, right = left_right.split(" b/", 1)
+        path = right.strip().strip('"')
+        if path and path != "/dev/null" and path not in seen:
+            seen.add(path)
+            files.append(path)
+    return files
+
+
 def binary_changed_files(cwd: str | Path, files: list[str]) -> list[str]:
     root = Path(cwd)
     binary_files: list[str] = []
@@ -206,7 +234,7 @@ def apply_patch(cwd: str | Path, patch_text: str) -> tuple[bool, str]:
         patch_path = handle.name
     try:
         completed = subprocess.run(
-            ["git", "apply", "--3way", patch_path],
+            ["git", "apply", "--3way", "--index", patch_path],
             cwd=str(cwd),
             capture_output=True,
             text=True,
@@ -214,7 +242,7 @@ def apply_patch(cwd: str | Path, patch_text: str) -> tuple[bool, str]:
         )
         if completed.returncode == 0:
             return True, completed.stderr.strip() or completed.stdout.strip()
-        return False, completed.stderr.strip() or completed.stdout.strip() or "git apply --3way failed"
+        return False, completed.stderr.strip() or completed.stdout.strip() or "git apply --3way --index failed"
     finally:
         Path(patch_path).unlink(missing_ok=True)
 

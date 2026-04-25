@@ -29,7 +29,9 @@ from gg.orchestrator.git import apply_patch as git_apply_patch
 from gg.orchestrator.git import fetch_default_branch as git_fetch_default_branch
 from gg.orchestrator.git import commit_exists as git_commit_exists
 from gg.orchestrator.git import is_ancestor as git_is_ancestor
+from gg.orchestrator.git import lfs_available as git_lfs_available
 from gg.orchestrator.git import lfs_changed_files as git_lfs_changed_files
+from gg.orchestrator.git import patch_changed_files as git_patch_changed_files
 from gg.orchestrator.git import remove_worktree as git_remove_worktree
 from gg.orchestrator.git import reset_worktree as git_reset_worktree
 from gg.orchestrator.git import resolve_ref as git_resolve_ref
@@ -1430,6 +1432,21 @@ class OrchestratorPipeline:
             state.artifacts["publishing_integration"] = integration_artifact
             self.store.write(state)
         if state.publishing_step != "patch_applied":
+            lfs_paths = self._lfs_paths_requiring_git_lfs(worktree, patch_text)
+            if lfs_paths and not git_lfs_available(worktree):
+                message = "git lfs is required to apply LFS file changes"
+                self._write_patch_conflict(
+                    state,
+                    winner,
+                    patch_path=patch_path,
+                    integration_branch=integration_branch,
+                    worktree_path=str(worktree),
+                    message=message,
+                    code="lfs_unavailable",
+                    changed_files=lfs_paths,
+                    lfs_unavailable=True,
+                )
+                return {"error": message, "code": "lfs_unavailable"}
             applied, message = git_apply_patch(worktree, patch_text)
             if not applied:
                 self._write_patch_conflict(
@@ -1481,6 +1498,15 @@ class OrchestratorPipeline:
             "branch": integration_branch,
             "verification_path": verification_path,
         }
+
+    def _lfs_paths_requiring_git_lfs(self, worktree: Path, patch_text: str) -> list[str]:
+        patch_files = git_patch_changed_files(patch_text)
+        if not patch_files:
+            return []
+        try:
+            return git_lfs_changed_files(worktree, patch_files)
+        except RuntimeError:
+            return []
 
     def _publishing_target(self, state, winner: dict[str, Any]) -> dict[str, Any]:
         if state.publishing_step not in {"committed", "branch_pushed", "pr_created", "result_commented"}:
@@ -1540,18 +1566,29 @@ class OrchestratorPipeline:
         integration_branch: str,
         worktree_path: str,
         message: str,
+        code: str = "patch_conflict",
+        changed_files: list[str] | None = None,
+        lfs_unavailable: bool = False,
     ) -> None:
         state.artifacts["patch_conflict"] = self.store.write_json(
             state.run_id,
             "artifacts/patch-conflict.json",
             {
                 "schema_version": 1,
+                "code": code,
                 "candidate_id": winner["candidate_id"],
                 "patch_path": patch_path,
                 "integration_branch": integration_branch,
                 "worktree_path": worktree_path,
                 "message": message,
-                "changed_files": git_changed_files(worktree_path) if worktree_path else [],
+                "changed_files": (
+                    changed_files
+                    if changed_files is not None
+                    else git_changed_files(worktree_path)
+                    if worktree_path
+                    else []
+                ),
+                "lfs_unavailable": lfs_unavailable,
                 "created_at": _now_placeholder(),
             },
         )

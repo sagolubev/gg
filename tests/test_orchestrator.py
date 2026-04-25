@@ -1258,6 +1258,20 @@ def test_publish_honors_cancel_request_after_branch_push(tmp_path):
     state = pipeline.store.load(ready["run_id"])
     state.recover_to(TaskState.OUTCOME_PUBLISHING, reason="test interrupted publish")
     state.publishing_step = "branch_pushed"
+    state.artifacts["publishing_integration"] = pipeline.store.write_json(
+        state.run_id,
+        "artifacts/publishing-integration.json",
+        {
+            "schema_version": 1,
+            "candidate_id": "candidate-1",
+            "source_branch": "gg/source",
+            "integration_branch": "gg/test",
+            "worktree_path": str(tmp_path),
+            "base_ref": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True).strip(),
+            "patch_path": "patch.diff",
+            "created_at": state.updated_at,
+        },
+    )
     pipeline.store.write(state)
     platform.pipeline = pipeline
     platform.run_id = ready["run_id"]
@@ -1291,6 +1305,20 @@ def test_publish_skips_duplicate_result_comment_when_marker_exists(tmp_path):
     state.recover_to(TaskState.OUTCOME_PUBLISHING, reason="test idempotent publish")
     state.publishing_step = "pr_created"
     state.pr_url = "https://github.com/example/repo/pull/5"
+    state.artifacts["publishing_integration"] = pipeline.store.write_json(
+        state.run_id,
+        "artifacts/publishing-integration.json",
+        {
+            "schema_version": 1,
+            "candidate_id": "candidate-1",
+            "source_branch": "gg/source",
+            "integration_branch": "gg/test",
+            "worktree_path": str(tmp_path),
+            "base_ref": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True).strip(),
+            "patch_path": "patch.diff",
+            "created_at": state.updated_at,
+        },
+    )
     pipeline.store.write(state)
     platform.issue.comments.append(
         IssueComment(
@@ -1440,6 +1468,81 @@ index 0000000..186cf24
     assert not worktree.exists()
 
 
+def test_resume_publish_resets_unverified_dirty_integration_worktree(monkeypatch, tmp_path):
+    init_repo(tmp_path)
+    monkeypatch.setattr("gg.orchestrator.pipeline.push_branch", lambda *_args, **_kwargs: None)
+    platform = FakePlatform()
+    pipeline = OrchestratorPipeline(tmp_path, platform=platform, agent=FakeAgent())
+    ready = pipeline.run_issue(42, dry_run=True)
+    state = pipeline.store.load(ready["run_id"])
+    base_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True).strip()
+    patch_path = pipeline.store.write_text(
+        state.run_id,
+        "candidates/candidate-1/patch.diff",
+        """diff --git a/resumed.txt b/resumed.txt
+new file mode 100644
+index 0000000..186cf24
+--- /dev/null
++++ b/resumed.txt
+@@ -0,0 +1 @@
++resumed
+""",
+    )
+    worktree = tmp_path.parent / ".gg-worktrees" / tmp_path.name / state.run_id / "integration"
+    subprocess.run(
+        ["git", "worktree", "add", "-b", "gg/reset-integration", str(worktree), base_commit],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    (worktree / "evil.txt").write_text("unverified dirty state\n", encoding="utf-8")
+    state.recover_to(TaskState.OUTCOME_PUBLISHING, reason="test dirty integration")
+    state.publishing_step = "integration_created"
+    state.artifacts["publishing_integration"] = pipeline.store.write_json(
+        state.run_id,
+        "artifacts/publishing-integration.json",
+        {
+            "schema_version": 1,
+            "candidate_id": "candidate-1",
+            "source_branch": "gg/source",
+            "integration_branch": "gg/reset-integration",
+            "worktree_path": str(worktree),
+            "base_ref": base_commit,
+            "patch_path": patch_path,
+            "created_at": state.updated_at,
+        },
+    )
+    pipeline.store.write(state)
+
+    result = pipeline._publish_winner(
+        state,
+        platform.issue,
+        {
+            "candidate_id": "candidate-1",
+            "worktree_path": str(tmp_path),
+            "branch": "gg/source",
+            "base_commit": base_commit,
+            "patch_path": patch_path,
+            "summary": "done",
+            "verification_path": "verify.json",
+        },
+        no_pr=False,
+    )
+
+    assert result["state"] == "Completed"
+    assert "resumed" in subprocess.check_output(
+        ["git", "show", "gg/reset-integration:resumed.txt"],
+        cwd=tmp_path,
+        text=True,
+    )
+    assert subprocess.run(
+        ["git", "cat-file", "-e", "gg/reset-integration:evil.txt"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    ).returncode != 0
+
+
 def test_publish_fails_when_default_branch_sync_fails(monkeypatch, tmp_path):
     init_repo(tmp_path)
     monkeypatch.setattr(
@@ -1508,6 +1611,40 @@ def test_resume_publishing_rejects_invalid_evaluation_artifact(tmp_path):
         assert "artifacts/evaluation.json.winner" in str(exc)
     else:
         raise AssertionError("invalid evaluation artifact should fail schema validation on resume")
+
+
+def test_resume_publishing_fails_closed_on_invalid_integration_artifact(monkeypatch, tmp_path):
+    init_repo(tmp_path)
+    monkeypatch.setattr("gg.orchestrator.pipeline.push_branch", lambda *_args, **_kwargs: None)
+    platform = FakePlatform()
+    pipeline = OrchestratorPipeline(tmp_path, platform=platform, agent=FakeAgent())
+    ready = pipeline.run_issue(42, dry_run=True)
+    state = pipeline.store.load(ready["run_id"])
+    state.recover_to(TaskState.OUTCOME_PUBLISHING, reason="test invalid integration")
+    state.publishing_step = "branch_pushed"
+    state.pr_url = None
+    artifact_path = tmp_path / ".gg" / "runs" / state.run_id / "artifacts" / "publishing-integration.json"
+    artifact_path.write_text('{"schema_version": 1, "candidate_id": 7}\n', encoding="utf-8")
+    state.artifacts["publishing_integration"] = str(artifact_path.relative_to(tmp_path))
+    pipeline.store.write(state)
+
+    result = pipeline._publish_winner(
+        state,
+        platform.issue,
+        {
+            "candidate_id": "candidate-1",
+            "worktree_path": str(tmp_path),
+            "branch": "gg/source",
+            "base_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True).strip(),
+            "summary": "done",
+            "verification_path": "verify.json",
+        },
+        no_pr=False,
+    )
+
+    assert result["state"] == "TerminalFailure"
+    assert result["error"]["code"] == "invalid_publishing_integration"
+    assert platform.prs == []
 
 
 def test_stage_comment_uses_run_marker_for_idempotency(tmp_path):

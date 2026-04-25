@@ -219,6 +219,11 @@ def apply_patch(cwd: str | Path, patch_text: str) -> tuple[bool, str]:
         Path(patch_path).unlink(missing_ok=True)
 
 
+def reset_worktree(cwd: str | Path) -> None:
+    run_git(["reset", "--hard"], cwd)
+    run_git(["clean", "-fd"], cwd)
+
+
 def remove_worktree(repo_path: str | Path, path: str | Path) -> None:
     worktree = Path(path)
     if not worktree.exists():

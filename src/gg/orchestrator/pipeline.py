@@ -24,6 +24,7 @@ from gg.orchestrator.git import commit_exists as git_commit_exists
 from gg.orchestrator.git import is_ancestor as git_is_ancestor
 from gg.orchestrator.git import lfs_changed_files as git_lfs_changed_files
 from gg.orchestrator.git import remove_worktree as git_remove_worktree
+from gg.orchestrator.git import reset_worktree as git_reset_worktree
 from gg.orchestrator.git import resolve_ref as git_resolve_ref
 from gg.orchestrator.git import safe_branch_slug, WorktreeManager
 from gg.orchestrator.lock import LockManager
@@ -856,7 +857,19 @@ class OrchestratorPipeline:
                 state.publishing_step = "committed"
                 self.store.write(state)
             else:
-                winner = self._publishing_target(state, winner)
+                try:
+                    winner = self._publishing_target(state, winner)
+                except ValueError as exc:
+                    state.fail(code="invalid_publishing_integration", message=str(exc))
+                    self.store.write(state)
+                    return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
+                if not winner.get("integration_ready"):
+                    state.fail(
+                        code="missing_publishing_integration",
+                        message="cannot resume publishing side effects without a verified integration artifact",
+                    )
+                    self.store.write(state)
+                    return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
             cancelled = self._cancelled_response(state)
             if cancelled:
                 return cancelled
@@ -1010,7 +1023,13 @@ class OrchestratorPipeline:
                 message="selected candidate patch is empty",
             )
             return {"error": "selected candidate patch is empty"}
-        integration = self._integration_artifact(state)
+        try:
+            integration = self._integration_artifact(
+                state,
+                required=bool(state.artifacts.get("publishing_integration")),
+            )
+        except ValueError as exc:
+            return {"error": str(exc)}
         if (
             integration
             and state.publishing_step in {"integration_created", "patch_applied"}
@@ -1020,6 +1039,9 @@ class OrchestratorPipeline:
             worktree = Path(integration["worktree_path"])
             base_ref = integration["base_ref"]
             patch_path = integration.get("patch_path", patch_path)
+            git_reset_worktree(worktree)
+            state.publishing_step = "integration_created"
+            self.store.write(state)
         else:
             issue_number = int(state.issue.get("number", 0))
             run_hash = hashlib.sha256(state.run_id.encode("utf-8")).hexdigest()[:8]
@@ -1048,9 +1070,6 @@ class OrchestratorPipeline:
                 },
             )
             state.artifacts["publishing_integration"] = integration_artifact
-            self.store.write(state)
-        if state.publishing_step == "integration_created" and git_changed_files(worktree):
-            state.publishing_step = "patch_applied"
             self.store.write(state)
         if state.publishing_step != "patch_applied":
             applied, message = git_apply_patch(worktree, patch_text)
@@ -1096,9 +1115,7 @@ class OrchestratorPipeline:
     def _publishing_target(self, state, winner: dict[str, Any]) -> dict[str, Any]:
         if state.publishing_step not in {"verified", "committed", "branch_pushed", "pr_created", "result_commented"}:
             return winner
-        data = self._integration_artifact(state)
-        if data is None:
-            return winner
+        data = self._integration_artifact(state, required=True)
         verification_path = state.artifacts.get("integration_verification", winner.get("verification_path", ""))
         return {
             **winner,
@@ -1108,13 +1125,21 @@ class OrchestratorPipeline:
             "verification_path": verification_path,
         }
 
-    def _integration_artifact(self, state) -> dict[str, Any] | None:
+    def _integration_artifact(self, state, *, required: bool = False) -> dict[str, Any] | None:
         artifact_path = state.artifacts.get("publishing_integration")
         if not artifact_path:
+            if required:
+                raise ValueError("missing publishing integration artifact")
             return None
         try:
             return self.store.read_json(artifact_path)
-        except (OSError, ValueError):
+        except OSError as exc:
+            if required:
+                raise ValueError(f"{artifact_path}: {exc}") from exc
+            return None
+        except ValueError:
+            if required:
+                raise
             return None
 
     def _load_baseline_verification(self, state) -> list[CheckResult]:

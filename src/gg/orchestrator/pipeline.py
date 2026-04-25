@@ -12,6 +12,7 @@ from gg.agents.base import AgentBackend
 from gg.knowledge.engine import KnowledgeEngine
 from gg.orchestrator.config import GGConfig, load_config
 from gg.orchestrator.context import ContextSnapshotStore
+from gg.orchestrator.evaluation import CandidateEvaluator
 from gg.orchestrator.executor import CandidateExecutor
 from gg.orchestrator.git import binary_changed_files as git_binary_changed_files
 from gg.orchestrator.git import changed_files as git_changed_files
@@ -326,6 +327,7 @@ class OrchestratorPipeline:
         self.store.write(state)
 
         executor = CandidateExecutor(self.project_path, self.agent, self.config)
+        evaluator = CandidateEvaluator()
         candidate_records: list[dict[str, Any]] = []
         selected: dict[str, Any] | None = None
 
@@ -378,8 +380,6 @@ class OrchestratorPipeline:
                     output="\n".join(check.stderr or check.stdout for check in record["verification"])[:500],
                 )
                 candidate_records.append(record)
-                if selected is None and effective_status == "success":
-                    selected = record
                 self._merge_cancel_request(state)
                 self.store.write(state)
 
@@ -387,7 +387,13 @@ class OrchestratorPipeline:
             if cancelled:
                 return cancelled
             state.transition(TaskState.RESULT_EVALUATION, reason="candidate set quiescent")
-            evaluation_path = self._write_evaluation(state, selected, candidate_records)
+            evaluation = evaluator.evaluate(
+                candidate_records,
+                attempt=state.attempt,
+                max_attempts=state.max_attempts,
+            )
+            selected = evaluation.winner
+            evaluation_path = self._write_evaluation(state, evaluation.artifact)
             state.artifacts["evaluation"] = evaluation_path
             self.store.write(state)
             needs_input = next(
@@ -913,33 +919,8 @@ class OrchestratorPipeline:
             f"Verification artifact: `{verification_path}`\n"
         )
 
-    def _write_evaluation(
-        self,
-        state,
-        selected: dict[str, Any] | None,
-        candidate_records: list[dict[str, Any]],
-    ) -> str:
-        return self.store.write_json(
-            state.run_id,
-            "artifacts/evaluation.json",
-            {
-                "schema_version": 1,
-                "attempt": state.attempt,
-                "max_attempts": state.max_attempts,
-                "winner": selected["candidate"].candidate_id if selected else None,
-                "candidates": [
-                    {
-                        "candidate_id": item["candidate"].candidate_id,
-                        "attempt": item["attempt"],
-                        "strategy": item["strategy"],
-                        "status": item["effective_status"],
-                        "verification_passed": item["verification_passed"],
-                        "result_path": item["result_path"],
-                    }
-                    for item in candidate_records
-                ],
-            },
-        )
+    def _write_evaluation(self, state, artifact: dict[str, Any]) -> str:
+        return self.store.write_json(state.run_id, "artifacts/evaluation.json", artifact)
 
     def _refresh_task_analysis(self, state, issue: Issue) -> TaskBrief:
         brief = TaskAnalyzer(str(self.project_path)).analyze(issue, inputs=self._load_inputs(state.run_id))

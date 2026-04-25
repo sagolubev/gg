@@ -15,6 +15,7 @@ from gg.cli import cli
 from gg.commands.init import _write_params
 from gg.orchestrator.config import load_config
 from gg.orchestrator.context import ContextSnapshotStore
+from gg.orchestrator.evaluation import CandidateEvaluator
 from gg.orchestrator.executor import CandidateExecutor
 from gg.orchestrator.lock import FileLock
 from gg.orchestrator.pipeline import OrchestratorPipeline
@@ -196,6 +197,31 @@ class SecondCandidateAgent(AgentBackend):
         if self.calls == 2:
             Path(cwd, "winner.txt").write_text("winner\n", encoding="utf-8")
         return f"Candidate call {self.calls}"
+
+    def is_available(self) -> bool:
+        return True
+
+
+class CompactSecondCandidateAgent(AgentBackend):
+    def __init__(self):
+        self.calls = 0
+
+    def generate(
+        self,
+        prompt: str,
+        *,
+        cwd: str | None = None,
+        timeout: int | None = None,
+        context: str | None = None,
+    ) -> str:
+        self.calls += 1
+        assert cwd is not None
+        if self.calls == 1:
+            Path(cwd, "one.txt").write_text("one\n", encoding="utf-8")
+            Path(cwd, "two.txt").write_text("two\n", encoding="utf-8")
+            return "Created two files."
+        Path(cwd, "winner.txt").write_text("winner\n", encoding="utf-8")
+        return "Created one file."
 
     def is_available(self) -> bool:
         return True
@@ -688,6 +714,65 @@ def test_pipeline_fanout_selects_first_passing_candidate(tmp_path):
     run_dir = runs[0].parent
     assert (run_dir / "candidates" / "candidate-1" / "candidate-result.json").exists()
     assert (run_dir / "candidates" / "candidate-2" / "candidate-result.json").exists()
+
+
+def test_pipeline_evaluator_can_choose_later_more_focused_candidate(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        "verify:\n  tests: ''\nruntime:\n  candidates: 2\n",
+        encoding="utf-8",
+    )
+
+    result = OrchestratorPipeline(
+        tmp_path,
+        platform=FakePlatform(),
+        agent=CompactSecondCandidateAgent(),
+    ).run_issue(42, no_pr=True)
+
+    assert result["state"] == "Completed"
+    assert result["winner"] == "candidate-2"
+    run_dir = next((tmp_path / ".gg" / "runs").glob("*"))
+    evaluation = json.loads((run_dir / "artifacts" / "evaluation.json").read_text(encoding="utf-8"))
+    assert evaluation["winner"] == "candidate-2"
+    assert evaluation["candidates"][1]["score"] > evaluation["candidates"][0]["score"]
+
+
+def test_candidate_evaluator_rejects_policy_violations_even_when_successful():
+    class Candidate:
+        def __init__(self, candidate_id: str):
+            self.candidate_id = candidate_id
+
+    decision = CandidateEvaluator().evaluate(
+        [
+            {
+                "index": 1,
+                "candidate": Candidate("candidate-1"),
+                "effective_status": "success",
+                "verification_passed": True,
+                "verification_mutated_worktree": False,
+                "policy_violations": [{"code": "dependency_changes_blocked", "message": "blocked"}],
+                "final_files": ["package.json"],
+                "verification": [],
+                "result_path": "candidate-1/result.json",
+            },
+            {
+                "index": 2,
+                "candidate": Candidate("candidate-2"),
+                "effective_status": "success",
+                "verification_passed": True,
+                "verification_mutated_worktree": False,
+                "policy_violations": [],
+                "final_files": ["app.py", "tests/test_app.py"],
+                "verification": [],
+                "result_path": "candidate-2/result.json",
+            },
+        ],
+        attempt=1,
+        max_attempts=1,
+    )
+
+    assert decision.artifact["winner"] == "candidate-2"
+    assert decision.winner["candidate"].candidate_id == "candidate-2"
 
 
 def test_pipeline_uses_parallel_fanout_when_enabled(tmp_path):

@@ -1,24 +1,21 @@
 from __future__ import annotations
 
 import json
-import subprocess
 
 from gg.platforms.base import GitPlatform, Issue
 
 
 class GitLabPlatform(GitPlatform):
-    def __init__(self, cwd: str = "."):
-        self._cwd = cwd
+    def __init__(self, cwd: str = ".", *, rate_limit_store=None):
+        super().__init__(cwd, rate_limit_store=rate_limit_store)
 
-    def _run(self, args: list[str]) -> str:
-        result = subprocess.run(
-            ["glab", *args],
-            capture_output=True, text=True, timeout=30,
-            cwd=self._cwd,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"glab {' '.join(args)} failed: {result.stderr.strip()}")
-        return result.stdout.strip()
+    def _run(self, args: list[str], *, bucket: str) -> str:
+        return self._run_command(args, bucket=bucket)
+
+    def _command_env(self) -> dict[str, str]:
+        env = super()._command_env()
+        env.setdefault("GLAB_DEBUG_HTTP", "true")
+        return env
 
     def list_issues(self, state: str = "opened", limit: int = 30) -> list[Issue]:
         raw = self._run([
@@ -26,7 +23,7 @@ class GitLabPlatform(GitPlatform):
             "--state", state,
             "--per-page", str(limit),
             "--output", "json",
-        ])
+        ], bucket=self._bucket("issues:read"))
         items = json.loads(raw) if raw else []
         return [
             Issue(
@@ -42,7 +39,7 @@ class GitLabPlatform(GitPlatform):
         ]
 
     def get_issue(self, number: int) -> Issue:
-        raw = self._run(["issue", "view", str(number), "--output", "json"])
+        raw = self._run(["issue", "view", str(number), "--output", "json"], bucket=self._bucket("issues:read"))
         i = json.loads(raw)
         return Issue(
             number=i.get("iid", number),
@@ -62,7 +59,7 @@ class GitLabPlatform(GitPlatform):
             "--source-branch", head,
             "--target-branch", base,
             "--yes",
-        ])
+        ], bucket=self._bucket("merge-requests:write"))
         return raw
 
     def find_pr(self, *, head: str) -> str | None:
@@ -70,20 +67,23 @@ class GitLabPlatform(GitPlatform):
             "mr", "list",
             "--source-branch", head,
             "--output", "json",
-        ])
+        ], bucket=self._bucket("merge-requests:read"))
         items = json.loads(raw) if raw else []
         return items[0].get("web_url") if items else None
 
     def add_comment(self, issue_number: int, body: str) -> None:
-        self._run(["issue", "note", str(issue_number), "--message", body])
+        self._run(["issue", "note", str(issue_number), "--message", body], bucket=self._bucket("issues:comment"))
 
     def add_labels(self, issue_number: int, labels: list[str]) -> None:
         for label in labels:
-            self._run(["issue", "update", str(issue_number), "--label", label])
+            self._run(["issue", "update", str(issue_number), "--label", label], bucket=self._bucket("issues:labels"))
 
     def remove_labels(self, issue_number: int, labels: list[str]) -> None:
         for label in labels:
-            self._run(["issue", "update", str(issue_number), "--unlabel", label])
+            self._run(
+                ["issue", "update", str(issue_number), "--unlabel", label],
+                bucket=self._bucket("issues:labels"),
+            )
 
     def cli_name(self) -> str:
         return "glab"

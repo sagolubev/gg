@@ -12,3 +12,7 @@ class AgentBackend(ABC):
     @abstractmethod
     def is_available(self) -> bool:
         """Check if this agent backend is ready to use."""
+
+    def context_window_tokens(self) -> int | None:
+        """Return the backend's hard context limit when it is known."""
+        return None

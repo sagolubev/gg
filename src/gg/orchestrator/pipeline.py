@@ -203,10 +203,13 @@ class OrchestratorPipeline:
                 state.transition(TaskState.RUN_STARTED, reason="dry-run start pipeline")
                 state.transition(TaskState.TASK_ANALYSIS, reason="dry-run create task brief")
                 shadow_store.write(state)
+                analysis_agent = self._task_analysis_agent()
                 analyzer = TaskAnalyzer(
                     str(self.project_path),
-                    agent=self._task_analysis_agent(),
+                    agent=analysis_agent,
                     timeout=self.config.runtime.analysis_timeout_seconds,
+                    max_context_tokens=self.config.evaluation.max_context_tokens,
+                    model_context_tokens=_agent_context_window_tokens(analysis_agent),
                 )
                 brief = analyzer.analyze(issue, inputs=[])
                 self._write_task_analysis_artifacts(shadow_store, state, issue, brief)
@@ -1791,10 +1794,13 @@ class OrchestratorPipeline:
         state.artifacts["analysis_agent_response"] = path
 
     def _refresh_task_analysis(self, state, issue: Issue) -> TaskBrief:
+        analysis_agent = self._task_analysis_agent()
         analyzer = TaskAnalyzer(
             str(self.project_path),
-            agent=self._task_analysis_agent(),
+            agent=analysis_agent,
             timeout=self.config.runtime.analysis_timeout_seconds,
+            max_context_tokens=self.config.evaluation.max_context_tokens,
+            model_context_tokens=_agent_context_window_tokens(analysis_agent),
         )
         brief = analyzer.analyze(issue, inputs=self._load_inputs(state.run_id))
         self._write_task_analysis_artifacts(self.store, state, issue, brief)
@@ -1945,6 +1951,15 @@ def _default_verification_parser(category: str, command: str) -> str:
             parsers.insert(0, "bandit")
         return ",".join(parsers)
     return ""
+
+
+def _agent_context_window_tokens(agent: AgentBackend | None) -> int | None:
+    if agent is None:
+        return None
+    value = getattr(agent, "context_window_tokens", None)
+    if callable(value):
+        value = value()
+    return value if isinstance(value, int) and value > 0 else None
 
 
 def _verification_passed(checks, baseline, *, allow_known_baseline_failures: bool) -> bool:

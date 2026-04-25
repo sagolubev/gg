@@ -19,6 +19,7 @@ MAX_COMMENT_BODY_CHARS = 2000
 MAX_INPUTS = 10
 MAX_INPUT_MESSAGE_CHARS = 2000
 MAX_AGENT_RESPONSE_CHARS = 12000
+CHARS_PER_CONTEXT_TOKEN = 4
 
 
 def _serialize_comments(comments: list[IssueComment]) -> list[dict[str, str]]:
@@ -120,10 +121,20 @@ class TaskBrief:
 
 
 class TaskAnalyzer:
-    def __init__(self, project_path: str, *, agent: AgentBackend | None = None, timeout: int = 600):
+    def __init__(
+        self,
+        project_path: str,
+        *,
+        agent: AgentBackend | None = None,
+        timeout: int = 600,
+        max_context_tokens: int = 60000,
+        model_context_tokens: int | None = None,
+    ):
         self.project_path = project_path
         self.agent = agent
         self.timeout = timeout
+        self.max_context_tokens = max(1, max_context_tokens)
+        self.model_context_tokens = model_context_tokens if model_context_tokens and model_context_tokens > 0 else None
         self.last_agent_response: str = ""
         self.last_agent_error: str = ""
         self.last_agent_response_truncated = False
@@ -152,7 +163,9 @@ class TaskAnalyzer:
             "comments": serialized_comments,
             "inputs": serialized_inputs,
         }
-        analysis = self._try_agent_analysis(issue_payload, context)
+        context_budget = self._context_budget(context)
+        project_context = context[: int(context_budget["project_context_chars"])]
+        analysis = self._try_agent_analysis(issue_payload, project_context)
         if analysis is not None:
             return TaskBrief(
                 schema_version=1,
@@ -160,13 +173,13 @@ class TaskAnalyzer:
                 summary=analysis.summary or issue.title,
                 acceptance_criteria=analysis.acceptance_criteria
                 or ["Clarify the missing task details." if not analysis.ready else "Implement the requested issue behavior."],
-                project_context=context[:MAX_PROJECT_CONTEXT_CHARS],
+                project_context=project_context,
                 blocked=not analysis.ready,
                 missing_questions=list(analysis.missing_questions),
                 candidate_files=list(analysis.candidate_files),
                 risk_flags=list(analysis.risk_flags),
                 verification_hints=list(analysis.verification_hints),
-                context_budget=dict(analysis.context_budget),
+                context_budget={**context_budget, **dict(analysis.context_budget)},
             )
         summary = combined_issue_text[:MAX_SUMMARY_CHARS] if combined_issue_text else issue.title
         return TaskBrief(
@@ -178,7 +191,8 @@ class TaskAnalyzer:
                 "Keep the change focused and consistent with the existing codebase.",
                 "Run configured verification commands and report the result.",
             ],
-            project_context=context[:MAX_PROJECT_CONTEXT_CHARS],
+            project_context=project_context,
+            context_budget=context_budget,
         )
 
     def _try_agent_analysis(self, issue_payload: dict[str, Any], context: str) -> AnalysisResultModel | None:
@@ -202,6 +216,26 @@ class TaskAnalyzer:
         except Exception as exc:
             self.last_agent_error = str(exc)
             return None
+
+    def _context_budget(self, context: str) -> dict[str, Any]:
+        effective_tokens = self.max_context_tokens
+        if self.model_context_tokens is not None:
+            effective_tokens = min(effective_tokens, self.model_context_tokens)
+        project_context_chars = min(MAX_PROJECT_CONTEXT_CHARS, effective_tokens * CHARS_PER_CONTEXT_TOKEN)
+        estimated_tokens = _estimate_tokens(context[:project_context_chars])
+        return {
+            "max_context_tokens": self.max_context_tokens,
+            "model_context_tokens": self.model_context_tokens,
+            "effective_context_tokens": effective_tokens,
+            "estimated_tokens": estimated_tokens,
+            "project_context_chars": project_context_chars,
+            "project_context_truncated": len(context) > project_context_chars,
+            "truncated": len(context) > project_context_chars,
+        }
+
+
+def _estimate_tokens(text: str) -> int:
+    return (len(text) + CHARS_PER_CONTEXT_TOKEN - 1) // CHARS_PER_CONTEXT_TOKEN
 
 
 def extract_single_json_object(text: str) -> dict[str, Any]:

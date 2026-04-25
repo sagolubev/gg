@@ -221,6 +221,28 @@ class TimeoutRecordingAnalysisAgent(JsonAnalysisAgent):
         return super().generate(prompt, cwd=cwd, timeout=timeout, context=context)
 
 
+class ContextLimitAnalysisAgent(JsonAnalysisAgent):
+    supports_task_analysis = True
+
+    def __init__(self, limit: int):
+        self.limit = limit
+        self.prompts: list[str] = []
+
+    def context_window_tokens(self) -> int | None:
+        return self.limit
+
+    def generate(
+        self,
+        prompt: str,
+        *,
+        cwd: str | None = None,
+        timeout: int | None = None,
+        context: str | None = None,
+    ) -> str:
+        self.prompts.append(prompt)
+        return super().generate(prompt, cwd=cwd, timeout=timeout, context=context)
+
+
 class MalformedAnalysisAgent(AgentBackend):
     def generate(
         self,
@@ -1477,6 +1499,34 @@ def test_task_analyzer_uses_versioned_json_contract_when_agent_provided(tmp_path
     assert brief.candidate_files == ["greeting.txt"]
     assert brief.verification_hints == ["cat greeting.txt"]
     assert brief.context_budget["estimated_tokens"] == 120
+
+
+def test_task_analyzer_caps_project_context_by_backend_limit(monkeypatch, tmp_path):
+    init_repo(tmp_path)
+
+    class LargeContextKnowledge:
+        def __init__(self, project_path):
+            self.project_path = project_path
+
+        def context_for_issue(self, title, body):
+            return "x" * 1000
+
+    monkeypatch.setattr("gg.orchestrator.task_analysis.KnowledgeEngine", LargeContextKnowledge)
+    agent = ContextLimitAnalysisAgent(limit=50)
+    issue = Issue(number=42, title="Add greeting", body="Write a greeting file.", labels=["ai-ready"])
+
+    brief = TaskAnalyzer(
+        str(tmp_path),
+        agent=agent,
+        max_context_tokens=100,
+        model_context_tokens=agent.context_window_tokens(),
+    ).analyze(issue)
+
+    assert len(brief.project_context) == 200
+    assert brief.context_budget["effective_context_tokens"] == 50
+    assert brief.context_budget["model_context_tokens"] == 50
+    assert brief.context_budget["project_context_truncated"] is True
+    assert len(agent.prompts[0].split("Project context:\n", 1)[1]) == 200
 
 
 def test_pipeline_uses_analysis_timeout_for_task_analysis_agent(tmp_path):

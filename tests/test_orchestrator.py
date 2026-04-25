@@ -3387,6 +3387,44 @@ def test_pipeline_runtime_overrides_update_execution_knobs(tmp_path):
     assert pipeline.config.git.default_branch == "release"
 
 
+def test_run_issue_blocks_dirty_workspace_before_claim(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / "dirty.txt").write_text("local edit\n", encoding="utf-8")
+    platform = FakePlatform()
+
+    result = OrchestratorPipeline(tmp_path, platform=platform, agent=FakeAgent()).run_issue(42, no_pr=True)
+
+    assert result["state"] == "TerminalFailure"
+    assert result["error"]["code"] == "dirty_workspace"
+    assert platform.labels == []
+    state = OrchestratorPipeline(tmp_path, platform=platform, agent=FakeAgent()).store.load(result["run_id"])
+    preflight = json.loads((tmp_path / state.artifacts["workspace_preflight"]).read_text(encoding="utf-8"))
+    assert preflight["passed"] is False
+    assert preflight["dirty_paths"] == ["dirty.txt"]
+
+
+def test_run_issue_ignores_dirty_gg_workspace_files(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "operator-note.txt").write_text("local run metadata\n", encoding="utf-8")
+
+    result = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent()).run_issue(42, no_pr=True)
+
+    assert result["state"] == "Completed"
+
+
+def test_run_issue_allows_dirty_workspace_with_explicit_base(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / "dirty.txt").write_text("local edit\n", encoding="utf-8")
+
+    result = (
+        OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
+        .configure_runtime(base="HEAD")
+        .run_issue(42, no_pr=True)
+    )
+
+    assert result["state"] == "Completed"
+
+
 def test_pipeline_blocks_missing_required_sandbox_before_baseline(monkeypatch, tmp_path):
     init_repo(tmp_path)
     (tmp_path / ".gg" / "params.yaml").write_text(

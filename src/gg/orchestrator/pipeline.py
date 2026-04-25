@@ -36,6 +36,7 @@ from gg.orchestrator.git import remove_worktree as git_remove_worktree
 from gg.orchestrator.git import reset_worktree as git_reset_worktree
 from gg.orchestrator.git import resolve_ref as git_resolve_ref
 from gg.orchestrator.git import safe_branch_slug, WorktreeManager
+from gg.orchestrator.git import workspace_changes as git_workspace_changes
 from gg.orchestrator.lock import LockManager
 from gg.orchestrator.logging import mask_secrets
 from gg.orchestrator.plugins import create_agent_backend, create_platform
@@ -86,6 +87,7 @@ class OrchestratorPipeline:
         self._state_update_lock = threading.Lock()
         self._shutdown_requested = False
         self._port_allocations: dict[str, int] = {}
+        self._explicit_base_ref: str | None = None
 
     def _install_signal_handlers(self) -> None:
         def _handler(signum, frame):
@@ -120,7 +122,9 @@ class OrchestratorPipeline:
         if updates:
             self.config = replace(self.config, runtime=replace(self.config.runtime, **updates))
         if base is not None and base.strip():
-            self.config = replace(self.config, git=replace(self.config.git, default_branch=base.strip()))
+            explicit_base = base.strip()
+            self._explicit_base_ref = explicit_base
+            self.config = replace(self.config, git=replace(self.config.git, default_branch=explicit_base))
         return self
 
     def run_issue(
@@ -136,6 +140,7 @@ class OrchestratorPipeline:
         self._install_signal_handlers()
         state = None
         issue = None
+        external_side_effect_started = False
         try:
             with self.locks.issue(issue_number):
                 if skip_existing:
@@ -151,11 +156,17 @@ class OrchestratorPipeline:
                 state = self.store.create(issue, dry_run=dry_run)
                 state.max_attempts = self.config.runtime.max_attempts
                 self.knowledge.record_issue_picked(issue_number=issue.number, title=issue.title, labels=issue.labels)
-                if not dry_run:
-                    self.platform.validate_auth()
                 state.transition(TaskState.CLAIMING, reason="issue selected")
                 self.store.write(state)
+                dirty_error = self._dirty_workspace_preflight(state)
+                if dirty_error is not None:
+                    state.fail(code="dirty_workspace", message=dirty_error)
+                    self.store.write(state)
+                    return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
                 if not dry_run:
+                    self.platform.validate_auth()
+                if not dry_run:
+                    external_side_effect_started = True
                     self.platform.claim_task(
                         issue,
                         run_id=state.run_id,
@@ -196,11 +207,34 @@ class OrchestratorPipeline:
                     state.fail(code="pipeline_error", message=str(exc))
                 self.knowledge.record_error(issue_number=issue_number, message=str(exc), pattern=type(exc).__name__)
                 self.store.write(state)
-                if issue is not None and not dry_run and not failed_before_claim:
+                if issue is not None and not dry_run and external_side_effect_started:
                     self._mark_issue_failed(issue.number, state.run_id, str(exc))
                 return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
             except Exception:
                 raise
+
+    def _dirty_workspace_preflight(self, state) -> str | None:
+        changes = git_workspace_changes(self.project_path)
+        artifact = {
+            "schema_version": 1,
+            "passed": not changes or bool(self._explicit_base_ref),
+            "dirty_paths": changes,
+            "explicit_base_ref": self._explicit_base_ref,
+            "checked_at": _now_placeholder(),
+        }
+        state.artifacts["workspace_preflight"] = self.store.write_json(
+            state.run_id,
+            "artifacts/workspace-preflight.json",
+            artifact,
+        )
+        if not changes or self._explicit_base_ref:
+            return None
+        preview = ", ".join(changes[:5])
+        suffix = "" if len(changes) <= 5 else f", and {len(changes) - 5} more"
+        return (
+            "working tree has non-.gg changes; commit/stash them or pass --base to use an explicit base "
+            f"({preview}{suffix})"
+        )
 
     def _dry_run_issue(self, issue_number: int, *, skip_existing: bool = False) -> dict[str, Any]:
         with self.locks.issue(issue_number):

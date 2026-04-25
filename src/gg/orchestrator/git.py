@@ -94,14 +94,39 @@ def changed_files(cwd: str | Path) -> list[str]:
     for line in output.splitlines():
         if not line.strip():
             continue
-        if " -> " in line:
-            path = line.split(" -> ", 1)[1].strip()
-        else:
-            path = line[3:].strip()
+        path = _status_path(line)
         if path == ".gg-cache" or path.startswith(".gg-cache/"):
             continue
         files.append(path)
     return files
+
+
+def workspace_changes(cwd: str | Path) -> list[str]:
+    output = run_git(["status", "--short"], cwd)
+    files: list[str] = []
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        path = _status_path(line)
+        if (
+            path == ".gg"
+            or path.startswith(".gg/")
+            or path == ".gg-cache"
+            or path.startswith(".gg-cache/")
+        ):
+            continue
+        files.append(path)
+    return files
+
+
+def _status_path(line: str) -> str:
+    if " -> " in line:
+        return line.split(" -> ", 1)[1].strip()
+    if len(line) >= 4 and line[2] == " ":
+        return line[3:].strip()
+    if len(line) >= 3 and line[1] == " ":
+        return line[2:].strip()
+    return line[3:].strip()
 
 
 def lfs_changed_files(cwd: str | Path, files: list[str]) -> list[str]:

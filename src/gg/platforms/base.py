@@ -24,6 +24,14 @@ class IssueComment:
 
 
 @dataclass(frozen=True)
+class IssueComment:
+    body: str
+    author: str = ""
+    created_at: str = ""
+    url: str = ""
+
+
+@dataclass(frozen=True)
 class Issue:
     number: int
     title: str

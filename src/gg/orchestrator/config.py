@@ -53,9 +53,12 @@ class VerifyConfig:
     allow_known_baseline_failures: bool = False
 
     def commands(self) -> list[str]:
+        return self.check_commands()
+
+    def check_commands(self) -> list[str]:
         return [
             cmd
-            for cmd in (self.setup, self.tests, self.lint, self.typecheck, self.security, *self.custom)
+            for cmd in (self.tests, self.lint, self.typecheck, self.security, *self.custom)
             if cmd.strip()
         ]
 
@@ -109,6 +112,7 @@ def load_config(project_path: str | Path) -> GGConfig:
         raw = yaml.safe_load(params_path.read_text(encoding="utf-8")) or {}
         if not isinstance(raw, dict):
             raise ValueError(f"{params_path}: expected YAML mapping")
+        _reject_unknown_config_keys(raw, str(params_path))
     project = _mapping(raw.get("project"))
     git = _mapping(raw.get("git"))
     task_system = _mapping(raw.get("task_system"))
@@ -252,3 +256,70 @@ def _default_test_command(root: Path) -> str:
     if (root / "package.json").exists():
         return "npm test"
     return ""
+
+
+def _reject_unknown_config_keys(raw: dict[str, Any], location: str) -> None:
+    allowed: dict[str, set[str] | None] = {
+        "schema_version": None,
+        "project": {"default_branch"},
+        "git": {"default_branch", "author_name", "author_email"},
+        "task_system": {"platform", "work_label", "done_label", "blocked_label"},
+        "selection": {"include_labels", "exclude_labels"},
+        "verify": {
+            "setup",
+            "tests",
+            "lint",
+            "typecheck",
+            "security",
+            "custom",
+            "test_retry_count",
+            "allow_known_baseline_failures",
+        },
+        "runtime": {
+            "agent_backend",
+            "candidates",
+            "max_parallel_candidates",
+            "max_parallel_runs",
+            "max_attempts",
+            "repair_candidates",
+            "use_sandbox_runtime",
+            "require_sandbox_runtime",
+            "candidate_timeout_seconds",
+            "command_timeout_seconds",
+            "setup_timeout_seconds",
+            "sandbox_policy",
+        },
+        "audit": {"hash_events", "external_sink"},
+        "security": {"allow_lfs_changes", "allow_binary_changes", "allow_dependency_changes"},
+        "cleanup": {"blocked_timeout_days"},
+        # Backward-compatible root-level aliases.
+        "platform": None,
+        "agent_backend": None,
+    }
+    nested_allowed = {
+        "runtime.sandbox_policy": {
+            "allowed_domains",
+            "denied_domains",
+            "deny_read",
+            "allow_write",
+            "deny_write",
+        }
+    }
+    for key, value in raw.items():
+        if key not in allowed:
+            raise ValueError(f"{location}.{key}: unknown configuration key")
+        children = allowed[key]
+        if children is None:
+            continue
+        if not isinstance(value, dict):
+            continue
+        for child_key, child_value in value.items():
+            if child_key not in children:
+                raise ValueError(f"{location}.{key}.{child_key}: unknown configuration key")
+            nested_path = f"{key}.{child_key}"
+            nested_children = nested_allowed.get(nested_path)
+            if nested_children is None or not isinstance(child_value, dict):
+                continue
+            for nested_key in child_value:
+                if nested_key not in nested_children:
+                    raise ValueError(f"{location}.{nested_path}.{nested_key}: unknown configuration key")

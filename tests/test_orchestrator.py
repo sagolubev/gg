@@ -17,6 +17,7 @@ from gg.orchestrator.config import load_config
 from gg.orchestrator.context import ContextSnapshotStore
 from gg.orchestrator.evaluation import CandidateEvaluator
 from gg.orchestrator.executor import CandidateExecutor
+from gg.orchestrator.git import commit_all
 from gg.orchestrator.lock import FileLock
 from gg.orchestrator.pipeline import OrchestratorPipeline
 from gg.orchestrator.plugins import create_agent_backend, register_agent_backend, register_platform
@@ -210,6 +211,8 @@ class MalformedAnalysisAgent(AgentBackend):
 
 
 class BlockedAnalysisAgent(AgentBackend):
+    supports_task_analysis = True
+
     def generate(
         self,
         prompt: str,
@@ -611,6 +614,24 @@ def test_load_config_rejects_invalid_nested_runtime_value(tmp_path):
     assert ".gg/params.yaml.runtime.candidates" in message
 
 
+def test_load_config_rejects_unknown_nested_keys(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        "verify:\n  tests: ''\nruntime:\n  candidatez: 2\n",
+        encoding="utf-8",
+    )
+
+    try:
+        load_config(tmp_path)
+    except ValueError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("unknown runtime key should fail during config load")
+
+    assert ".gg/params.yaml.runtime.candidatez" in message
+    assert "unknown configuration key" in message
+
+
 def test_run_store_rejects_invalid_state_json_with_path(tmp_path):
     init_repo(tmp_path)
     store = RunStore(tmp_path)
@@ -999,6 +1020,33 @@ def test_repeated_runs_use_collision_free_candidate_branches(tmp_path):
     assert first_state.candidate_states["candidate-1"].branch != second_state.candidate_states["candidate-1"].branch
 
 
+def test_commit_all_removes_candidate_cache_before_staging(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / "feature.txt").write_text("feature\n", encoding="utf-8")
+    cache_file = tmp_path / ".gg-cache" / "pip" / "download.whl"
+    cache_file.parent.mkdir(parents=True)
+    cache_file.write_text("cache\n", encoding="utf-8")
+
+    committed = commit_all(
+        tmp_path,
+        message="feature",
+        author_name="gg-orchestrator",
+        author_email="gg-orchestrator@example.invalid",
+    )
+    tracked = subprocess.run(
+        ["git", "ls-files"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+
+    assert committed is True
+    assert "feature.txt" in tracked
+    assert not any(path.startswith(".gg-cache/") for path in tracked)
+    assert not cache_file.exists()
+
+
 def test_resume_ready_run_executes_same_run(tmp_path):
     init_repo(tmp_path)
     pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
@@ -1078,6 +1126,21 @@ def test_task_analyzer_can_return_blocked_brief(tmp_path):
 
     assert brief.blocked is True
     assert brief.missing_questions == ["Which greeting language should be used?"]
+
+
+def test_pipeline_uses_agent_analysis_blocked_result(tmp_path):
+    init_repo(tmp_path)
+
+    result = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=BlockedAnalysisAgent()).run_issue(
+        42,
+        dry_run=True,
+    )
+
+    assert result["state"] == "Blocked"
+    assert result["missing_questions"] == ["Which greeting language should be used?"]
+    state = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent()).store.load(result["run_id"])
+    brief = json.loads((tmp_path / state.artifacts["task_brief"]).read_text(encoding="utf-8"))
+    assert brief["blocked"] is True
 
 
 def test_json_extraction_rejects_conflicting_payloads():
@@ -1290,6 +1353,28 @@ def test_needs_input_can_resume_from_issue_comment(tmp_path):
     input_artifact = json.loads(input_path.read_text(encoding="utf-8"))
     assert input_artifact["source"] == "github-comment"
     assert input_artifact["message"] == "Use Spanish"
+
+
+def test_needs_input_ignores_gg_stage_comments_on_resume(tmp_path):
+    init_repo(tmp_path)
+    platform = FakePlatform()
+    pipeline = OrchestratorPipeline(tmp_path, platform=platform, agent=NeedsInputAgent())
+
+    result = pipeline.run_issue(42, no_pr=True)
+    platform.issue.comments.append(
+        IssueComment(
+            body="<!-- gg-stage=needs-input -->\ngg needs local input to continue: Which greeting language?",
+            author="gg",
+            created_at="2999-01-01T00:00:00Z",
+        )
+    )
+
+    resumed = pipeline.resume(result["run_id"], no_pr=True)
+
+    assert resumed["state"] == "NeedsInput"
+    assert resumed["resumed"] is False
+    state = pipeline.store.load(result["run_id"])
+    assert "last_input" not in state.artifacts
 
 
 def test_provide_accepts_blocked_run_input(tmp_path):
@@ -1619,14 +1704,8 @@ def test_load_config_reads_extended_verification_commands(tmp_path):
 
     config = load_config(tmp_path)
 
-    assert config.verify.commands() == [
-        "uv sync",
-        "pytest",
-        "ruff check .",
-        "mypy src",
-        "bandit -r src",
-        "python scripts/check.py",
-    ]
+    assert config.verify.setup == "uv sync"
+    assert config.verify.commands() == ["pytest", "ruff check .", "mypy src", "bandit -r src", "python scripts/check.py"]
     assert config.verify.test_retry_count == 2
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -122,6 +123,7 @@ def diff(cwd: str | Path) -> str:
 
 
 def commit_all(cwd: str | Path, *, message: str, author_name: str, author_email: str) -> bool:
+    shutil.rmtree(Path(cwd) / ".gg-cache", ignore_errors=True)
     if not changed_files(cwd):
         return False
     run_git(["add", "-A"], cwd)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import tempfile
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -181,7 +182,12 @@ class TaskAnalyzer:
             return None
         prompt = build_analysis_prompt(issue_payload=issue_payload, project_context=context[:MAX_PROJECT_CONTEXT_CHARS])
         try:
-            raw = self.agent.generate(prompt, cwd=self.project_path, timeout=self.timeout)
+            raw = self.agent.generate(
+                prompt,
+                cwd=tempfile.gettempdir(),
+                timeout=self.timeout,
+                context="Task analysis only. Return exactly one JSON object and do not edit files.",
+            )
             payload = extract_single_json_object(raw)
             return AnalysisResultModel.model_validate(payload)
         except Exception:

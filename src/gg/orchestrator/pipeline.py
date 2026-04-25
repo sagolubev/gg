@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from gg.agents.base import AgentBackend
+from gg.agents.codex import CodexAgent
 from gg.knowledge.engine import KnowledgeEngine
 from gg.orchestrator.config import GGConfig, load_config
 from gg.orchestrator.context import ContextSnapshotStore
@@ -185,6 +186,13 @@ class OrchestratorPipeline:
                 if state.state in {TaskState.BLOCKED, TaskState.NEEDS_INPUT}:
                     self._ingest_issue_comment_input(state, issue)
                     state = self.store.load(run_id)
+                    if _waiting_for_input(state) and not state.artifacts.get("last_input"):
+                        return {
+                            "run_id": run_id,
+                            "state": state.state.value,
+                            "resumed": False,
+                            "message": "Waiting for operator input.",
+                        }
                 if state.artifacts.get("last_input"):
                     brief = self._refresh_task_analysis(state, issue)
                     if brief.blocked:
@@ -357,6 +365,7 @@ class OrchestratorPipeline:
             for comment in issue.comments
             if comment.body.strip()
             and not comment.body.lstrip().startswith("<!-- gg-run-id=")
+            and not comment.body.lstrip().startswith("<!-- gg-stage=")
             and (not threshold or comment.created_at > threshold)
         ]
         if not candidates:
@@ -1037,12 +1046,23 @@ class OrchestratorPipeline:
         return self.store.write_json(state.run_id, "artifacts/evaluation.json", artifact)
 
     def _refresh_task_analysis(self, state, issue: Issue) -> TaskBrief:
-        brief = TaskAnalyzer(str(self.project_path)).analyze(issue, inputs=self._load_inputs(state.run_id))
+        brief = TaskAnalyzer(
+            str(self.project_path),
+            agent=self._task_analysis_agent(),
+            timeout=self.config.runtime.command_timeout_seconds,
+        ).analyze(issue, inputs=self._load_inputs(state.run_id))
         brief_path = self.store.write_json(state.run_id, "artifacts/task-brief.json", brief.to_dict())
         state.artifacts["task_brief"] = brief_path
         snapshot_path = ContextSnapshotStore(self.project_path).write_task_snapshot(state.run_id, brief)
         state.artifacts["context_snapshot"] = snapshot_path
         return brief
+
+    def _task_analysis_agent(self) -> AgentBackend | None:
+        if isinstance(self.agent, CodexAgent):
+            return self.agent
+        if getattr(self.agent, "supports_task_analysis", False):
+            return self.agent
+        return None
 
     def _load_inputs(self, run_id: str) -> list[dict[str, Any]]:
         inputs_dir = self.store.path_for(run_id) / "inputs"
@@ -1064,6 +1084,12 @@ def _parse_pr_number(pr_url: str) -> int:
 
 def _issue_has_comment_marker(issue: Issue, marker: str) -> bool:
     return any(marker in comment.body for comment in issue.comments)
+
+
+def _waiting_for_input(state) -> bool:
+    if state.state is TaskState.NEEDS_INPUT:
+        return True
+    return state.state is TaskState.BLOCKED and (state.last_error or {}).get("code") == "missing_task_info"
 
 
 def _candidate_strategies(count: int) -> list[str]:

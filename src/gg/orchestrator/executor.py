@@ -3,10 +3,13 @@ from __future__ import annotations
 import hashlib
 import os
 import subprocess
+import sys
 import tempfile
 import time
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from gg.agents.base import AgentBackend
 from gg.agents.codex import CodexAgent
@@ -14,11 +17,78 @@ from gg.orchestrator.config import GGConfig
 from gg.orchestrator.git import changed_files, current_commit, diff, safe_branch_slug
 from gg.orchestrator.git import WorktreeManager
 from gg.orchestrator.sandbox import SandboxPolicy, SandboxRuntime
-from gg.orchestrator.schemas import CandidateResultModel
+from gg.orchestrator.schemas import AgentHandoffModel, AgentResultModel, CandidateResultModel
 from gg.orchestrator.task_analysis import TaskBrief
 from gg.orchestrator.verification import CheckResult, VerificationRunner
 
 NEEDS_INPUT_PREFIX = "NEEDS_INPUT:"
+
+HOST_ENV_ALLOWLIST = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "LANG",
+        "TERM",
+        "OPENAI_API_KEY",
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+    }
+)
+
+
+@dataclass(frozen=True)
+class AgentHandoff:
+    schema_version: int
+    run_id: str
+    candidate_id: str
+    issue: dict[str, Any]
+    attempt: int
+    created_at: str
+    worktree_path: str
+    base_commit: str
+    task_brief_path: str = ""
+    context_snapshot_path: str = ""
+    instructions: str = ""
+    artifacts: dict[str, str] | None = None
+
+    def to_model(self) -> AgentHandoffModel:
+        return AgentHandoffModel.model_validate(self.to_dict(validate=False))
+
+    def to_dict(self, *, validate: bool = True) -> dict:
+        data = asdict(self)
+        data["artifacts"] = data["artifacts"] or {}
+        if validate:
+            AgentHandoffModel.model_validate(data)
+        return data
+
+
+@dataclass(frozen=True)
+class AgentResult:
+    schema_version: int
+    run_id: str
+    candidate_id: str
+    status: str
+    started_at: str = ""
+    finished_at: str = ""
+    duration_seconds: float | None = None
+    exit_code: int | None = None
+    summary: str = ""
+    error: str | None = None
+    changed_files: list[str] | None = None
+    artifacts: dict[str, str] | None = None
+    metrics: dict[str, Any] | None = None
+
+    def to_model(self) -> AgentResultModel:
+        return AgentResultModel.model_validate(self.to_dict(validate=False))
+
+    def to_dict(self, *, validate: bool = True) -> dict:
+        data = asdict(self)
+        data["changed_files"] = data["changed_files"] or []
+        data["artifacts"] = data["artifacts"] or {}
+        data["metrics"] = data["metrics"] or {}
+        if validate:
+            AgentResultModel.model_validate(data)
+        return data
 
 
 @dataclass(frozen=True)
@@ -54,7 +124,65 @@ class CandidateExecutor:
         self.project_path = Path(project_path).resolve()
         self.agent = agent
         self.config = config
+        self._sandbox_explicit = sandbox is not None
         self.sandbox = sandbox or SandboxRuntime()
+
+    def build_agent_handoff(
+        self,
+        *,
+        run_id: str,
+        candidate_id: str,
+        issue: dict[str, Any],
+        worktree_path: str | Path,
+        base_commit: str,
+        instructions: str,
+        attempt: int = 1,
+        task_brief_path: str = "",
+        context_snapshot_path: str = "",
+        artifacts: dict[str, str] | None = None,
+        created_at: str | None = None,
+    ) -> AgentHandoff:
+        return AgentHandoff(
+            schema_version=1,
+            run_id=run_id,
+            candidate_id=candidate_id,
+            issue=issue,
+            attempt=attempt,
+            created_at=created_at or _utc_now(),
+            worktree_path=str(worktree_path),
+            base_commit=base_commit,
+            task_brief_path=task_brief_path,
+            context_snapshot_path=context_snapshot_path,
+            instructions=instructions,
+            artifacts=artifacts or {},
+        )
+
+    def build_agent_result(
+        self,
+        *,
+        run_id: str,
+        candidate: CandidateResult,
+        started_at: str = "",
+        finished_at: str = "",
+        exit_code: int | None = None,
+        artifacts: dict[str, str] | None = None,
+        metrics: dict[str, Any] | None = None,
+    ) -> AgentResult:
+        return AgentResult(
+            schema_version=1,
+            run_id=run_id,
+            candidate_id=candidate.candidate_id,
+            status=candidate.status,
+            started_at=started_at,
+            finished_at=finished_at,
+            duration_seconds=candidate.duration_seconds,
+            exit_code=exit_code,
+            summary=candidate.summary,
+            error=candidate.error,
+            changed_files=candidate.changed_files,
+            artifacts=artifacts or {},
+            metrics=metrics or {},
+        )
 
     def run(self, *, run_id: str, issue_number: int, brief: TaskBrief, candidate_id: str = "candidate-1",
             strategy: str = "conservative") -> CandidateResult:
@@ -142,8 +270,19 @@ class CandidateExecutor:
         ):
             if self.sandbox.is_available():
                 return self._generate_in_sandbox(prompt, worktree)
-            if self.config.runtime.require_sandbox_runtime:
+            if (
+                self.config.runtime.require_sandbox_runtime
+                and not self.config.runtime.allow_unsafe_direct_exec
+            ):
                 raise RuntimeError("sandbox-runtime is required but unavailable")
+        if (
+            self.config.runtime.use_sandbox_runtime
+            and self._sandbox_explicit
+            and self.config.runtime.require_sandbox_runtime
+            and not self.config.runtime.allow_unsafe_direct_exec
+            and not self.sandbox.is_available()
+        ):
+            raise RuntimeError("sandbox-runtime is required but unavailable")
         return self.agent.generate(
             prompt,
             cwd=str(worktree),
@@ -173,7 +312,15 @@ class CandidateExecutor:
     def _candidate_env(self, worktree: Path) -> dict[str, str]:
         cache_root = worktree / ".gg-cache"
         cache_root.mkdir(parents=True, exist_ok=True)
-        env = os.environ.copy()
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key in HOST_ENV_ALLOWLIST or key.startswith("LC_")
+        }
+        python_bin = str(Path(sys.executable).parent)
+        path_parts = env.get("PATH", "").split(os.pathsep) if env.get("PATH") else []
+        if python_bin not in path_parts:
+            env["PATH"] = os.pathsep.join([python_bin, *path_parts]) if path_parts else python_bin
         env.update(
             {
                 "PIP_CACHE_DIR": str(cache_root / "pip"),
@@ -181,6 +328,11 @@ class CandidateExecutor:
                 "npm_config_cache": str(cache_root / "npm"),
                 "YARN_CACHE_FOLDER": str(cache_root / "yarn"),
                 "PNPM_HOME": str(cache_root / "pnpm"),
+                "PNPM_STORE_DIR": str(cache_root / "pnpm-store"),
+                "XDG_CACHE_HOME": str(cache_root / "xdg"),
+                "CARGO_HOME": str(cache_root / "cargo"),
+                "GOCACHE": str(cache_root / "go-build"),
+                "GOMODCACHE": str(cache_root / "go-mod"),
             }
         )
         return env
@@ -218,3 +370,7 @@ def _extract_needs_input(summary: str) -> str | None:
         return None
     message = text[len(NEEDS_INPUT_PREFIX):].strip()
     return message or "Agent requested additional input."
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

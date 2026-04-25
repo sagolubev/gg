@@ -943,9 +943,13 @@ def test_pipeline_no_pr_completes_with_one_candidate(tmp_path):
     assert len(runs) == 1
     run_dir = runs[0].parent
     assert (run_dir / "candidates" / "candidate-1" / "candidate-result.json").exists()
+    assert (run_dir / "candidates" / "candidate-1" / "agent-handoff.json").exists()
+    assert (run_dir / "candidates" / "candidate-1" / "agent-result.json").exists()
     assert (run_dir / "candidates" / "candidate-1" / "patch.diff").read_text(encoding="utf-8")
     assert (run_dir / "candidates" / "candidate-1" / "verification.json").exists()
     assert (run_dir / "artifacts" / "evaluation.json").exists()
+    assert (run_dir / "artifacts" / "execution-evaluation.json").exists()
+    assert (run_dir / "artifacts" / "run-outcome.json").exists()
     assert (run_dir / "artifacts" / "run-summary.json").exists()
     assert (run_dir / "pipeline.jsonl").exists()
     assert (run_dir / "cost.jsonl").exists()
@@ -1042,7 +1046,12 @@ def test_pipeline_evaluator_can_choose_later_more_focused_candidate(tmp_path):
     assert result["winner"] == "candidate-2"
     run_dir = next((tmp_path / ".gg" / "runs").glob("*"))
     evaluation = json.loads((run_dir / "artifacts" / "evaluation.json").read_text(encoding="utf-8"))
+    execution_evaluation = json.loads(
+        (run_dir / "artifacts" / "execution-evaluation.json").read_text(encoding="utf-8")
+    )
     assert evaluation["winner"] == "candidate-2"
+    assert execution_evaluation["selected_candidate_id"] == "candidate-2"
+    assert execution_evaluation["traffic_light"] == "green"
     assert evaluation["candidates"][1]["score"] > evaluation["candidates"][0]["score"]
 
 
@@ -1186,6 +1195,11 @@ def test_pipeline_baseline_failures_can_be_allowed_when_identical(tmp_path):
     assert result["state"] == "Completed"
     state = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent()).store.load(result["run_id"])
     assert "baseline_verification" in state.artifacts
+    assert state.baseline["status"] == "failed"
+    assert state.baseline["failed_commands"] == ["python -c 'import sys; sys.exit(7)'"]
+    assert ".gg-worktrees" in state.baseline["worktree_path"]
+    assert Path(state.baseline["worktree_path"]) != tmp_path
+    assert Path(state.baseline["worktree_path"]).exists()
 
 
 def test_pipeline_fails_when_verification_mutates_worktree(tmp_path):
@@ -2312,6 +2326,11 @@ def test_run_batch_dry_run_lists_next_eligible_issues(tmp_path):
 
     assert result["state"] == "DryRun"
     assert [issue["number"] for issue in result["issues"]] == [3, 5]
+    assert [issue["number"] for issue in result["eligible"]] == [3, 5, 9]
+    assert {issue["number"]: issue["reason"] for issue in result["excluded"]} == {
+        2: "excluded_label",
+        9: "not_selected_batch_limit",
+    }
 
 
 def test_run_batch_processes_selected_issues(tmp_path):

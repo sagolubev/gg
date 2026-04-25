@@ -13,7 +13,7 @@ from gg.agents.codex import CodexAgent
 from gg.knowledge.engine import KnowledgeEngine
 from gg.orchestrator.config import GGConfig, load_config
 from gg.orchestrator.context import ContextSnapshotStore
-from gg.orchestrator.evaluation import CandidateEvaluator
+from gg.orchestrator.evaluation import build_run_outcome, CandidateEvaluator
 from gg.orchestrator.executor import CandidateExecutor
 from gg.orchestrator.git import binary_changed_files as git_binary_changed_files
 from gg.orchestrator.git import changed_files as git_changed_files
@@ -35,7 +35,7 @@ from gg.orchestrator.state import CandidateState, TaskState
 from gg.orchestrator.state import TERMINAL_STATES
 from gg.orchestrator.store import RunStore
 from gg.orchestrator.task_analysis import TaskAnalyzer, TaskBrief
-from gg.orchestrator.verification import CheckResult, VerificationRunner
+from gg.orchestrator.verification import CheckResult, VerificationRunner, verification_gate_summary
 from gg.platforms.base import GitPlatform, Issue
 from gg.utils.git_ops import find_repo_root
 
@@ -219,16 +219,33 @@ class OrchestratorPipeline:
                 issues = self.platform.list_issues(limit=max(30, requested))
             except RateLimitThrottleError as exc:
                 return self._throttled_response(exc)
-            selected = self._eligible_issues(issues)[:requested]
+            eligible = self._eligible_issues(issues)
+            selected = eligible[:requested]
             if not selected:
                 return {"state": "NoEligibleIssue", "message": "No eligible open issues found."}
             if dry_run:
+                selected_numbers = {issue.number for issue in selected}
+                eligible_numbers = {issue.number for issue in eligible}
+                excluded = [
+                    self._issue_selection_summary(issue, override_reason="not_selected_batch_limit")
+                    for issue in eligible[requested:]
+                ]
+                excluded.extend(
+                    self._issue_selection_summary(issue)
+                    for issue in issues
+                    if issue.number not in eligible_numbers and issue.number not in selected_numbers
+                )
                 return {
                     "state": "DryRun",
                     "issues": [
                         {"number": issue.number, "title": issue.title, "labels": issue.labels}
                         for issue in selected
                     ],
+                    "eligible": [
+                        self._issue_selection_summary(issue, override_reason="eligible")
+                        for issue in eligible
+                    ],
+                    "excluded": excluded,
                     "count": len(selected),
                 }
             issue_numbers = [issue.number for issue in selected]
@@ -525,21 +542,7 @@ class OrchestratorPipeline:
             self._mark_issue_blocked(issue.number, state.run_id, "Codex CLI is not available")
             return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
 
-        baseline = VerificationRunner(
-            self.config.verify.commands(),
-            timeout=self.config.runtime.command_timeout_seconds,
-            retry_count=self.config.verify.test_retry_count,
-        ).run(self.project_path)
-        baseline_path = self.store.write_json(
-            state.run_id,
-            "artifacts/baseline-verification.json",
-            {
-                "schema_version": 1,
-                "checks": [check.to_dict() for check in baseline],
-                "failed_commands": _failed_commands(baseline),
-            },
-        )
-        state.artifacts["baseline_verification"] = baseline_path
+        baseline = self._run_baseline_verification(state)
 
         state.transition(TaskState.AGENT_RUNNING, reason="run candidates")
         self.store.write(state)
@@ -609,10 +612,17 @@ class OrchestratorPipeline:
                 candidate_records,
                 attempt=state.attempt,
                 max_attempts=state.max_attempts,
+                run_id=state.run_id,
+                evaluated_at=_now_placeholder(),
             )
             selected = evaluation.winner
             evaluation_path = self._write_evaluation(state, evaluation.artifact)
             state.artifacts["evaluation"] = evaluation_path
+            if evaluation.execution_evaluation is not None:
+                state.artifacts["execution_evaluation"] = self._write_execution_evaluation(
+                    state,
+                    evaluation.execution_evaluation,
+                )
             self.store.write(state)
             needs_input = next(
                 (record for record in attempt_records if record["effective_status"] == "needs_input"),
@@ -738,6 +748,21 @@ class OrchestratorPipeline:
         )
         verification_started = time.monotonic()
         candidate_dir = f"candidates/{candidate.candidate_id}"
+        handoff_path = self.store.write_json(
+            state.run_id,
+            f"{candidate_dir}/agent-handoff.json",
+            executor.build_agent_handoff(
+                run_id=state.run_id,
+                candidate_id=candidate.candidate_id,
+                issue=brief.issue,
+                worktree_path=candidate.worktree_path,
+                base_commit=candidate.base_commit,
+                instructions=f"strategy={strategy}",
+                attempt=state.attempt,
+                task_brief_path=state.artifacts.get("task_brief", ""),
+                context_snapshot_path=state.artifacts.get("context_snapshot", ""),
+            ).to_dict(),
+        )
         if candidate.status == "setup_failed":
             verification = [CheckResult(command="", status="skipped", exit_code=None, attempts=0)]
         else:
@@ -752,10 +777,18 @@ class OrchestratorPipeline:
             final_files != candidate.changed_files or final_patch != candidate.patch
         )
         patch_path = self.store.write_text(state.run_id, f"{candidate_dir}/patch.diff", final_patch)
+        verification_summary = verification_gate_summary(verification)
         verification_path = self.store.write_json(
             state.run_id,
             f"{candidate_dir}/verification.json",
-            {"schema_version": 1, "checks": [check.to_dict() for check in verification]},
+            {
+                "schema_version": 1,
+                "checks": [check.to_dict() for check in verification],
+                "failed_commands": _failed_commands(verification),
+                "required_passed": verification_summary["required_passed"],
+                "advisory_failed_commands": verification_summary["advisory_failed_commands"],
+                "findings": verification_summary["findings"],
+            },
         )
         verification_passed = _verification_passed(
             verification,
@@ -785,6 +818,25 @@ class OrchestratorPipeline:
         candidate_data["baseline_failed_commands"] = _failed_commands(baseline)
         candidate_data["policy_violations"] = policy_violations
         candidate_data["effective_status"] = effective_status
+        agent_result_path = self.store.write_json(
+            state.run_id,
+            f"{candidate_dir}/agent-result.json",
+            executor.build_agent_result(
+                run_id=state.run_id,
+                candidate=candidate,
+                artifacts={
+                    "agent_handoff": handoff_path,
+                    "patch": patch_path,
+                    "verification": verification_path,
+                },
+                metrics={
+                    "verification_duration_seconds": round(time.monotonic() - verification_started, 3),
+                    "verification_passed": verification_passed,
+                },
+            ).to_dict(),
+        )
+        candidate_data["agent_handoff"] = handoff_path
+        candidate_data["agent_result"] = agent_result_path
         result_path = self.store.write_json(
             state.run_id,
             f"{candidate_dir}/candidate-result.json",
@@ -826,6 +878,65 @@ class OrchestratorPipeline:
             "error": error,
             "final_files": final_files,
         }
+
+    def _run_baseline_verification(self, state) -> list[CheckResult]:
+        if state.artifacts.get("baseline_verification"):
+            return self._load_baseline_verification(state)
+
+        base_commit = git_resolve_ref(self.project_path, "HEAD") or ""
+        run_hash = hashlib.sha256(state.run_id.encode("utf-8")).hexdigest()[:8]
+        branch = f"gg/baseline-{run_hash}"
+        worktree = WorktreeManager(self.project_path).create(
+            run_id=state.run_id,
+            candidate_id="baseline",
+            branch=branch,
+            base_ref=base_commit or "HEAD",
+        )
+        setup = VerificationRunner(
+            [self.config.verify.setup] if self.config.verify.setup.strip() else [],
+            timeout=self.config.runtime.setup_timeout_seconds,
+        ).run(worktree)
+        setup_path = self.store.write_json(
+            state.run_id,
+            "artifacts/baseline-setup.json",
+            {
+                "schema_version": 1,
+                "checks": [check.to_dict() for check in setup],
+                "failed_commands": _failed_commands(setup),
+            },
+        )
+        verification = VerificationRunner(
+            self.config.verify.commands(),
+            timeout=self.config.runtime.command_timeout_seconds,
+            retry_count=self.config.verify.test_retry_count,
+        ).run(worktree)
+        failed_commands = _failed_commands(verification)
+        verification_summary = verification_gate_summary(verification)
+        verification_path = self.store.write_json(
+            state.run_id,
+            "artifacts/baseline-verification.json",
+            {
+                "schema_version": 1,
+                "checks": [check.to_dict() for check in verification],
+                "failed_commands": failed_commands,
+                "required_passed": verification_summary["required_passed"],
+                "advisory_failed_commands": verification_summary["advisory_failed_commands"],
+                "findings": verification_summary["findings"],
+            },
+        )
+        state.artifacts["baseline_setup"] = setup_path
+        state.artifacts["baseline_verification"] = verification_path
+        state.baseline = {
+            "status": "failed" if failed_commands else "passed",
+            "commit": base_commit,
+            "branch": branch,
+            "worktree_path": str(worktree),
+            "verification_path": verification_path,
+            "failed_commands": failed_commands,
+            "checked_at": _now_placeholder(),
+        }
+        self.store.write(state)
+        return verification
 
     def _candidate_policy_violations(self, worktree_path: str, files: list[str]) -> list[dict[str, Any]]:
         violations: list[dict[str, Any]] = []
@@ -982,6 +1093,7 @@ class OrchestratorPipeline:
 
         state.transition(TaskState.COMPLETED, reason="walking skeleton complete")
         state.publishing_step = "completed"
+        state.artifacts["run_outcome"] = self._write_run_outcome(state, winner)
         self.store.write(state)
         self._cleanup_integration_worktree(state)
         self._mark_issue_done(issue.number)
@@ -1151,10 +1263,18 @@ class OrchestratorPipeline:
             timeout=self.config.runtime.command_timeout_seconds,
             retry_count=self.config.verify.test_retry_count,
         ).run(worktree)
+        verification_summary = verification_gate_summary(verification)
         verification_path = self.store.write_json(
             state.run_id,
             "artifacts/integration-verification.json",
-            {"schema_version": 1, "checks": [check.to_dict() for check in verification]},
+            {
+                "schema_version": 1,
+                "checks": [check.to_dict() for check in verification],
+                "failed_commands": _failed_commands(verification),
+                "required_passed": verification_summary["required_passed"],
+                "advisory_failed_commands": verification_summary["advisory_failed_commands"],
+                "findings": verification_summary["findings"],
+            },
         )
         if not _verification_passed(
             verification,
@@ -1471,19 +1591,28 @@ class OrchestratorPipeline:
         }
 
     def _eligible_issues(self, issues: list[Issue]) -> list[Issue]:
-        include = set(self.config.selection.include_labels)
-        exclude = set(self.config.selection.exclude_labels)
-
-        def is_eligible(issue: Issue) -> bool:
-            labels = set(issue.labels)
-            if labels & exclude:
-                return False
-            return not include or bool(labels & include)
-
         return sorted(
-            [issue for issue in issues if is_eligible(issue)],
+            [issue for issue in issues if self._issue_eligibility_reason(issue) == "eligible"],
             key=lambda issue: (_priority_rank(issue.labels), issue.number),
         )
+
+    def _issue_selection_summary(self, issue: Issue, *, override_reason: str | None = None) -> dict[str, Any]:
+        return {
+            "number": issue.number,
+            "title": issue.title,
+            "labels": issue.labels,
+            "reason": override_reason or self._issue_eligibility_reason(issue),
+        }
+
+    def _issue_eligibility_reason(self, issue: Issue) -> str:
+        include = set(self.config.selection.include_labels)
+        exclude = set(self.config.selection.exclude_labels)
+        labels = set(issue.labels)
+        if labels & exclude:
+            return "excluded_label"
+        if include and not labels & include:
+            return "missing_include_label"
+        return "eligible"
 
     def _pr_body(self, issue: Issue, run_id: str, summary: str, verification_path: str) -> str:
         return (
@@ -1495,6 +1624,16 @@ class OrchestratorPipeline:
 
     def _write_evaluation(self, state, artifact: dict[str, Any]) -> str:
         return self.store.write_json(state.run_id, "artifacts/evaluation.json", artifact)
+
+    def _write_execution_evaluation(self, state, artifact: dict[str, Any]) -> str:
+        return self.store.write_json(state.run_id, "artifacts/execution-evaluation.json", artifact)
+
+    def _write_run_outcome(self, state, selected_candidate_metadata: dict[str, Any]) -> str:
+        return self.store.write_json(
+            state.run_id,
+            "artifacts/run-outcome.json",
+            build_run_outcome(state, selected_candidate_metadata, completed_at=_now_placeholder()),
+        )
 
     def _refresh_task_analysis(self, state, issue: Issue) -> TaskBrief:
         brief = TaskAnalyzer(
@@ -1572,7 +1711,12 @@ def _failed_commands(checks) -> list[str]:
 
 
 def _verification_passed(checks, baseline, *, allow_known_baseline_failures: bool) -> bool:
-    failed = set(_failed_commands(checks))
+    failed = {
+        check.command
+        for check in checks
+        if getattr(check, "required", True)
+        and check.status not in {"passed", "skipped", "flaky"}
+    }
     if not failed:
         return True
     if not allow_known_baseline_failures:
@@ -1583,6 +1727,8 @@ def _verification_passed(checks, baseline, *, allow_known_baseline_failures: boo
         if check.status not in {"passed", "skipped", "flaky"}
     }
     for check in checks:
+        if not getattr(check, "required", True):
+            continue
         if check.status in {"passed", "skipped", "flaky"}:
             continue
         if baseline_failures.get(check.command) != _check_fingerprint(check):

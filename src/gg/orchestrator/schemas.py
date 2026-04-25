@@ -377,6 +377,7 @@ class CheckResultModel(CompatibleArtifactModel):
     command: str
     status: str
     exit_code: int | None
+    id: str = ""
     category: str = "custom"
     required: bool = True
     stdout: str = ""
@@ -385,6 +386,7 @@ class CheckResultModel(CompatibleArtifactModel):
     stderr_path: str = ""
     duration_ms: int | None = Field(default=None, ge=0)
     truncated: bool = False
+    encoding_errors: bool = False
     baseline_status: str | None = None
     findings: list[dict[str, Any]] = Field(default_factory=list)
     attempts: int = Field(default=1, ge=0)
@@ -469,8 +471,24 @@ class ExecutionEvaluationModel(CompatibleArtifactModel):
     required_gates_passed: bool | None = None
     repair_recommended: bool = False
     reasons: list[str] = Field(default_factory=list)
+    review_dimensions: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    review_independence: dict[str, Any] = Field(default_factory=dict)
     deterministic_gates: dict[str, Any] = Field(default_factory=dict)
     llm_evaluation: dict[str, Any] | None = None
+
+    @field_validator("verdict")
+    @classmethod
+    def _verdict(cls, value: str) -> str:
+        if value and value not in {"accept", "reject", "repair"}:
+            raise ValueError(f"unknown execution evaluation verdict: {value}")
+        return value
+
+    @field_validator("traffic_light")
+    @classmethod
+    def _traffic_light(cls, value: str) -> str:
+        if value and value not in {"green", "yellow", "red"}:
+            raise ValueError(f"unknown execution evaluation traffic_light: {value}")
+        return value
 
     @field_validator("evaluated_at")
     @classmethod

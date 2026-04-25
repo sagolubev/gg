@@ -229,6 +229,14 @@ class RunStore:
         return [str(path) for path in orphans]
 
     def _remove_worktrees(self, run: RunState) -> None:
+        baseline_path = run.baseline.get("worktree_path") if isinstance(run.baseline, dict) else None
+        if baseline_path:
+            path = Path(baseline_path)
+            if path.exists():
+                self._remove_worktree_path(path)
+            baseline_branch = run.baseline.get("branch")
+            if baseline_branch:
+                self._delete_branch(str(baseline_branch))
         for candidate in run.candidate_states.values():
             if not candidate.worktree_path:
                 continue

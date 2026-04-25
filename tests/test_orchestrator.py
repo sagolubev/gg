@@ -31,6 +31,7 @@ from gg.orchestrator.schemas import (
 )
 from gg.orchestrator.state import CandidateState, InvalidTransitionError, RunState, TaskState
 from gg.orchestrator.store import RunStore
+from gg.orchestrator.task_analysis import TaskAnalyzer, extract_single_json_object
 from gg.platforms.base import GitPlatform, Issue, IssueComment
 from gg.platforms.github import GitHubPlatform
 from gg.platforms.gitlab import GitLabPlatform
@@ -141,6 +142,70 @@ class FakeAgent(AgentBackend):
         assert cwd is not None
         Path(cwd, "greeting.txt").write_text("hello from gg\n", encoding="utf-8")
         return "Created greeting.txt"
+
+    def is_available(self) -> bool:
+        return True
+
+
+class JsonAnalysisAgent(AgentBackend):
+    def generate(
+        self,
+        prompt: str,
+        *,
+        cwd: str | None = None,
+        timeout: int | None = None,
+        context: str | None = None,
+    ) -> str:
+        return """```json
+{
+  "schema_version": 1,
+  "ready": true,
+  "summary": "Create a greeting file",
+  "acceptance_criteria": ["greeting.txt exists"],
+  "candidate_files": ["greeting.txt"],
+  "risk_flags": ["small file change"],
+  "verification_hints": ["cat greeting.txt"],
+  "context_budget": {"estimated_tokens": 120, "truncated": false}
+}
+```"""
+
+    def is_available(self) -> bool:
+        return True
+
+
+class MalformedAnalysisAgent(AgentBackend):
+    def generate(
+        self,
+        prompt: str,
+        *,
+        cwd: str | None = None,
+        timeout: int | None = None,
+        context: str | None = None,
+    ) -> str:
+        return "Here is not quite JSON"
+
+    def is_available(self) -> bool:
+        return True
+
+
+class BlockedAnalysisAgent(AgentBackend):
+    def generate(
+        self,
+        prompt: str,
+        *,
+        cwd: str | None = None,
+        timeout: int | None = None,
+        context: str | None = None,
+    ) -> str:
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "ready": False,
+                "missing_questions": ["Which greeting language should be used?"],
+                "summary": "Need language choice",
+                "acceptance_criteria": [],
+            }
+        )
 
     def is_available(self) -> bool:
         return True
@@ -957,6 +1022,50 @@ def test_task_analysis_includes_issue_comments_and_local_inputs(tmp_path):
     for key in ("issue_comments", "local_inputs"):
         digest = snapshot["objects"][key]
         assert ContextSnapshotStore(tmp_path).read_text(digest)
+
+
+def test_task_analyzer_uses_versioned_json_contract_when_agent_provided(tmp_path):
+    init_repo(tmp_path)
+    issue = Issue(number=42, title="Add greeting", body="Write a greeting file.", labels=["ai-ready"])
+
+    brief = TaskAnalyzer(str(tmp_path), agent=JsonAnalysisAgent()).analyze(issue)
+
+    assert brief.summary == "Create a greeting file"
+    assert brief.acceptance_criteria == ["greeting.txt exists"]
+    assert brief.candidate_files == ["greeting.txt"]
+    assert brief.verification_hints == ["cat greeting.txt"]
+    assert brief.context_budget["estimated_tokens"] == 120
+
+
+def test_task_analyzer_falls_back_when_agent_json_is_malformed(tmp_path):
+    init_repo(tmp_path)
+    issue = Issue(number=42, title="Add greeting", body="Write a greeting file.", labels=["ai-ready"])
+
+    brief = TaskAnalyzer(str(tmp_path), agent=MalformedAnalysisAgent()).analyze(issue)
+
+    assert brief.summary == "Write a greeting file."
+    assert brief.acceptance_criteria[0] == "Implement the requested issue behavior."
+
+
+def test_task_analyzer_can_return_blocked_brief(tmp_path):
+    init_repo(tmp_path)
+    issue = Issue(number=42, title="Add greeting", body="Write a greeting file.", labels=["ai-ready"])
+
+    brief = TaskAnalyzer(str(tmp_path), agent=BlockedAnalysisAgent()).analyze(issue)
+
+    assert brief.blocked is True
+    assert brief.missing_questions == ["Which greeting language should be used?"]
+
+
+def test_json_extraction_rejects_conflicting_payloads():
+    try:
+        extract_single_json_object('{"ready": true}\n{"ready": false}')
+    except ValueError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("conflicting JSON payloads should fail")
+
+    assert "multiple conflicting JSON objects" in message
 
 
 def test_resume_interrupted_agent_running_marks_stale_candidate(tmp_path):

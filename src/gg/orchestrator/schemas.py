@@ -224,12 +224,36 @@ class TaskBriefModel(CompatibleArtifactModel):
     acceptance_criteria: list[str] = Field(default_factory=list)
     project_context: str = ""
     constraints: list[str] = Field(default_factory=list)
+    blocked: bool = False
+    missing_questions: list[str] = Field(default_factory=list)
+    candidate_files: list[str] = Field(default_factory=list)
+    risk_flags: list[str] = Field(default_factory=list)
+    verification_hints: list[str] = Field(default_factory=list)
+    context_budget: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _required_issue_fields(self) -> "TaskBriefModel":
         missing = [field for field in ("number", "title") if field not in self.issue]
         if missing:
             raise ValueError(f"issue missing required fields: {', '.join(missing)}")
+        return self
+
+
+class AnalysisResultModel(CompatibleArtifactModel):
+    schema_version: Literal[1] = 1
+    ready: bool = True
+    missing_questions: list[str] = Field(default_factory=list)
+    summary: str = ""
+    acceptance_criteria: list[str] = Field(default_factory=list)
+    candidate_files: list[str] = Field(default_factory=list)
+    risk_flags: list[str] = Field(default_factory=list)
+    verification_hints: list[str] = Field(default_factory=list)
+    context_budget: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _blocked_requires_question(self) -> "AnalysisResultModel":
+        if not self.ready and not self.missing_questions:
+            raise ValueError("blocked analysis must include missing_questions")
         return self
 
 

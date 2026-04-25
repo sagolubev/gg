@@ -77,6 +77,8 @@ class OrchestratorPipeline:
                 self.store.write(state)
 
                 brief = self._refresh_task_analysis(state, issue)
+                if brief.blocked:
+                    return self._block_on_task_analysis(state, issue, brief, dry_run=dry_run)
                 state.transition(TaskState.READY_FOR_EXECUTION, reason="task brief ready")
                 self.store.write(state)
 
@@ -175,6 +177,8 @@ class OrchestratorPipeline:
                 issue = self.platform.get_issue(issue_number)
                 if state.artifacts.get("last_input"):
                     brief = self._refresh_task_analysis(state, issue)
+                    if brief.blocked:
+                        return self._block_on_task_analysis(state, issue, brief, dry_run=False)
                 if state.state is TaskState.OUTCOME_PUBLISHING:
                     return self._resume_publishing(state, issue, no_pr=no_pr)
                 for candidate in state.candidate_states.values():
@@ -894,6 +898,31 @@ class OrchestratorPipeline:
             "bucket": exc.snapshot.bucket,
             "reset_at": exc.snapshot.reset_at,
             "remaining": exc.snapshot.remaining,
+        }
+
+    def _block_on_task_analysis(
+        self,
+        state,
+        issue: Issue,
+        brief: TaskBrief,
+        *,
+        dry_run: bool,
+    ) -> dict[str, Any]:
+        message = "; ".join(brief.missing_questions) or "task analysis needs more information"
+        if state.state is TaskState.TASK_ANALYSIS:
+            state.transition(TaskState.BLOCKED, reason="task analysis missing information")
+        elif state.state is not TaskState.BLOCKED:
+            state.recover_to(TaskState.BLOCKED, reason="task analysis missing information")
+        state.last_error = {"code": "missing_task_info", "message": message, "at": _now_placeholder()}
+        self.store.write(state)
+        if not dry_run:
+            self._mark_issue_blocked(issue.number, message)
+        return {
+            "run_id": state.run_id,
+            "state": state.state.value,
+            "blocked": True,
+            "missing_questions": brief.missing_questions,
+            "error": state.last_error,
         }
 
     def _eligible_issues(self, issues: list[Issue]) -> list[Issue]:

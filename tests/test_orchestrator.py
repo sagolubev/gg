@@ -363,6 +363,31 @@ class NeedsInputAgent(AgentBackend):
         return True
 
 
+class RepeatedNeedsInputAgent(AgentBackend):
+    def __init__(self):
+        self.calls = 0
+
+    def generate(
+        self,
+        prompt: str,
+        *,
+        cwd: str | None = None,
+        timeout: int | None = None,
+        context: str | None = None,
+    ) -> str:
+        self.calls += 1
+        assert cwd is not None
+        if self.calls == 1:
+            return "NEEDS_INPUT: Which greeting language should I use?"
+        if self.calls == 2:
+            return "NEEDS_INPUT: Which filename should I use?"
+        Path(cwd, "greeting.txt").write_text("hola desde gg\n", encoding="utf-8")
+        return "Created Spanish greeting."
+
+    def is_available(self) -> bool:
+        return True
+
+
 class InterruptingAgent(AgentBackend):
     def generate(
         self,
@@ -1377,6 +1402,27 @@ def test_needs_input_ignores_gg_stage_comments_on_resume(tmp_path):
     assert "last_input" not in state.artifacts
 
 
+def test_repeated_needs_input_does_not_reuse_stale_input(tmp_path):
+    init_repo(tmp_path)
+    pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=RepeatedNeedsInputAgent())
+
+    first_request = pipeline.run_issue(42, no_pr=True)
+    pipeline.provide(first_request["run_id"], message="Use Spanish")
+    second_request = pipeline.resume(first_request["run_id"], no_pr=True)
+    third_resume = pipeline.resume(first_request["run_id"], no_pr=True)
+
+    assert second_request["state"] == "NeedsInput"
+    assert third_resume["state"] == "NeedsInput"
+    assert third_resume["resumed"] is False
+    state = pipeline.store.load(first_request["run_id"])
+    assert "last_input" not in state.artifacts
+
+    pipeline.provide(first_request["run_id"], message="Use greeting.txt")
+    final = pipeline.resume(first_request["run_id"], no_pr=True)
+
+    assert final["state"] == "Completed"
+
+
 def test_provide_accepts_blocked_run_input(tmp_path):
     init_repo(tmp_path)
     platform = FakePlatform()
@@ -2063,7 +2109,8 @@ security:
         encoding="utf-8",
     )
 
-    result = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=DependencyChangingAgent()).run_issue(
+    platform = FakePlatform()
+    result = OrchestratorPipeline(tmp_path, platform=platform, agent=DependencyChangingAgent()).run_issue(
         42,
         no_pr=True,
     )
@@ -2072,6 +2119,7 @@ security:
     state = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent()).store.load(result["run_id"])
     candidate = state.candidate_states["candidate-1"]
     assert candidate.error == "Dependency manifest changes are disabled by policy"
+    assert platform.removed_labels[-1] == (42, ["gg:in-progress", "gg:blocked"])
     candidate_result = json.loads((tmp_path / candidate.result_path).read_text(encoding="utf-8"))
     assert candidate_result["effective_status"] == "failed"
     assert candidate_result["policy_violations"][0]["code"] == "dependency_changes_blocked"

@@ -186,7 +186,7 @@ class OrchestratorPipeline:
                 if state.state in {TaskState.BLOCKED, TaskState.NEEDS_INPUT}:
                     self._ingest_issue_comment_input(state, issue)
                     state = self.store.load(run_id)
-                    if _waiting_for_input(state) and not state.artifacts.get("last_input"):
+                    if _waiting_for_input(state) and not self._has_current_input(state):
                         return {
                             "run_id": run_id,
                             "state": state.state.value,
@@ -297,6 +297,7 @@ class OrchestratorPipeline:
                 "message": message,
                 "created_at": _now_placeholder(),
                 "answered_state": state.state.value,
+                "answered_candidate_id": _input_request_candidate_id(self.project_path, state),
             }
             path = self.store.write_json(run_id, f"inputs/input-v1-{sequence_number:04d}.json", artifact)
             state.artifacts["last_input"] = path
@@ -348,6 +349,7 @@ class OrchestratorPipeline:
                 "message": message,
                 "created_at": comment.created_at or _now_placeholder(),
                 "answered_state": state.state.value,
+                "answered_candidate_id": _input_request_candidate_id(self.project_path, state),
             },
         )
         state.artifacts["last_input"] = path
@@ -381,6 +383,19 @@ class OrchestratorPipeline:
         except (OSError, json.JSONDecodeError):
             return None
         return data.get("created_at")
+
+    def _has_current_input(self, state) -> bool:
+        input_path = state.artifacts.get("last_input")
+        if not input_path:
+            return False
+        request_created_at = self._input_request_created_at(state)
+        if not request_created_at:
+            return True
+        try:
+            data = json.loads((self.project_path / input_path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return False
+        return str(data.get("created_at", "")) > request_created_at
 
     def _execute_ready_state(
         self,
@@ -504,6 +519,7 @@ class OrchestratorPipeline:
                     },
                 )
                 state.artifacts["input_request"] = request_path
+                state.artifacts.pop("last_input", None)
                 state.transition(TaskState.NEEDS_INPUT, reason="candidate requested operator input")
                 self.store.write(state)
                 self._mark_issue_needs_input(issue.number, needs_input["error"] or "agent requested additional input")
@@ -921,7 +937,11 @@ class OrchestratorPipeline:
         )
 
     def _mark_issue_failed(self, issue_number: int, message: str) -> None:
-        self._best_effort_labels(issue_number, add=[], remove=[self.config.task_system.work_label])
+        self._best_effort_labels(
+            issue_number,
+            add=[],
+            remove=[self.config.task_system.work_label, self.config.task_system.blocked_label],
+        )
         self._best_effort_comment(
             issue_number,
             f"<!-- gg-stage=failed -->\ngg could not complete this issue: {message}",
@@ -1090,6 +1110,17 @@ def _waiting_for_input(state) -> bool:
     if state.state is TaskState.NEEDS_INPUT:
         return True
     return state.state is TaskState.BLOCKED and (state.last_error or {}).get("code") == "missing_task_info"
+
+
+def _input_request_candidate_id(project_path: Path, state) -> str | None:
+    request_path = state.artifacts.get("input_request")
+    if not request_path:
+        return None
+    try:
+        data = json.loads((project_path / request_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data.get("candidate_id")
 
 
 def _candidate_strategies(count: int) -> list[str]:

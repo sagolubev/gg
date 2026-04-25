@@ -312,7 +312,7 @@ def _reject_unknown_config_keys(raw: dict[str, Any], location: str) -> None:
         if children is None:
             continue
         if not isinstance(value, dict):
-            continue
+            raise ValueError(f"{location}.{key}: expected mapping")
         for child_key, child_value in value.items():
             if child_key not in children:
                 raise ValueError(f"{location}.{key}.{child_key}: unknown configuration key")

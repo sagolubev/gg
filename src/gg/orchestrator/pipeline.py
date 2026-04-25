@@ -56,15 +56,31 @@ class OrchestratorPipeline:
         self.agent = agent or create_agent_backend(self.config.runtime.agent_backend)
         self.knowledge = KnowledgeEngine(self.project_path)
 
-    def run_issue(self, issue_number: int, *, dry_run: bool = False, no_pr: bool = False) -> dict[str, Any]:
+    def run_issue(
+        self,
+        issue_number: int,
+        *,
+        dry_run: bool = False,
+        no_pr: bool = False,
+        skip_existing: bool = False,
+    ) -> dict[str, Any]:
         state = None
+        issue = None
         try:
-            issue = self.platform.get_issue(issue_number)
-            state = self.store.create(issue, dry_run=dry_run)
-            state.max_attempts = self.config.runtime.max_attempts
-            self.knowledge.record_issue_picked(issue_number=issue.number, title=issue.title, labels=issue.labels)
-
             with self.locks.issue(issue_number):
+                if skip_existing:
+                    existing = self._existing_local_issue_run(issue_number)
+                    if existing is not None:
+                        return {
+                            "run_id": existing.run_id,
+                            "state": "AlreadyClaimed",
+                            "existing_state": existing.state.value,
+                            "issue": existing.issue,
+                        }
+                issue = self.platform.get_issue(issue_number)
+                state = self.store.create(issue, dry_run=dry_run)
+                state.max_attempts = self.config.runtime.max_attempts
+                self.knowledge.record_issue_picked(issue_number=issue.number, title=issue.title, labels=issue.labels)
                 if not dry_run:
                     self.platform.validate_auth()
                 state.transition(TaskState.CLAIMING, reason="issue selected")
@@ -110,9 +126,9 @@ class OrchestratorPipeline:
                     state.recover_to(TaskState.TERMINAL_FAILURE, reason="pipeline_error before claim")
                 else:
                     state.fail(code="pipeline_error", message=str(exc))
-                self.knowledge.record_error(issue_number=issue.number, message=str(exc), pattern=type(exc).__name__)
+                self.knowledge.record_error(issue_number=issue_number, message=str(exc), pattern=type(exc).__name__)
                 self.store.write(state)
-                if not dry_run and not failed_before_claim:
+                if issue is not None and not dry_run and not failed_before_claim:
                     self._mark_issue_failed(issue.number, str(exc))
                 return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
             except Exception:
@@ -151,10 +167,18 @@ class OrchestratorPipeline:
             issue_numbers = [issue.number for issue in selected]
         workers = min(len(issue_numbers), self.config.runtime.max_parallel_runs)
         if workers <= 1:
-            results = [self.run_issue(issue_number, no_pr=no_pr) for issue_number in issue_numbers]
+            results = [
+                self.run_issue(issue_number, no_pr=no_pr, skip_existing=True)
+                for issue_number in issue_numbers
+            ]
         else:
             with ThreadPoolExecutor(max_workers=workers) as pool:
-                results = list(pool.map(lambda number: self.run_issue(number, no_pr=no_pr), issue_numbers))
+                results = list(
+                    pool.map(
+                        lambda number: self.run_issue(number, no_pr=no_pr, skip_existing=True),
+                        issue_numbers,
+                    )
+                )
         return {
             "state": "BatchCompleted",
             "count": len(results),
@@ -164,6 +188,14 @@ class OrchestratorPipeline:
 
     def status(self) -> list[dict[str, Any]]:
         return [run.to_dict() for run in self.store.list_runs()]
+
+    def _existing_local_issue_run(self, issue_number: int):
+        for run in self.store.list_runs():
+            if int(run.issue.get("number", 0)) != issue_number:
+                continue
+            if run.state not in {TaskState.TERMINAL_FAILURE, TaskState.CANCELLED}:
+                return run
+        return None
 
     def resume(self, run_id: str, *, no_pr: bool = False) -> dict[str, Any]:
         state = self.store.load(run_id)
@@ -336,8 +368,9 @@ class OrchestratorPipeline:
                 artifact = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 continue
-            if artifact.get("content_hash") == content_hash:
+            if artifact.get("content_hash") == content_hash and self._input_is_current(state, artifact):
                 state.artifacts["last_input"] = str(path.relative_to(self.project_path))
+                self._transition_after_input(state, reason="issue comment provided input")
                 self.store.write(state)
                 return state.artifacts["last_input"]
         sequence_number = len(existing) + 1
@@ -356,12 +389,15 @@ class OrchestratorPipeline:
             },
         )
         state.artifacts["last_input"] = path
-        if state.state is TaskState.BLOCKED:
-            state.transition(TaskState.TASK_ANALYSIS, reason="issue comment provided input")
-        elif state.state is TaskState.NEEDS_INPUT:
-            state.transition(TaskState.AGENT_RUNNING, reason="issue comment provided input")
+        self._transition_after_input(state, reason="issue comment provided input")
         self.store.write(state)
         return path
+
+    def _transition_after_input(self, state, *, reason: str) -> None:
+        if state.state is TaskState.BLOCKED:
+            state.transition(TaskState.TASK_ANALYSIS, reason=reason)
+        elif state.state is TaskState.NEEDS_INPUT:
+            state.transition(TaskState.AGENT_RUNNING, reason=reason)
 
     def _first_new_external_comment(self, state, issue: Issue):
         threshold = self._input_request_created_at(state) or state.updated_at
@@ -398,6 +434,12 @@ class OrchestratorPipeline:
             data = json.loads((self.project_path / input_path).read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return False
+        return self._input_is_current(state, data)
+
+    def _input_is_current(self, state, data: dict[str, Any]) -> bool:
+        request_created_at = self._input_request_created_at(state)
+        if not request_created_at:
+            return True
         return str(data.get("created_at", "")) > request_created_at
 
     def _execute_ready_state(

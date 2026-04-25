@@ -657,6 +657,24 @@ def test_load_config_rejects_unknown_nested_keys(tmp_path):
     assert "unknown configuration key" in message
 
 
+def test_load_config_rejects_non_mapping_sections(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        "verify:\n  tests: ''\nruntime: false\n",
+        encoding="utf-8",
+    )
+
+    try:
+        load_config(tmp_path)
+    except ValueError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("non-mapping runtime section should fail during config load")
+
+    assert ".gg/params.yaml.runtime" in message
+    assert "expected mapping" in message
+
+
 def test_run_store_rejects_invalid_state_json_with_path(tmp_path):
     init_repo(tmp_path)
     store = RunStore(tmp_path)
@@ -1455,6 +1473,34 @@ def test_repeated_needs_input_does_not_reuse_stale_input(tmp_path):
     assert final["state"] == "Completed"
 
 
+def test_issue_comment_same_text_creates_fresh_input_for_new_request(tmp_path):
+    init_repo(tmp_path)
+    platform = FakePlatform()
+    pipeline = OrchestratorPipeline(tmp_path, platform=platform, agent=RepeatedNeedsInputAgent())
+
+    first_request = pipeline.run_issue(42, no_pr=True)
+    first_input = pipeline.provide(first_request["run_id"], message="Use Spanish")
+    second_request = pipeline.resume(first_request["run_id"], no_pr=True)
+    old_input_path = tmp_path / first_input["input"]
+    old_input = json.loads(old_input_path.read_text(encoding="utf-8"))
+    old_input["created_at"] = "2000-01-01T00:00:00Z"
+    old_input_path.write_text(json.dumps(old_input, indent=2) + "\n", encoding="utf-8")
+    platform.issue.comments.append(
+        IssueComment(
+            body="Use Spanish",
+            author="maintainer",
+            created_at="2999-01-01T00:00:00Z",
+        )
+    )
+
+    final = pipeline.resume(first_request["run_id"], no_pr=True)
+
+    assert second_request["state"] == "NeedsInput"
+    assert final["state"] == "Completed"
+    state = pipeline.store.load(first_request["run_id"])
+    assert state.artifacts["last_input"].endswith("input-v1-0002.json")
+
+
 def test_provide_accepts_blocked_run_input(tmp_path):
     init_repo(tmp_path)
     platform = FakePlatform()
@@ -1703,6 +1749,22 @@ def test_run_batch_processes_selected_issues(tmp_path):
     assert [item["state"] for item in result["results"]] == ["Completed", "Completed"]
     run_store = OrchestratorPipeline(tmp_path, platform=platform, agent=FakeAgent()).store
     assert sorted(run.issue["number"] for run in run_store.list_runs()) == [1, 2]
+
+
+def test_run_batch_skips_issue_with_existing_local_success(tmp_path):
+    init_repo(tmp_path)
+    platform = MultiIssuePlatform([
+        Issue(number=1, title="First", body="Do one.", labels=["ai-ready"]),
+    ])
+    pipeline = OrchestratorPipeline(tmp_path, platform=platform, agent=FakeAgent())
+
+    first = pipeline.run_batch(batch_size=1, no_pr=True)
+    second = pipeline.run_batch(batch_size=1, no_pr=True)
+
+    assert first["results"][0]["state"] == "Completed"
+    assert second["results"][0]["state"] == "AlreadyClaimed"
+    assert second["results"][0]["existing_state"] == "Completed"
+    assert len(pipeline.store.list_runs()) == 1
 
 
 def test_init_params_generation(tmp_path):

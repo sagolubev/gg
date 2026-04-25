@@ -60,6 +60,7 @@ class SandboxRuntime:
         cwd: str | Path,
         timeout: int,
         policy: SandboxPolicy | None = None,
+        env: dict[str, str] | None = None,
     ) -> SandboxRunResult:
         if not self.is_available():
             raise RuntimeError(f"{self.executable} is not available")
@@ -76,6 +77,7 @@ class SandboxRuntime:
                     capture_output=True,
                     text=True,
                     timeout=timeout,
+                    env=env,
                 )
                 return SandboxRunResult(
                     command=command,

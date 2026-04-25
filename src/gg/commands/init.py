@@ -441,6 +441,7 @@ def _write_params(project_path: Path, console: Console) -> None:
             "require_sandbox_runtime": False,
             "candidate_timeout_seconds": 1800,
             "command_timeout_seconds": 600,
+            "setup_timeout_seconds": 600,
             "sandbox_policy": {
                 "allowed_domains": [],
                 "denied_domains": [],

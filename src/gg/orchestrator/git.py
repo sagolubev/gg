@@ -36,9 +36,12 @@ def changed_files(cwd: str | Path) -> list[str]:
         if not line.strip():
             continue
         if " -> " in line:
-            files.append(line.split(" -> ", 1)[1].strip())
+            path = line.split(" -> ", 1)[1].strip()
         else:
-            files.append(line[3:].strip())
+            path = line[3:].strip()
+        if path == ".gg-cache" or path.startswith(".gg-cache/"):
+            continue
+        files.append(path)
     return files
 
 
@@ -103,6 +106,8 @@ def diff(cwd: str | Path) -> str:
         return tracked
     untracked_blocks = []
     for rel_path in untracked.splitlines():
+        if rel_path == ".gg-cache" or rel_path.startswith(".gg-cache/"):
+            continue
         path = Path(cwd) / rel_path
         if path.is_file():
             text = path.read_text(encoding="utf-8", errors="replace")

@@ -37,6 +37,7 @@ class RuntimeConfig:
     require_sandbox_runtime: bool = False
     candidate_timeout_seconds: int = 1800
     command_timeout_seconds: int = 600
+    setup_timeout_seconds: int = 600
     sandbox_policy: SandboxPolicy = field(default_factory=SandboxPolicy)
 
 
@@ -154,6 +155,7 @@ def load_config(project_path: str | Path) -> GGConfig:
                     "require_sandbox_runtime": runtime.get("require_sandbox_runtime", False),
                     "candidate_timeout_seconds": runtime.get("candidate_timeout_seconds", 1800),
                     "command_timeout_seconds": runtime.get("command_timeout_seconds", 600),
+                    "setup_timeout_seconds": runtime.get("setup_timeout_seconds", 600),
                     "sandbox_policy": {
                         "allowed_domains": sandbox_policy.get("allowed_domains", []),
                         "denied_domains": sandbox_policy.get("denied_domains", []),
@@ -212,6 +214,7 @@ def load_config(project_path: str | Path) -> GGConfig:
             require_sandbox_runtime=model.runtime.require_sandbox_runtime,
             candidate_timeout_seconds=model.runtime.candidate_timeout_seconds,
             command_timeout_seconds=model.runtime.command_timeout_seconds,
+            setup_timeout_seconds=model.runtime.setup_timeout_seconds,
             sandbox_policy=SandboxPolicy(
                 allowed_domains=list(model.runtime.sandbox_policy.allowed_domains),
                 denied_domains=list(model.runtime.sandbox_policy.denied_domains),

@@ -26,7 +26,7 @@ from gg.orchestrator.state import CandidateState, TaskState
 from gg.orchestrator.state import TERMINAL_STATES
 from gg.orchestrator.store import RunStore
 from gg.orchestrator.task_analysis import TaskAnalyzer, TaskBrief
-from gg.orchestrator.verification import VerificationRunner
+from gg.orchestrator.verification import CheckResult, VerificationRunner
 from gg.platforms.base import GitPlatform, Issue
 from gg.utils.git_ops import find_repo_root
 
@@ -519,11 +519,14 @@ class OrchestratorPipeline:
         )
         verification_started = time.monotonic()
         candidate_dir = f"candidates/{candidate.candidate_id}"
-        verification = VerificationRunner(
-            self.config.verify.commands(),
-            timeout=self.config.runtime.command_timeout_seconds,
-            retry_count=self.config.verify.test_retry_count,
-        ).run(candidate.worktree_path)
+        if candidate.status == "setup_failed":
+            verification = [CheckResult(command="", status="skipped", exit_code=None, attempts=0)]
+        else:
+            verification = VerificationRunner(
+                self.config.verify.commands(),
+                timeout=self.config.runtime.command_timeout_seconds,
+                retry_count=self.config.verify.test_retry_count,
+            ).run(candidate.worktree_path)
         final_files = git_changed_files(candidate.worktree_path)
         final_patch = git_diff(candidate.worktree_path) if final_files else ""
         verification_mutated_worktree = (

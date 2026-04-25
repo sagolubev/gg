@@ -92,6 +92,7 @@ class RuntimeConfigModel(StrictArtifactModel):
     require_sandbox_runtime: bool = False
     candidate_timeout_seconds: int = Field(default=1800, ge=1)
     command_timeout_seconds: int = Field(default=600, ge=1)
+    setup_timeout_seconds: int = Field(default=600, ge=1)
     sandbox_policy: SandboxPolicyModel = Field(default_factory=SandboxPolicyModel)
 
 
@@ -302,6 +303,7 @@ class CandidateResultModel(CompatibleArtifactModel):
     patch: str = ""
     duration_seconds: float = Field(ge=0)
     error: str | None = None
+    setup: CheckResultModel | None = None
     attempt: int = Field(default=1, ge=1)
     strategy: str = "conservative"
     patch_path: str = ""

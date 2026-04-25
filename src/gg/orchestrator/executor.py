@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import subprocess
 import tempfile
 import time
@@ -15,6 +16,7 @@ from gg.orchestrator.git import WorktreeManager
 from gg.orchestrator.sandbox import SandboxPolicy, SandboxRuntime
 from gg.orchestrator.schemas import CandidateResultModel
 from gg.orchestrator.task_analysis import TaskBrief
+from gg.orchestrator.verification import CheckResult, VerificationRunner
 
 NEEDS_INPUT_PREFIX = "NEEDS_INPUT:"
 
@@ -32,6 +34,7 @@ class CandidateResult:
     patch: str
     duration_seconds: float
     error: str | None = None
+    setup: dict | None = None
 
     def to_dict(self) -> dict:
         data = asdict(self)
@@ -67,6 +70,22 @@ class CandidateExecutor:
         prompt = self._prompt(brief, strategy=strategy)
         started = time.monotonic()
         try:
+            setup = self._run_setup(worktree)
+            if setup.status not in {"passed", "skipped", "flaky"}:
+                return CandidateResult(
+                    schema_version=1,
+                    candidate_id=candidate_id,
+                    status="setup_failed",
+                    branch=branch,
+                    worktree_path=str(worktree),
+                    base_commit=base_commit,
+                    summary="Candidate setup failed.",
+                    changed_files=changed_files(worktree),
+                    patch="",
+                    duration_seconds=round(time.monotonic() - started, 3),
+                    error="candidate setup failed",
+                    setup=setup.to_dict(),
+                )
             summary = self._generate(prompt, worktree)
             needs_input = _extract_needs_input(summary)
             files = changed_files(worktree)
@@ -89,6 +108,7 @@ class CandidateExecutor:
                 patch=patch,
                 duration_seconds=round(time.monotonic() - started, 3),
                 error=error,
+                setup=setup.to_dict(),
             )
         except Exception as exc:
             return CandidateResult(
@@ -104,6 +124,16 @@ class CandidateExecutor:
                 duration_seconds=round(time.monotonic() - started, 3),
                 error=str(exc),
             )
+
+    def _run_setup(self, worktree: Path) -> CheckResult:
+        command = self.config.verify.setup.strip()
+        if not command:
+            return CheckResult(command="", status="skipped", exit_code=None, attempts=0)
+        return VerificationRunner(
+            [command],
+            timeout=self.config.runtime.setup_timeout_seconds,
+            env=self._candidate_env(worktree),
+        ).run(worktree)[0]
 
     def _generate(self, prompt: str, worktree: Path) -> str:
         if (
@@ -127,6 +157,7 @@ class CandidateExecutor:
             cwd=worktree,
             timeout=self.config.runtime.candidate_timeout_seconds,
             policy=self._sandbox_policy(),
+            env=self._candidate_env(worktree),
         )
         output = out_path.read_text(encoding="utf-8").strip() if out_path.exists() else ""
         out_path.unlink(missing_ok=True)
@@ -138,6 +169,21 @@ class CandidateExecutor:
 
     def _sandbox_policy(self) -> SandboxPolicy:
         return self.config.runtime.sandbox_policy
+
+    def _candidate_env(self, worktree: Path) -> dict[str, str]:
+        cache_root = worktree / ".gg-cache"
+        cache_root.mkdir(parents=True, exist_ok=True)
+        env = os.environ.copy()
+        env.update(
+            {
+                "PIP_CACHE_DIR": str(cache_root / "pip"),
+                "UV_CACHE_DIR": str(cache_root / "uv"),
+                "npm_config_cache": str(cache_root / "npm"),
+                "YARN_CACHE_FOLDER": str(cache_root / "yarn"),
+                "PNPM_HOME": str(cache_root / "pnpm"),
+            }
+        )
+        return env
 
     def _prompt(self, brief: TaskBrief, *, strategy: str) -> str:
         criteria = "\n".join(f"- {item}" for item in brief.acceptance_criteria)

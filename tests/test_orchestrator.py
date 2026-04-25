@@ -148,6 +148,21 @@ class FakeAgent(AgentBackend):
         return True
 
 
+class ExplodingAgent(AgentBackend):
+    def generate(
+        self,
+        prompt: str,
+        *,
+        cwd: str | None = None,
+        timeout: int | None = None,
+        context: str | None = None,
+    ) -> str:
+        raise AssertionError("agent should not run")
+
+    def is_available(self) -> bool:
+        return True
+
+
 class JsonAnalysisAgent(AgentBackend):
     def generate(
         self,
@@ -443,13 +458,15 @@ class FakeSandbox:
     def __init__(self):
         self.commands: list[list[str]] = []
         self.policies: list[SandboxPolicy | None] = []
+        self.envs: list[dict[str, str] | None] = []
 
     def is_available(self) -> bool:
         return True
 
-    def run(self, command, *, cwd, timeout, policy=None):
+    def run(self, command, *, cwd, timeout, policy=None, env=None):
         self.commands.append(command)
         self.policies.append(policy)
+        self.envs.append(env)
         Path(cwd, "sandboxed.txt").write_text("ok\n", encoding="utf-8")
         Path(command[3]).write_text("sandbox summary\n", encoding="utf-8")
         return SandboxRunResult(
@@ -1432,6 +1449,7 @@ def test_init_params_generation(tmp_path):
     assert config.runtime.agent_backend == "codex"
     assert config.runtime.candidates == 1
     assert config.runtime.max_parallel_runs == 1
+    assert config.runtime.setup_timeout_seconds == 600
     assert config.runtime.sandbox_policy.deny_read == ["~/.ssh", ".env"]
     assert config.audit.hash_events is False
     assert config.audit.external_sink == ""
@@ -1687,6 +1705,62 @@ runtime:
     assert sandbox.commands
     assert sandbox.commands[0][0:3] == ["codex", "exec", "-o"]
     assert sandbox.policies == [config.runtime.sandbox_policy]
+
+
+def test_candidate_setup_failure_is_persisted_without_running_agent(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        """verify:
+  setup: python -c 'import sys; sys.exit(4)'
+  tests: ''
+runtime:
+  setup_timeout_seconds: 5
+""",
+        encoding="utf-8",
+    )
+
+    result = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=ExplodingAgent()).run_issue(
+        42,
+        no_pr=True,
+    )
+
+    assert result["state"] == "TerminalFailure"
+    state = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent()).store.load(result["run_id"])
+    candidate = state.candidate_states["candidate-1"]
+    assert candidate.status == "setup_failed"
+    candidate_result = json.loads((tmp_path / candidate.result_path).read_text(encoding="utf-8"))
+    assert candidate_result["setup"]["status"] == "failed"
+
+
+def test_candidate_setup_uses_isolated_package_cache_env(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        """verify:
+  setup: python -c 'import os; from pathlib import Path; Path("pip-cache.txt").write_text(os.environ["PIP_CACHE_DIR"])'
+  tests: ''
+""",
+        encoding="utf-8",
+    )
+    config = load_config(tmp_path)
+    from gg.orchestrator.task_analysis import TaskBrief
+    task_brief = TaskBrief(
+        schema_version=1,
+        issue={"number": 42, "title": "Add greeting", "body": "", "labels": ["ai-ready"], "url": ""},
+        summary="Do it",
+        acceptance_criteria=["Add file"],
+        project_context="",
+    )
+
+    result = CandidateExecutor(tmp_path, FakeAgent(), config).run(
+        run_id="run-setup",
+        issue_number=42,
+        brief=task_brief,
+    )
+
+    cache_value = Path(result.worktree_path, "pip-cache.txt").read_text(encoding="utf-8")
+    assert result.status == "success"
+    assert ".gg-cache/pip" in cache_value
+    assert ".gg-cache" not in result.changed_files
 
 
 def test_context_snapshot_uses_content_addressed_objects(tmp_path):

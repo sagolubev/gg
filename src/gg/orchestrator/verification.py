@@ -24,10 +24,18 @@ class CheckResult:
 
 
 class VerificationRunner:
-    def __init__(self, commands: list[str], *, timeout: int = 600, retry_count: int = 0):
+    def __init__(
+        self,
+        commands: list[str],
+        *,
+        timeout: int = 600,
+        retry_count: int = 0,
+        env: dict[str, str] | None = None,
+    ):
         self.commands = commands
         self.timeout = timeout
         self.retry_count = max(0, retry_count)
+        self.env = env
 
     def run(self, cwd: str | Path) -> list[CheckResult]:
         if not self.commands:
@@ -67,6 +75,7 @@ class VerificationRunner:
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,
+                env=self.env,
             )
             return CheckResult(
                 command=command,

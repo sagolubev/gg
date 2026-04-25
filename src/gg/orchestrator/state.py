@@ -97,6 +97,8 @@ class CandidateState:
     started_at: str = ""
     finished_at: str | None = None
     error: str | None = None
+    agent_pid: int | None = None
+    sandbox_pid: int | None = None
 
 
 @dataclass

@@ -230,6 +230,8 @@ class CandidateStateModel(CompatibleArtifactModel):
     started_at: str = ""
     finished_at: str | None = None
     error: str | None = None
+    agent_pid: int | None = Field(default=None, ge=1)
+    sandbox_pid: int | None = Field(default=None, ge=1)
 
     @field_validator("status")
     @classmethod
@@ -598,6 +600,8 @@ class CandidateResultModel(CompatibleArtifactModel):
     baseline_failed_commands: list[str] = Field(default_factory=list)
     policy_violations: list[PolicyViolationModel] = Field(default_factory=list)
     effective_status: str | None = None
+    agent_pid: int | None = Field(default=None, ge=1)
+    sandbox_pid: int | None = Field(default=None, ge=1)
 
     @field_validator("status", "effective_status")
     @classmethod

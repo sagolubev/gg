@@ -540,10 +540,12 @@ class FakeSandbox:
     def is_available(self) -> bool:
         return True
 
-    def run(self, command, *, cwd, timeout, policy=None, env=None):
+    def run(self, command, *, cwd, timeout, policy=None, env=None, on_process_start=None):
         self.commands.append(command)
         self.policies.append(policy)
         self.envs.append(env)
+        if on_process_start is not None:
+            on_process_start(43210)
         Path(cwd, "sandboxed.txt").write_text("ok\n", encoding="utf-8")
         Path(command[3]).write_text("sandbox summary\n", encoding="utf-8")
         return SandboxRunResult(
@@ -759,6 +761,25 @@ def test_run_state_round_trips_phase_c_resume_fields():
         "duration_seconds": None,
         "events": 1,
     }
+
+
+def test_run_state_round_trips_candidate_process_ids():
+    state = RunState(
+        run_id="run-1",
+        issue={"number": 1},
+        candidate_states={
+            "candidate-1": CandidateState(
+                status="running",
+                agent_pid=111,
+                sandbox_pid=222,
+            )
+        },
+    )
+
+    loaded = RunState.from_dict(state.to_dict())
+
+    assert loaded.candidate_states["candidate-1"].agent_pid == 111
+    assert loaded.candidate_states["candidate-1"].sandbox_pid == 222
 
 
 def test_phase_c_artifact_placeholders_validate_minimal_contracts():
@@ -1098,6 +1119,31 @@ def test_pipeline_no_pr_completes_with_one_candidate(tmp_path):
     assert summary["artifacts"]["run_summary"].endswith("artifacts/run-summary.json")
     assert summary["candidate_states"]["candidate-1"]["status"] == "success"
     assert summary["logs"]["pipeline"].endswith("pipeline.jsonl")
+
+
+def test_pipeline_persists_runtime_candidate_process_metadata(tmp_path):
+    init_repo(tmp_path)
+    pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
+    ready = create_ready_run(pipeline)
+    state = pipeline.store.load(ready["run_id"])
+    state.candidate_states["candidate-1"] = CandidateState(status="running", started_at="2026-04-25T12:00:00Z")
+    pipeline.store.write(state)
+
+    pipeline._update_candidate_runtime_state(
+        state.run_id,
+        "candidate-1",
+        {
+            "worktree_path": "/tmp/worktree",
+            "branch": "gg/test",
+            "sandbox_pid": 43210,
+        },
+    )
+
+    loaded = pipeline.store.load(state.run_id)
+    candidate = loaded.candidate_states["candidate-1"]
+    assert candidate.worktree_path == "/tmp/worktree"
+    assert candidate.branch == "gg/test"
+    assert candidate.sandbox_pid == 43210
 
 
 def test_pipeline_fanout_selects_first_passing_candidate(tmp_path):
@@ -3123,6 +3169,7 @@ runtime:
     sandbox = FakeSandbox()
     config = load_config(tmp_path)
     executor = CandidateExecutor(tmp_path, CodexAgent(), config, sandbox=sandbox)
+    status_events: list[dict] = []
     from gg.orchestrator.task_analysis import TaskBrief
     task_brief = TaskBrief(
         schema_version=1,
@@ -3132,12 +3179,20 @@ runtime:
         project_context="",
     )
 
-    result = executor.run(run_id="run-123", issue_number=42, brief=task_brief)
+    result = executor.run(
+        run_id="run-123",
+        issue_number=42,
+        brief=task_brief,
+        on_status=status_events.append,
+    )
 
     assert result.status == "success"
+    assert result.sandbox_pid == 43210
     assert sandbox.commands
     assert sandbox.commands[0][0:3] == ["codex", "exec", "-o"]
     assert sandbox.policies == [config.runtime.sandbox_policy]
+    assert any(event.get("worktree_path") for event in status_events)
+    assert {"sandbox_pid": 43210} in status_events
 
 
 def test_candidate_setup_failure_is_persisted_without_running_agent(tmp_path):

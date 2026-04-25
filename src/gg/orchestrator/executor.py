@@ -9,7 +9,7 @@ import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from gg.agents.base import AgentBackend
 from gg.agents.codex import CodexAgent
@@ -22,6 +22,7 @@ from gg.orchestrator.task_analysis import TaskBrief
 from gg.orchestrator.verification import CheckResult, VerificationRunner
 
 NEEDS_INPUT_PREFIX = "NEEDS_INPUT:"
+CandidateStatusCallback = Callable[[dict[str, Any]], None]
 
 HOST_ENV_ALLOWLIST = frozenset(
     {
@@ -105,6 +106,8 @@ class CandidateResult:
     duration_seconds: float
     error: str | None = None
     setup: dict | None = None
+    agent_pid: int | None = None
+    sandbox_pid: int | None = None
 
     def to_dict(self) -> dict:
         data = asdict(self)
@@ -208,6 +211,7 @@ class CandidateExecutor:
         candidate_id: str = "candidate-1",
         strategy: str = "conservative",
         repair_context: dict[str, Any] | None = None,
+        on_status: CandidateStatusCallback | None = None,
     ) -> CandidateResult:
         sandbox_error = self.sandbox_preflight_error()
         if sandbox_error is not None:
@@ -221,8 +225,12 @@ class CandidateExecutor:
             branch=branch,
             base_ref=base_commit,
         )
+        if on_status is not None:
+            on_status({"worktree_path": str(worktree), "branch": branch})
         prompt = self._prompt(brief, strategy=strategy, repair_context=repair_context)
         started = time.monotonic()
+        runtime: dict[str, Any] = {}
+        runtime_callback = _merge_status_callbacks(runtime, on_status)
         try:
             setup = self._run_setup(worktree)
             if setup.status not in {"passed", "skipped", "flaky"}:
@@ -239,8 +247,10 @@ class CandidateExecutor:
                     duration_seconds=round(time.monotonic() - started, 3),
                     error="candidate setup failed",
                     setup=setup.to_dict(),
+                    agent_pid=runtime.get("agent_pid"),
+                    sandbox_pid=runtime.get("sandbox_pid"),
                 )
-            summary = self._generate(prompt, worktree)
+            summary = self._generate(prompt, worktree, on_status=runtime_callback)
             needs_input = _extract_needs_input(summary)
             files = changed_files(worktree)
             patch = diff(worktree) if files else ""
@@ -263,6 +273,8 @@ class CandidateExecutor:
                 duration_seconds=round(time.monotonic() - started, 3),
                 error=error,
                 setup=setup.to_dict(),
+                agent_pid=runtime.get("agent_pid"),
+                sandbox_pid=runtime.get("sandbox_pid"),
             )
         except Exception as exc:
             return CandidateResult(
@@ -277,6 +289,8 @@ class CandidateExecutor:
                 patch="",
                 duration_seconds=round(time.monotonic() - started, 3),
                 error=str(exc),
+                agent_pid=runtime.get("agent_pid"),
+                sandbox_pid=runtime.get("sandbox_pid"),
             )
 
     def _run_setup(self, worktree: Path) -> CheckResult:
@@ -289,10 +303,16 @@ class CandidateExecutor:
             env=self._candidate_env(worktree),
         ).run(worktree)[0]
 
-    def _generate(self, prompt: str, worktree: Path) -> str:
+    def _generate(
+        self,
+        prompt: str,
+        worktree: Path,
+        *,
+        on_status: CandidateStatusCallback | None = None,
+    ) -> str:
         if self.config.runtime.use_sandbox_runtime and isinstance(self.agent, CodexAgent):
             if self.sandbox.is_available():
-                return self._generate_in_sandbox(prompt, worktree)
+                return self._generate_in_sandbox(prompt, worktree, on_status=on_status)
         if self.sandbox_preflight_error() is not None:
             raise RuntimeError("sandbox-runtime is required but unavailable")
         return self.agent.generate(
@@ -301,7 +321,13 @@ class CandidateExecutor:
             timeout=self.config.runtime.candidate_timeout_seconds,
         )
 
-    def _generate_in_sandbox(self, prompt: str, worktree: Path) -> str:
+    def _generate_in_sandbox(
+        self,
+        prompt: str,
+        worktree: Path,
+        *,
+        on_status: CandidateStatusCallback | None = None,
+    ) -> str:
         out_path = Path(tempfile.mktemp(prefix="gg-candidate-", suffix=".md", dir=str(worktree)))
         result = self.sandbox.run(
             ["codex", "exec", "-o", str(out_path), prompt],
@@ -309,6 +335,9 @@ class CandidateExecutor:
             timeout=self.config.runtime.candidate_timeout_seconds,
             policy=self._sandbox_policy(),
             env=self._candidate_env(worktree),
+            on_process_start=(
+                (lambda pid: on_status({"sandbox_pid": pid})) if on_status is not None else None
+            ),
         )
         output = out_path.read_text(encoding="utf-8").strip() if out_path.exists() else ""
         out_path.unlink(missing_ok=True)
@@ -382,6 +411,18 @@ class CandidateExecutor:
             f"Project context:\n{brief.project_context}\n\n"
             "Return a concise implementation summary."
         )
+
+
+def _merge_status_callbacks(
+    runtime: dict[str, Any],
+    callback: CandidateStatusCallback | None,
+) -> CandidateStatusCallback:
+    def update(payload: dict[str, Any]) -> None:
+        runtime.update(payload)
+        if callback is not None:
+            callback(payload)
+
+    return update
 
 
 def _extract_needs_input(summary: str) -> str | None:

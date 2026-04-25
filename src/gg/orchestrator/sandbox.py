@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
 import shutil
 import subprocess
 import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Callable
 
 
 @dataclass(frozen=True)
@@ -39,6 +42,7 @@ class SandboxRunResult:
     stderr: str
     settings: dict
     timed_out: bool = False
+    pid: int | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -49,6 +53,7 @@ class SandboxRuntime:
 
     def __init__(self, executable: str = "srt-py"):
         self.executable = executable
+        self.last_pid: int | None = None
 
     def is_available(self) -> bool:
         return shutil.which(self.executable) is not None
@@ -61,6 +66,7 @@ class SandboxRuntime:
         timeout: int,
         policy: SandboxPolicy | None = None,
         env: dict[str, str] | None = None,
+        on_process_start: Callable[[int], None] | None = None,
     ) -> SandboxRunResult:
         if not self.is_available():
             raise RuntimeError(f"{self.executable} is not available")
@@ -70,30 +76,56 @@ class SandboxRuntime:
             json.dump(settings, settings_file)
             settings_file.flush()
             sandboxed = [self.executable, "--settings", settings_file.name, *command]
+            proc: subprocess.Popen[str] | None = None
             try:
-                completed = subprocess.run(
+                proc = subprocess.Popen(
                     sandboxed,
                     cwd=str(cwd),
-                    capture_output=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
                     text=True,
-                    timeout=timeout,
                     env=env,
+                    start_new_session=True,
                 )
+                self.last_pid = proc.pid
+                if on_process_start is not None:
+                    on_process_start(proc.pid)
+                stdout, stderr = proc.communicate(timeout=timeout)
                 return SandboxRunResult(
                     command=command,
-                    status="passed" if completed.returncode == 0 else "failed",
-                    exit_code=completed.returncode,
-                    stdout=completed.stdout,
-                    stderr=completed.stderr,
+                    status="passed" if proc.returncode == 0 else "failed",
+                    exit_code=proc.returncode,
+                    stdout=stdout,
+                    stderr=stderr,
                     settings=settings,
+                    pid=proc.pid,
                 )
             except subprocess.TimeoutExpired as exc:
+                stdout, stderr = _terminate_process_group(proc)
                 return SandboxRunResult(
                     command=command,
                     status="timeout",
                     exit_code=None,
-                    stdout=exc.stdout if isinstance(exc.stdout, str) else "",
-                    stderr=exc.stderr if isinstance(exc.stderr, str) else "",
+                    stdout=stdout or (exc.stdout if isinstance(exc.stdout, str) else ""),
+                    stderr=stderr or (exc.stderr if isinstance(exc.stderr, str) else ""),
                     settings=settings,
                     timed_out=True,
+                    pid=proc.pid if proc is not None else None,
                 )
+
+
+def _terminate_process_group(proc: subprocess.Popen[str] | None) -> tuple[str, str]:
+    if proc is None:
+        return "", ""
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except (OSError, ProcessLookupError):
+        proc.terminate()
+    try:
+        return proc.communicate(timeout=2)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            proc.kill()
+        return proc.communicate()

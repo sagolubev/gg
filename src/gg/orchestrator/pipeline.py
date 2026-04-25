@@ -5,6 +5,7 @@ from dataclasses import replace
 import hashlib
 import re
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -77,6 +78,7 @@ class OrchestratorPipeline:
         self.platform = platform or create_platform(self.config.task_system.platform, self.project_path)
         self.agent = agent or create_agent_backend(self.config.runtime.agent_backend)
         self.knowledge = KnowledgeEngine(self.project_path)
+        self._state_update_lock = threading.Lock()
 
     def configure_runtime(
         self,
@@ -646,6 +648,7 @@ class OrchestratorPipeline:
             for record in attempt_records:
                 candidate = record["candidate"]
                 effective_status = record["effective_status"]
+                latest_candidate_state = self.store.load(state.run_id).candidate_states.get(candidate.candidate_id)
                 state.candidate_states[candidate.candidate_id] = CandidateState(
                     status=effective_status,
                     worktree_path=candidate.worktree_path,
@@ -654,6 +657,9 @@ class OrchestratorPipeline:
                     started_at=state.candidate_states[candidate.candidate_id].started_at,
                     finished_at=_now_placeholder(),
                     error=record["error"],
+                    agent_pid=candidate.agent_pid or (latest_candidate_state.agent_pid if latest_candidate_state else None),
+                    sandbox_pid=candidate.sandbox_pid
+                    or (latest_candidate_state.sandbox_pid if latest_candidate_state else None),
                 )
                 self.knowledge.record_implementation_done(
                     issue_number=issue.number,
@@ -794,6 +800,24 @@ class OrchestratorPipeline:
             results = [future.result() for future in futures]
         return sorted(results, key=lambda item: item["index"])
 
+    def _update_candidate_runtime_state(
+        self,
+        run_id: str,
+        candidate_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        allowed = {"worktree_path", "branch", "agent_pid", "sandbox_pid"}
+        updates = {key: value for key, value in payload.items() if key in allowed and value}
+        if not updates:
+            return
+        with self._state_update_lock:
+            latest = self.store.load(run_id)
+            current = latest.candidate_states.get(candidate_id)
+            if current is None:
+                current = CandidateState(status="running", started_at=_now_placeholder())
+            latest.candidate_states[candidate_id] = replace(current, **updates)
+            self.store.write(latest)
+
     def _run_candidate_attempt(
         self,
         *,
@@ -814,6 +838,11 @@ class OrchestratorPipeline:
             candidate_id=candidate_id,
             strategy=strategy,
             repair_context=repair_context,
+            on_status=lambda payload: self._update_candidate_runtime_state(
+                state.run_id,
+                candidate_id,
+                payload,
+            ),
         )
         verification_started = time.monotonic()
         candidate_dir = f"candidates/{candidate.candidate_id}"

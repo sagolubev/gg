@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
-import json
 import re
 import time
 from pathlib import Path
@@ -20,6 +19,7 @@ from gg.orchestrator.git import changed_files as git_changed_files
 from gg.orchestrator.git import dependency_changed_files as git_dependency_changed_files
 from gg.orchestrator.git import commit_all, diff as git_diff, push_branch
 from gg.orchestrator.git import apply_patch as git_apply_patch
+from gg.orchestrator.git import fetch_default_branch as git_fetch_default_branch
 from gg.orchestrator.git import commit_exists as git_commit_exists
 from gg.orchestrator.git import is_ancestor as git_is_ancestor
 from gg.orchestrator.git import lfs_changed_files as git_lfs_changed_files
@@ -91,11 +91,13 @@ class OrchestratorPipeline:
                 if not dry_run:
                     if self.config.task_system.work_label:
                         self.platform.add_labels(issue.number, [self.config.task_system.work_label])
-                    self.platform.add_comment(
-                        issue.number,
-                        f"<!-- gg-run-id={state.run_id} stage=claim -->\n"
-                        f"gg picked this issue for implementation. Run: `{state.run_id}`",
-                    )
+                    claim_marker = f"<!-- gg-run-id={state.run_id} stage=claim -->"
+                    if not self._stage_comment_exists(issue.number, claim_marker):
+                        self.platform.add_comment(
+                            issue.number,
+                            f"{claim_marker}\n"
+                            f"gg picked this issue for implementation. Run: `{state.run_id}`",
+                        )
                 state.transition(TaskState.QUEUED, reason="claim complete")
                 state.transition(TaskState.RUN_STARTED, reason="start pipeline")
                 state.transition(TaskState.TASK_ANALYSIS, reason="create task brief")
@@ -132,7 +134,7 @@ class OrchestratorPipeline:
                 self.knowledge.record_error(issue_number=issue_number, message=str(exc), pattern=type(exc).__name__)
                 self.store.write(state)
                 if issue is not None and not dry_run and not failed_before_claim:
-                    self._mark_issue_failed(issue.number, str(exc))
+                    self._mark_issue_failed(issue.number, state.run_id, str(exc))
                 return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
             except Exception:
                 raise
@@ -218,7 +220,7 @@ class OrchestratorPipeline:
                     state.fail(code="missing_task_brief", message="cannot resume without task brief artifact")
                     self.store.write(state)
                     return {"run_id": run_id, "state": state.state.value, "error": state.last_error}
-                brief_data = json.loads((self.project_path / brief_path).read_text(encoding="utf-8"))
+                brief_data = self.store.read_json(brief_path)
                 brief = TaskBrief.from_dict(brief_data)
                 issue = self.platform.get_issue(issue_number)
                 if state.state in {TaskState.BLOCKED, TaskState.NEEDS_INPUT}:
@@ -335,7 +337,7 @@ class OrchestratorPipeline:
                 "message": message,
                 "created_at": _now_placeholder(),
                 "answered_state": state.state.value,
-                "answered_candidate_id": _input_request_candidate_id(self.project_path, state),
+                "answered_candidate_id": self._input_request_candidate_id(state),
             }
             path = self.store.write_json(run_id, f"inputs/input-v1-{sequence_number:04d}.json", artifact)
             state.artifacts["last_input"] = path
@@ -368,8 +370,8 @@ class OrchestratorPipeline:
         existing = sorted(inputs_dir.glob("input-v1-*.json"))
         for path in existing:
             try:
-                artifact = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
+                artifact = self.store.read_json(str(path.relative_to(self.project_path)))
+            except OSError:
                 continue
             if artifact.get("content_hash") == content_hash and self._input_is_current(state, artifact):
                 state.artifacts["last_input"] = str(path.relative_to(self.project_path))
@@ -388,7 +390,7 @@ class OrchestratorPipeline:
                 "message": message,
                 "created_at": comment.created_at or _now_placeholder(),
                 "answered_state": state.state.value,
-                "answered_candidate_id": _input_request_candidate_id(self.project_path, state),
+                "answered_candidate_id": self._input_request_candidate_id(state),
             },
         )
         state.artifacts["last_input"] = path
@@ -421,8 +423,8 @@ class OrchestratorPipeline:
         if not request_path:
             return None
         try:
-            data = json.loads((self.project_path / request_path).read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            data = self.store.read_json(request_path)
+        except (OSError, ValueError):
             return None
         return data.get("created_at")
 
@@ -434,8 +436,8 @@ class OrchestratorPipeline:
         if not request_created_at:
             return True
         try:
-            data = json.loads((self.project_path / input_path).read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            data = self.store.read_json(input_path)
+        except (OSError, ValueError):
             return False
         return self._input_is_current(state, data)
 
@@ -458,7 +460,7 @@ class OrchestratorPipeline:
             state.transition(TaskState.BLOCKED, reason="agent backend unavailable")
             state.last_error = {"code": "missing_agent", "message": "Codex CLI is not available"}
             self.store.write(state)
-            self._mark_issue_blocked(issue.number, "Codex CLI is not available")
+            self._mark_issue_blocked(issue.number, state.run_id, "Codex CLI is not available")
             return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
 
         baseline = VerificationRunner(
@@ -570,7 +572,11 @@ class OrchestratorPipeline:
                 state.artifacts.pop("last_input", None)
                 state.transition(TaskState.NEEDS_INPUT, reason="candidate requested operator input")
                 self.store.write(state)
-                self._mark_issue_needs_input(issue.number, needs_input["error"] or "agent requested additional input")
+                self._mark_issue_needs_input(
+                    issue.number,
+                    state.run_id,
+                    needs_input["error"] or "agent requested additional input",
+                )
                 return {
                     "run_id": state.run_id,
                     "state": state.state.value,
@@ -587,7 +593,7 @@ class OrchestratorPipeline:
         if selected is None:
             state.fail(code="candidate_failed", message="no candidate passed execution and verification")
             self.store.write(state)
-            self._mark_issue_failed(issue.number, "no candidate passed execution and verification")
+            self._mark_issue_failed(issue.number, state.run_id, "no candidate passed execution and verification")
             return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
         winner = selected["candidate"]
         verification_path = selected["verification_path"]
@@ -815,6 +821,13 @@ class OrchestratorPipeline:
         else:
             if state.publishing_step not in {"committed", "branch_pushed", "pr_created", "result_commented"}:
                 preflight = self._publish_preflight(state, winner)
+                if not preflight["default_sync_ok"]:
+                    state.fail(
+                        code="default_sync_failed",
+                        message=preflight["default_sync_message"] or "default branch sync failed",
+                    )
+                    self.store.write(state)
+                    return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
                 if not preflight["base_reachable"]:
                     state.fail(
                         code="base_rewritten",
@@ -835,9 +848,11 @@ class OrchestratorPipeline:
                     author_email=self.config.git.author_email,
                 )
                 if not committed:
-                    state.fail(code="empty_patch", message="no changes to publish")
-                    self.store.write(state)
-                    return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
+                    integration = self._integration_artifact(state)
+                    if not integration or git_resolve_ref(winner["worktree_path"], "HEAD") == integration.get("base_ref"):
+                        state.fail(code="empty_patch", message="no changes to publish")
+                        self.store.write(state)
+                        return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
                 state.publishing_step = "committed"
                 self.store.write(state)
             else:
@@ -909,14 +924,14 @@ class OrchestratorPipeline:
             state.fail(code="missing_evaluation", message="cannot resume publishing without evaluation artifact")
             self.store.write(state)
             return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
-        evaluation = json.loads((self.project_path / evaluation_path).read_text(encoding="utf-8"))
+        evaluation = self.store.read_json(evaluation_path)
         winner_id = evaluation.get("winner")
         candidate = state.candidate_states.get(winner_id)
         if not winner_id or candidate is None or not candidate.result_path:
             state.fail(code="missing_winner", message="cannot resume publishing without selected candidate")
             self.store.write(state)
             return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
-        result = json.loads((self.project_path / candidate.result_path).read_text(encoding="utf-8"))
+        result = self.store.read_json(candidate.result_path)
         return self._publish_winner(
             state,
             issue,
@@ -925,6 +940,7 @@ class OrchestratorPipeline:
                 "worktree_path": candidate.worktree_path,
                 "branch": candidate.branch,
                 "base_commit": result.get("base_commit", ""),
+                "patch_path": result.get("patch_path", ""),
                 "summary": result.get("summary", "Agent completed."),
                 "verification_path": result.get("verification", ""),
             },
@@ -935,10 +951,10 @@ class OrchestratorPipeline:
         worktree_path = winner["worktree_path"]
         base_commit = winner.get("base_commit", "")
         default_ref = self.config.git.default_branch
-        default_commit = git_resolve_ref(worktree_path, default_ref) or git_resolve_ref(
-            worktree_path,
-            f"origin/{default_ref}",
-        )
+        sync_ok, sync_attempted, sync_message = git_fetch_default_branch(worktree_path, default_ref)
+        origin_ref = git_resolve_ref(worktree_path, f"origin/{default_ref}")
+        local_ref = git_resolve_ref(worktree_path, default_ref)
+        default_commit = origin_ref or local_ref
         base_reachable = bool(base_commit and git_commit_exists(worktree_path, base_commit))
         base_is_ancestor_of_default = (
             bool(default_commit and base_reachable)
@@ -951,6 +967,10 @@ class OrchestratorPipeline:
             "base_commit": base_commit,
             "default_branch": default_ref,
             "default_commit": default_commit,
+            "default_commit_source": f"origin/{default_ref}" if origin_ref else default_ref,
+            "default_sync_ok": sync_ok,
+            "default_sync_attempted": sync_attempted,
+            "default_sync_message": sync_message,
             "base_reachable": base_reachable,
             "base_is_ancestor_of_default": base_is_ancestor_of_default,
             "stale_base": bool(default_commit and base_reachable and base_commit != default_commit),
@@ -990,47 +1010,62 @@ class OrchestratorPipeline:
                 message="selected candidate patch is empty",
             )
             return {"error": "selected candidate patch is empty"}
-        issue_number = int(state.issue.get("number", 0))
-        run_hash = hashlib.sha256(state.run_id.encode("utf-8")).hexdigest()[:8]
-        title_slug = safe_branch_slug(str(state.issue.get("title", "task")))[:32]
-        integration_branch = f"gg/issue-{issue_number}-{title_slug}-publish-{run_hash}"
-        base_ref = preflight.get("default_commit") or preflight["base_commit"]
-        worktree = WorktreeManager(self.project_path).create(
-            run_id=state.run_id,
-            candidate_id="integration",
-            branch=integration_branch,
-            base_ref=base_ref,
-        )
-        state.publishing_step = "integration_created"
-        integration_artifact = self.store.write_json(
-            state.run_id,
-            "artifacts/publishing-integration.json",
-            {
-                "schema_version": 1,
-                "candidate_id": winner["candidate_id"],
-                "source_branch": winner["branch"],
-                "integration_branch": integration_branch,
-                "worktree_path": str(worktree),
-                "base_ref": base_ref,
-                "patch_path": patch_path,
-                "created_at": _now_placeholder(),
-            },
-        )
-        state.artifacts["publishing_integration"] = integration_artifact
-        self.store.write(state)
-        applied, message = git_apply_patch(worktree, patch_text)
-        if not applied:
-            self._write_patch_conflict(
-                state,
-                winner,
-                patch_path=patch_path,
-                integration_branch=integration_branch,
-                worktree_path=str(worktree),
-                message=message,
+        integration = self._integration_artifact(state)
+        if (
+            integration
+            and state.publishing_step in {"integration_created", "patch_applied"}
+            and Path(integration.get("worktree_path", "")).exists()
+        ):
+            integration_branch = integration["integration_branch"]
+            worktree = Path(integration["worktree_path"])
+            base_ref = integration["base_ref"]
+            patch_path = integration.get("patch_path", patch_path)
+        else:
+            issue_number = int(state.issue.get("number", 0))
+            run_hash = hashlib.sha256(state.run_id.encode("utf-8")).hexdigest()[:8]
+            title_slug = safe_branch_slug(str(state.issue.get("title", "task")))[:32]
+            integration_branch = f"gg/issue-{issue_number}-{title_slug}-publish-{run_hash}"
+            base_ref = preflight.get("default_commit") or preflight["base_commit"]
+            worktree = WorktreeManager(self.project_path).create(
+                run_id=state.run_id,
+                candidate_id="integration",
+                branch=integration_branch,
+                base_ref=base_ref,
             )
-            return {"error": message}
-        state.publishing_step = "patch_applied"
-        self.store.write(state)
+            state.publishing_step = "integration_created"
+            integration_artifact = self.store.write_json(
+                state.run_id,
+                "artifacts/publishing-integration.json",
+                {
+                    "schema_version": 1,
+                    "candidate_id": winner["candidate_id"],
+                    "source_branch": winner["branch"],
+                    "integration_branch": integration_branch,
+                    "worktree_path": str(worktree),
+                    "base_ref": base_ref,
+                    "patch_path": patch_path,
+                    "created_at": _now_placeholder(),
+                },
+            )
+            state.artifacts["publishing_integration"] = integration_artifact
+            self.store.write(state)
+        if state.publishing_step == "integration_created" and git_changed_files(worktree):
+            state.publishing_step = "patch_applied"
+            self.store.write(state)
+        if state.publishing_step != "patch_applied":
+            applied, message = git_apply_patch(worktree, patch_text)
+            if not applied:
+                self._write_patch_conflict(
+                    state,
+                    winner,
+                    patch_path=patch_path,
+                    integration_branch=integration_branch,
+                    worktree_path=str(worktree),
+                    message=message,
+                )
+                return {"error": message}
+            state.publishing_step = "patch_applied"
+            self.store.write(state)
         verification = VerificationRunner(
             self.config.verify.commands(),
             timeout=self.config.runtime.command_timeout_seconds,
@@ -1043,8 +1078,8 @@ class OrchestratorPipeline:
         )
         if not _verification_passed(
             verification,
-            [],
-            allow_known_baseline_failures=False,
+            self._load_baseline_verification(state),
+            allow_known_baseline_failures=self.config.verify.allow_known_baseline_failures,
         ):
             state.artifacts["integration_verification"] = verification_path
             return {"error": "integration verification failed", "verification_path": verification_path}
@@ -1059,19 +1094,35 @@ class OrchestratorPipeline:
         }
 
     def _publishing_target(self, state, winner: dict[str, Any]) -> dict[str, Any]:
-        artifact_path = state.artifacts.get("publishing_integration")
-        if not artifact_path:
+        if state.publishing_step not in {"verified", "committed", "branch_pushed", "pr_created", "result_commented"}:
             return winner
-        try:
-            data = json.loads((self.project_path / artifact_path).read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        data = self._integration_artifact(state)
+        if data is None:
             return winner
+        verification_path = state.artifacts.get("integration_verification", winner.get("verification_path", ""))
         return {
             **winner,
             "integration_ready": True,
             "worktree_path": data.get("worktree_path", winner["worktree_path"]),
             "branch": data.get("integration_branch", winner["branch"]),
+            "verification_path": verification_path,
         }
+
+    def _integration_artifact(self, state) -> dict[str, Any] | None:
+        artifact_path = state.artifacts.get("publishing_integration")
+        if not artifact_path:
+            return None
+        try:
+            return self.store.read_json(artifact_path)
+        except (OSError, ValueError):
+            return None
+
+    def _load_baseline_verification(self, state) -> list[CheckResult]:
+        artifact_path = state.artifacts.get("baseline_verification")
+        if not artifact_path:
+            return []
+        data = self.store.read_json(artifact_path)
+        return [CheckResult(**check) for check in data.get("checks", [])]
 
     def _winner_patch_path(self, state, winner: dict[str, Any]) -> str:
         if winner.get("patch_path"):
@@ -1080,8 +1131,8 @@ class OrchestratorPipeline:
         if not candidate or not candidate.result_path:
             return ""
         try:
-            result = json.loads((self.project_path / candidate.result_path).read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            result = self.store.read_json(candidate.result_path)
+        except (OSError, ValueError):
             return ""
         return str(result.get("patch_path", ""))
 
@@ -1115,8 +1166,8 @@ class OrchestratorPipeline:
         if not artifact_path:
             return
         try:
-            data = json.loads((self.project_path / artifact_path).read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            data = self.store.read_json(artifact_path)
+        except (OSError, ValueError):
             return
         worktree_path = data.get("worktree_path")
         if worktree_path:
@@ -1172,37 +1223,43 @@ class OrchestratorPipeline:
         latest.last_error = {"code": "interrupted", "message": "Run interrupted by operator signal", "at": _now_placeholder()}
         self.store.write(latest)
 
-    def _mark_issue_blocked(self, issue_number: int, message: str) -> None:
+    def _mark_issue_blocked(self, issue_number: int, run_id: str, message: str) -> None:
         self._best_effort_labels(
             issue_number,
             add=[self.config.task_system.blocked_label],
             remove=[self.config.task_system.work_label],
         )
-        self._best_effort_comment(
+        self._best_effort_stage_comment(
             issue_number,
-            f"<!-- gg-stage=blocked -->\ngg blocked this issue: {message}",
+            run_id,
+            "blocked",
+            f"gg blocked this issue: {message}",
         )
 
-    def _mark_issue_needs_input(self, issue_number: int, message: str) -> None:
+    def _mark_issue_needs_input(self, issue_number: int, run_id: str, message: str) -> None:
         self._best_effort_labels(
             issue_number,
             add=[self.config.task_system.blocked_label],
             remove=[self.config.task_system.work_label],
         )
-        self._best_effort_comment(
+        self._best_effort_stage_comment(
             issue_number,
-            f"<!-- gg-stage=needs-input -->\ngg needs local input to continue: {message}",
+            run_id,
+            "needs-input",
+            f"gg needs local input to continue: {message}",
         )
 
-    def _mark_issue_failed(self, issue_number: int, message: str) -> None:
+    def _mark_issue_failed(self, issue_number: int, run_id: str, message: str) -> None:
         self._best_effort_labels(
             issue_number,
             add=[],
             remove=[self.config.task_system.work_label, self.config.task_system.blocked_label],
         )
-        self._best_effort_comment(
+        self._best_effort_stage_comment(
             issue_number,
-            f"<!-- gg-stage=failed -->\ngg could not complete this issue: {message}",
+            run_id,
+            "failed",
+            f"gg could not complete this issue: {message}",
         )
 
     def _mark_issue_done(self, issue_number: int) -> None:
@@ -1223,11 +1280,21 @@ class OrchestratorPipeline:
         except Exception:
             return
 
-    def _best_effort_comment(self, issue_number: int, body: str) -> None:
+    def _best_effort_stage_comment(self, issue_number: int, run_id: str, stage: str, message: str) -> None:
+        marker = f"<!-- gg-run-id={run_id} stage={stage} -->"
+        if self._stage_comment_exists(issue_number, marker):
+            return
         try:
-            self.platform.add_comment(issue_number, body)
+            self.platform.add_comment(issue_number, f"{marker}\n{message}")
         except Exception:
             return
+
+    def _stage_comment_exists(self, issue_number: int, marker: str) -> bool:
+        try:
+            issue = self.platform.get_issue(issue_number)
+        except Exception:
+            return False
+        return _issue_has_comment_marker(issue, marker)
 
     def _block_on_rate_limit(self, state, issue_number: int, exc: RateLimitThrottleError) -> dict[str, Any]:
         artifact = self.store.write_json(
@@ -1288,7 +1355,7 @@ class OrchestratorPipeline:
         state.last_error = {"code": "missing_task_info", "message": message, "at": _now_placeholder()}
         self.store.write(state)
         if not dry_run:
-            self._mark_issue_blocked(issue.number, message)
+            self._mark_issue_blocked(issue.number, state.run_id, message)
         return {
             "run_id": state.run_id,
             "state": state.state.value,
@@ -1347,10 +1414,20 @@ class OrchestratorPipeline:
         artifacts: list[dict[str, Any]] = []
         for path in sorted(inputs_dir.glob("input-v1-*.json")):
             try:
-                artifacts.append(json.loads(path.read_text(encoding="utf-8")))
-            except (OSError, json.JSONDecodeError):
+                artifacts.append(self.store.read_json(str(path.relative_to(self.project_path))))
+            except OSError:
                 continue
         return artifacts
+
+    def _input_request_candidate_id(self, state) -> str | None:
+        request_path = state.artifacts.get("input_request")
+        if not request_path:
+            return None
+        try:
+            data = self.store.read_json(request_path)
+        except (OSError, ValueError):
+            return None
+        return data.get("candidate_id")
 
 
 def _parse_pr_number(pr_url: str) -> int:
@@ -1368,17 +1445,6 @@ def _waiting_for_input(state) -> bool:
     if state.state is TaskState.NEEDS_INPUT:
         return True
     return state.state is TaskState.BLOCKED and (state.last_error or {}).get("code") == "missing_task_info"
-
-
-def _input_request_candidate_id(project_path: Path, state) -> str | None:
-    request_path = state.artifacts.get("input_request")
-    if not request_path:
-        return None
-    try:
-        data = json.loads((project_path / request_path).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    return data.get("candidate_id")
 
 
 def _candidate_strategies(count: int) -> list[str]:

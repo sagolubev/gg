@@ -66,6 +66,28 @@ def resolve_ref(cwd: str | Path, ref: str) -> str | None:
     return completed.stdout.strip()
 
 
+def fetch_default_branch(cwd: str | Path, default_branch: str) -> tuple[bool, bool, str]:
+    remote = subprocess.run(
+        ["git", "remote", "get-url", "origin"],
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if remote.returncode != 0:
+        return True, False, "origin remote is not configured"
+    completed = subprocess.run(
+        ["git", "fetch", "origin", default_branch],
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    if completed.returncode != 0:
+        return False, True, completed.stderr.strip() or completed.stdout.strip() or "git fetch failed"
+    return True, True, completed.stderr.strip() or completed.stdout.strip()
+
+
 def changed_files(cwd: str | Path) -> list[str]:
     output = run_git(["status", "--short"], cwd)
     files: list[str] = []

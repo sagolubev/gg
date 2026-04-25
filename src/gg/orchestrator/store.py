@@ -91,6 +91,16 @@ class RunStore:
         tmp.replace(path)
         return str(path.relative_to(self.project_path))
 
+    def read_json(self, relative_path: str) -> dict[str, Any]:
+        path = self.project_path / relative_path
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{path}: invalid JSON: {exc.msg}") from exc
+        validation_path = _validation_relative_path(relative_path)
+        _validate_json_artifact(validation_path, data)
+        return data
+
     def write_text(self, run_id: str, relative_path: str, text: str) -> str:
         path = self.path_for(run_id) / relative_path
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -488,6 +498,17 @@ def _validate_json_artifact(relative_path: str, data: dict[str, Any]) -> None:
         schema.model_validate(data)
     except Exception as exc:
         raise ValueError(validation_error_message(relative_path, exc)) from exc
+
+
+def _validation_relative_path(relative_path: str) -> str:
+    parts = Path(relative_path).parts
+    try:
+        runs_index = parts.index("runs")
+    except ValueError:
+        return relative_path
+    if runs_index + 2 >= len(parts):
+        return relative_path
+    return str(Path(*parts[runs_index + 2:]))
 
 
 def _parse_utc(value: str) -> datetime:

@@ -1375,6 +1375,154 @@ def test_publish_records_patch_conflict_before_pr(monkeypatch, tmp_path):
     assert platform.prs == []
 
 
+def test_resume_publish_applies_existing_integration_before_commit(monkeypatch, tmp_path):
+    init_repo(tmp_path)
+    monkeypatch.setattr("gg.orchestrator.pipeline.push_branch", lambda *_args, **_kwargs: None)
+    platform = FakePlatform()
+    pipeline = OrchestratorPipeline(tmp_path, platform=platform, agent=FakeAgent())
+    ready = pipeline.run_issue(42, dry_run=True)
+    state = pipeline.store.load(ready["run_id"])
+    base_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True).strip()
+    patch_path = pipeline.store.write_text(
+        state.run_id,
+        "candidates/candidate-1/patch.diff",
+        """diff --git a/resumed.txt b/resumed.txt
+new file mode 100644
+index 0000000..186cf24
+--- /dev/null
++++ b/resumed.txt
+@@ -0,0 +1 @@
++resumed
+""",
+    )
+    worktree = tmp_path.parent / ".gg-worktrees" / tmp_path.name / state.run_id / "integration"
+    subprocess.run(
+        ["git", "worktree", "add", "-b", "gg/resume-integration", str(worktree), base_commit],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    state.recover_to(TaskState.OUTCOME_PUBLISHING, reason="test resume integration")
+    state.publishing_step = "integration_created"
+    state.artifacts["publishing_integration"] = pipeline.store.write_json(
+        state.run_id,
+        "artifacts/publishing-integration.json",
+        {
+            "schema_version": 1,
+            "candidate_id": "candidate-1",
+            "source_branch": "gg/source",
+            "integration_branch": "gg/resume-integration",
+            "worktree_path": str(worktree),
+            "base_ref": base_commit,
+            "patch_path": patch_path,
+            "created_at": state.updated_at,
+        },
+    )
+    pipeline.store.write(state)
+
+    result = pipeline._publish_winner(
+        state,
+        platform.issue,
+        {
+            "candidate_id": "candidate-1",
+            "worktree_path": str(tmp_path),
+            "branch": "gg/source",
+            "base_commit": base_commit,
+            "patch_path": patch_path,
+            "summary": "done",
+            "verification_path": "verify.json",
+        },
+        no_pr=False,
+    )
+
+    assert result["state"] == "Completed"
+    assert platform.prs[0]["head"] == "gg/resume-integration"
+    assert not worktree.exists()
+
+
+def test_publish_fails_when_default_branch_sync_fails(monkeypatch, tmp_path):
+    init_repo(tmp_path)
+    monkeypatch.setattr(
+        "gg.orchestrator.pipeline.git_fetch_default_branch",
+        lambda *_args, **_kwargs: (False, True, "fetch rejected"),
+    )
+    platform = FakePlatform()
+    pipeline = OrchestratorPipeline(tmp_path, platform=platform, agent=FakeAgent())
+    ready = pipeline.run_issue(42, dry_run=True)
+    state = pipeline.store.load(ready["run_id"])
+    state.recover_to(TaskState.OUTCOME_PUBLISHING, reason="test sync failure")
+    state.publishing_step = "started"
+    pipeline.store.write(state)
+
+    result = pipeline._publish_winner(
+        state,
+        platform.issue,
+        {
+            "candidate_id": "candidate-1",
+            "worktree_path": str(tmp_path),
+            "branch": "gg/test",
+            "base_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True).strip(),
+            "patch_path": "missing.diff",
+            "summary": "done",
+            "verification_path": "verify.json",
+        },
+        no_pr=False,
+    )
+
+    failed = pipeline.store.load(ready["run_id"])
+    preflight = json.loads((tmp_path / failed.artifacts["publishing_preflight"]).read_text(encoding="utf-8"))
+    assert result["state"] == "TerminalFailure"
+    assert result["error"]["code"] == "default_sync_failed"
+    assert preflight["default_sync_ok"] is False
+    assert platform.prs == []
+
+
+def test_publish_integration_verification_allows_identical_baseline_failure(monkeypatch, tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        "verify:\n  tests: \"python -c 'import sys; sys.exit(7)'\"\n  allow_known_baseline_failures: true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("gg.orchestrator.pipeline.push_branch", lambda *_args, **_kwargs: None)
+
+    result = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent()).run_issue(42)
+
+    assert result["state"] == "Completed"
+
+
+def test_resume_publishing_rejects_invalid_evaluation_artifact(tmp_path):
+    init_repo(tmp_path)
+    pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
+    ready = pipeline.run_issue(42, dry_run=True)
+    state = pipeline.store.load(ready["run_id"])
+    state.recover_to(TaskState.OUTCOME_PUBLISHING, reason="test invalid evaluation")
+    evaluation_path = tmp_path / ".gg" / "runs" / state.run_id / "artifacts" / "evaluation.json"
+    evaluation_path.parent.mkdir(parents=True, exist_ok=True)
+    evaluation_path.write_text('{"schema_version": 1, "winner": 42, "candidates": []}\n', encoding="utf-8")
+    state.artifacts["evaluation"] = str(evaluation_path.relative_to(tmp_path))
+    pipeline.store.write(state)
+
+    try:
+        pipeline.resume(ready["run_id"])
+    except ValueError as exc:
+        assert "artifacts/evaluation.json.winner" in str(exc)
+    else:
+        raise AssertionError("invalid evaluation artifact should fail schema validation on resume")
+
+
+def test_stage_comment_uses_run_marker_for_idempotency(tmp_path):
+    init_repo(tmp_path)
+    platform = FakePlatform()
+    pipeline = OrchestratorPipeline(tmp_path, platform=platform, agent=FakeAgent())
+    ready = pipeline.run_issue(42, dry_run=True)
+    marker = f"<!-- gg-run-id={ready['run_id']} stage=blocked -->"
+    platform.issue.comments.append(IssueComment(body=f"{marker}\nold blocked", author="gg"))
+
+    pipeline._mark_issue_blocked(42, ready["run_id"], "still blocked")
+
+    assert platform.comments == []
+
+
 def test_publish_fails_with_preflight_artifact_when_base_commit_missing(tmp_path):
     init_repo(tmp_path)
     platform = FakePlatform()

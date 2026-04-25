@@ -411,6 +411,10 @@ class PublishingPreflightModel(CompatibleArtifactModel):
     base_commit: str
     default_branch: str
     default_commit: str | None = None
+    default_commit_source: str = ""
+    default_sync_ok: bool = True
+    default_sync_attempted: bool = False
+    default_sync_message: str = ""
     base_reachable: bool
     base_is_ancestor_of_default: bool
     stale_base: bool

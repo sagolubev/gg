@@ -5,6 +5,7 @@ import json
 import os
 import re
 import socket
+import subprocess
 import sys
 import time
 import threading
@@ -202,20 +203,97 @@ class LockManager:
         self,
         *,
         max_heartbeat_age_seconds: float | None = None,
+        queue_stale_seconds: float | None = None,
         now: datetime | None = None,
     ) -> list[dict[str, Any]]:
         if not self.root.exists():
             return []
         stale: list[dict[str, Any]] = []
         for path in sorted(self.root.glob("*.lock")):
+            is_queue_lock = path.name == "run-queue.lock"
+            threshold = (
+                queue_stale_seconds if is_queue_lock and queue_stale_seconds is not None
+                else max_heartbeat_age_seconds
+            )
             stale_owner = FileLock.stale_owner(
                 path,
-                max_heartbeat_age_seconds=max_heartbeat_age_seconds,
+                max_heartbeat_age_seconds=threshold,
                 now=now,
             )
             if stale_owner is not None:
                 stale.append(stale_owner)
         return stale
+
+    def recovery_scan(self, runs_dir: str | Path, project_path: str | Path) -> list[dict[str, Any]]:
+        runs_dir = Path(runs_dir)
+        project_path = Path(project_path)
+        issues: list[dict[str, Any]] = []
+
+        stale_locks = {item["path"]: item for item in self.scan_stale(max_heartbeat_age_seconds=3600)}
+
+        worktree_paths: set[str] = set()
+        try:
+            result = subprocess.run(
+                ["git", "worktree", "list", "--porcelain"],
+                cwd=project_path,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            for line in result.stdout.splitlines():
+                if line.startswith("worktree "):
+                    worktree_paths.add(line[len("worktree "):].strip())
+        except (subprocess.SubprocessError, FileNotFoundError, OSError):
+            pass
+
+        if not runs_dir.exists():
+            return issues
+
+        for run_dir in sorted(runs_dir.iterdir()):
+            state_path = run_dir / "state.json"
+            if not state_path.exists():
+                continue
+            try:
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            run_id = state.get("run_id", run_dir.name)
+            run_state = state.get("state", "")
+            terminal_states = {"Completed", "TerminalFailure", "Cancelled"}
+            if run_state in terminal_states:
+                continue
+
+            safe_run_id = re.sub(r"[^A-Za-z0-9._-]+", "-", run_id).strip("-") or "run"
+            lock_path = self.root / f"run-{safe_run_id}.lock"
+            lock_missing = not lock_path.exists()
+            lock_stale = str(lock_path) in stale_locks
+
+            for cid, cstate in state.get("candidate_states", {}).items():
+                wt = cstate.get("worktree_path", "")
+                if wt and wt not in worktree_paths:
+                    issues.append({
+                        "run_id": run_id,
+                        "candidate_id": cid,
+                        "issue": "worktree_missing",
+                        "worktree_path": wt,
+                        "run_state": run_state,
+                    })
+
+            if lock_missing and run_state not in terminal_states:
+                issues.append({
+                    "run_id": run_id,
+                    "issue": "lock_missing_for_active_run",
+                    "run_state": run_state,
+                })
+            elif lock_stale:
+                issues.append({
+                    "run_id": run_id,
+                    "issue": "lock_stale",
+                    "run_state": run_state,
+                    "lock_detail": stale_locks[str(lock_path)],
+                })
+
+        return issues
 
 
 def _parse_timestamp(value: str) -> datetime | None:

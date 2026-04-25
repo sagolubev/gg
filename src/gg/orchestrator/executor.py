@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import subprocess
 import sys
@@ -441,6 +442,7 @@ class CandidateExecutor:
                 f"Base strategy hint: {base_strategy}."
             )
         repair_section = _repair_context_section(repair_context)
+        structured_context = _structured_brief_section(brief)
         return (
             "You are implementing a GitHub issue in this repository.\n"
             "Make the smallest correct code change, update tests when needed, and leave the worktree with the patch applied.\n"
@@ -452,6 +454,7 @@ class CandidateExecutor:
             f"Summary:\n{brief.summary}\n\n"
             f"Acceptance criteria:\n{criteria}\n\n"
             f"Project context:\n{brief.project_context}\n\n"
+            f"{structured_context}"
             "Return a concise implementation summary."
         )
 
@@ -522,6 +525,22 @@ def _repair_context_summary(repair_context: dict[str, Any] | None) -> str:
     parent = repair_context.get("parent_candidate_id") or "unknown"
     feedback = str(repair_context.get("feedback") or "").strip()
     return f"repair parent={parent}; feedback={feedback[:500]}"
+
+
+def _structured_brief_section(brief: TaskBrief) -> str:
+    payload = {
+        "classification": brief.classification,
+        "implementation": brief.implementation,
+        "verification": brief.verification,
+        "project_context_details": brief.project_context_details,
+    }
+    payload = {key: value for key, value in payload.items() if value}
+    if not payload:
+        return ""
+    return (
+        "Structured task brief:\n"
+        f"{json.dumps(payload, indent=2, ensure_ascii=False)}\n\n"
+    )
 
 
 def _utc_now() -> str:

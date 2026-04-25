@@ -19,7 +19,7 @@ from gg.cli import cli
 from gg.commands.init import _write_operational_gitignore, _write_params
 from gg.orchestrator.config import load_config
 from gg.orchestrator.context import ContextSnapshotStore
-from gg.orchestrator.evaluation import CandidateEvaluator
+from gg.orchestrator.evaluation import CandidateEvaluator, build_run_outcome
 from gg.orchestrator.executor import CandidateExecutor
 from gg.orchestrator import git as git_module
 from gg.orchestrator.git import commit_all
@@ -31,6 +31,7 @@ from gg.orchestrator.sandbox import SandboxPolicy, SandboxRunResult, SandboxRunt
 from gg.orchestrator.schemas import (
     AgentHandoffModel,
     AgentResultModel,
+    AnalysisResultModel,
     ArchiveSummaryModel,
     CandidateResultModel,
     ExecutionEvaluationModel,
@@ -38,6 +39,7 @@ from gg.orchestrator.schemas import (
     InputArtifactModel,
     RunOutcomeModel,
     RunStateModel,
+    TaskBriefModel,
     validation_error_message,
 )
 from gg.orchestrator.state import CandidateState, InvalidTransitionError, RunState, TaskState
@@ -210,6 +212,44 @@ class JsonAnalysisAgent(AgentBackend):
   "context_budget": {"estimated_tokens": 120, "truncated": false}
 }
 ```"""
+
+    def is_available(self) -> bool:
+        return True
+
+
+class StructuredAnalysisAgent(AgentBackend):
+    supports_task_analysis = True
+
+    def generate(
+        self,
+        prompt: str,
+        *,
+        cwd: str | None = None,
+        timeout: int | None = None,
+        context: str | None = None,
+    ) -> str:
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "ready": True,
+                "summary": "Create a greeting file",
+                "acceptance_criteria": ["greeting.txt exists"],
+                "classification": {"task_type": "feature", "complexity": "small"},
+                "implementation": {
+                    "candidate_files": ["greeting.txt"],
+                    "strategy_hints": ["conservative"],
+                },
+                "verification": {
+                    "hints": ["cat greeting.txt"],
+                    "required_gates": ["tests"],
+                },
+                "project_context_details": {"source": "test-agent", "truncated": False},
+                "candidate_files": ["greeting.txt"],
+                "risk_flags": ["small file change"],
+                "verification_hints": ["cat greeting.txt"],
+                "context_budget": {"estimated_tokens": 120, "truncated": False},
+            }
+        )
 
     def is_available(self) -> bool:
         return True
@@ -888,6 +928,66 @@ def test_phase_c_artifact_placeholders_validate_minimal_contracts():
     )
 
 
+def test_task_brief_model_accepts_old_and_structured_shapes():
+    old_shape = TaskBriefModel.model_validate(
+        {
+            "schema_version": 1,
+            "issue": {"number": 1, "title": "Old issue"},
+            "summary": "Do the work",
+        }
+    )
+    structured = TaskBriefModel.model_validate(
+        {
+            "schema_version": 1,
+            "issue": {"number": 1, "title": "Structured issue"},
+            "summary": "Do the work",
+            "classification": {"task_type": "feature"},
+            "implementation": {"candidate_files": ["app.py"]},
+            "verification": {"required_gates": ["tests"]},
+            "project_context_details": {"source": "knowledge_engine"},
+        }
+    )
+    AnalysisResultModel.model_validate(
+        {
+            "schema_version": 1,
+            "ready": True,
+            "classification": {"task_type": "feature"},
+            "implementation": {"candidate_files": ["app.py"]},
+            "verification": {"required_gates": ["tests"]},
+            "project_context_details": {"source": "analysis-agent"},
+        }
+    )
+
+    assert old_shape.classification == {}
+    assert structured.implementation["candidate_files"] == ["app.py"]
+
+
+def test_task_analyzer_populates_structured_contract_from_agent(tmp_path):
+    init_repo(tmp_path)
+    issue = Issue(number=42, title="Add greeting", body="Create greeting.txt", labels=["ai-ready"])
+
+    brief = TaskAnalyzer(tmp_path, agent=StructuredAnalysisAgent()).analyze(issue)
+
+    assert brief.classification["task_type"] == "feature"
+    assert brief.classification["labels"] == ["ai-ready"]
+    assert brief.implementation["candidate_files"] == ["greeting.txt"]
+    assert brief.verification["required_gates"] == ["tests"]
+    assert brief.project_context_details["source"] == "test-agent"
+
+
+def test_task_analyzer_fallback_populates_structured_contract(tmp_path):
+    init_repo(tmp_path)
+    issue = Issue(number=42, title="Add greeting", body="Create greeting.txt", labels=["ai-ready"])
+
+    brief = TaskAnalyzer(tmp_path, agent=None).analyze(issue)
+
+    assert brief.classification["task_type"] == "implementation"
+    assert brief.classification["labels"] == ["ai-ready"]
+    assert "strategy_hints" in brief.implementation
+    assert brief.verification["required_gates"] == ["configured-tests", "configured-lint"]
+    assert brief.project_context_details["source"] == "knowledge_engine"
+
+
 def test_config_schema_reports_nested_field_paths():
     try:
         GGConfigModel.model_validate(
@@ -1465,6 +1565,74 @@ def test_candidate_evaluator_rejects_policy_violations_even_when_successful():
 
     assert decision.artifact["winner"] == "candidate-2"
     assert decision.winner["candidate"].candidate_id == "candidate-2"
+
+
+def test_execution_evaluation_includes_outcome_and_recovery_contract():
+    class Candidate:
+        candidate_id = "candidate-1"
+
+    decision = CandidateEvaluator().evaluate(
+        [
+            {
+                "index": 1,
+                "candidate": Candidate(),
+                "effective_status": "failed",
+                "verification_passed": False,
+                "verification_mutated_worktree": False,
+                "policy_violations": [],
+                "final_files": [],
+                "verification": [],
+                "result_path": "candidate-1/result.json",
+            }
+        ],
+        attempt=1,
+        max_attempts=2,
+        run_id="run-1",
+        evaluated_at="2026-04-25T12:00:00Z",
+    )
+
+    evaluation = decision.execution_evaluation
+    assert evaluation["verdict"] == "reject"
+    assert evaluation["traffic_light"] == "red"
+    assert evaluation["proposed_run_outcome"]["kind"] == "repair"
+    assert evaluation["failure"]["code"] == "no_eligible_candidate"
+    assert evaluation["suggested_recovery"]["next_attempt"] == 2
+
+
+def test_run_outcome_includes_publication_source_and_trace_refs():
+    state = RunState(
+        run_id="run-1",
+        issue={"number": 42, "title": "Add greeting"},
+        state=TaskState.COMPLETED,
+        pr_url="https://github.com/example/repo/pull/1",
+        publishing_step="completed",
+        artifacts={
+            "candidate_selection": "artifacts/candidate-selection.json",
+            "evaluation": "artifacts/evaluation.json",
+            "execution_evaluation": "artifacts/execution-evaluation.json",
+        },
+    )
+
+    outcome = build_run_outcome(
+        state,
+        {
+            "candidate_id": "candidate-1",
+            "summary": "Created greeting.txt",
+            "changed_files": ["greeting.txt"],
+            "verification_passed": True,
+        },
+        completed_at="2026-04-25T12:00:00Z",
+    )
+
+    assert outcome["kind"] == "artifact_outcome"
+    assert outcome["task_result"]["changed_files"] == ["greeting.txt"]
+    assert outcome["source"]["issue_number"] == 42
+    assert outcome["publication"]["publishing_step"] == "completed"
+    assert outcome["trace_refs"] == [
+        "artifacts/candidate-selection.json",
+        "artifacts/evaluation.json",
+        "artifacts/execution-evaluation.json",
+    ]
 
 
 def test_pipeline_uses_parallel_fanout_when_enabled(tmp_path):

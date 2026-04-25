@@ -117,6 +117,7 @@ class CandidateEvaluator:
             (record for record in records if record["candidate"].candidate_id == winner_id),
             None,
         )
+        repair_recommended = selected is None and attempt < max_attempts
         traffic_light = "green" if selected else "red"
         verdict = "accept" if selected else "reject"
         reasons = self._execution_reasons(winner_id, scored)
@@ -146,12 +147,34 @@ class CandidateEvaluator:
                 for item in scored
             ],
             "required_gates_passed": selected is not None,
-            "repair_recommended": selected is None and attempt < max_attempts,
+            "repair_recommended": repair_recommended,
             "reasons": reasons,
             "review_dimensions": self._review_dimensions(selected),
             "review_independence": self._review_independence(selected_record),
             "deterministic_gates": _deterministic_gates(),
             "llm_evaluation": None,
+            "proposed_run_outcome": _proposed_run_outcome(
+                verdict=verdict,
+                selected_candidate_id=winner_id,
+                repair_recommended=repair_recommended,
+            ),
+            "failure": (
+                None
+                if selected is not None
+                else {
+                    "code": "no_eligible_candidate",
+                    "message": "No candidate passed deterministic eligibility gates.",
+                }
+            ),
+            "suggested_recovery": (
+                {
+                    "action": "repair",
+                    "next_attempt": attempt + 1,
+                    "max_attempts": max_attempts,
+                }
+                if repair_recommended
+                else None
+            ),
         }
         ExecutionEvaluationModel.model_validate(execution_evaluation)
         return execution_evaluation
@@ -327,6 +350,7 @@ def build_run_outcome(
         "issue": dict(_state_get(state_like, "issue", {}) or {}),
         "state": str(state_value or ""),
         "status": _outcome_status(str(state_value or ""), selected_candidate_id, error),
+        "kind": _outcome_kind(str(state_value or ""), selected_candidate_id, error),
         "completed_at": (
             completed_at
             if completed_at is not None
@@ -335,6 +359,28 @@ def build_run_outcome(
         "selected_candidate_id": selected_candidate_id,
         "pr_url": _state_get(state_like, "pr_url", None),
         "summary": str(_metadata_get(selected_candidate_metadata, "summary") or ""),
+        "task_result": {
+            "selected_candidate_id": selected_candidate_id,
+            "changed_files": list(_metadata_get(selected_candidate_metadata, "changed_files", []) or []),
+            "verification_passed": _metadata_get(selected_candidate_metadata, "verification_passed", None),
+        },
+        "source": {
+            "run_id": str(_state_get(state_like, "run_id", "")),
+            "issue_number": dict(_state_get(state_like, "issue", {}) or {}).get("number"),
+        },
+        "publication": {
+            "pr_url": _state_get(state_like, "pr_url", None),
+            "publishing_step": _state_get(state_like, "publishing_step", None),
+        },
+        "trace_refs": [
+            str(path)
+            for path in (
+                artifacts.get("candidate_selection"),
+                artifacts.get("evaluation"),
+                artifacts.get("execution_evaluation"),
+            )
+            if path
+        ],
         "artifacts": artifacts,
         "error": error,
     }
@@ -411,3 +457,44 @@ def _outcome_status(
     if selected_candidate_id:
         return "selected"
     return "running"
+
+
+def _outcome_kind(
+    state: str,
+    selected_candidate_id: str | None,
+    error: dict[str, Any] | None,
+) -> str:
+    if state == "Completed":
+        return "artifact_outcome"
+    if state == "Cancelled":
+        return "cancelled"
+    if state == "TerminalFailure" or error:
+        return "failure"
+    if selected_candidate_id:
+        return "candidate_selected"
+    return "in_progress"
+
+
+def _proposed_run_outcome(
+    *,
+    verdict: str,
+    selected_candidate_id: str | None,
+    repair_recommended: bool,
+) -> dict[str, Any]:
+    if verdict == "accept":
+        return {
+            "kind": "artifact_outcome",
+            "status": "selected",
+            "selected_candidate_id": selected_candidate_id,
+        }
+    if repair_recommended:
+        return {
+            "kind": "repair",
+            "status": "needs_repair",
+            "selected_candidate_id": None,
+        }
+    return {
+        "kind": "failure",
+        "status": "failed",
+        "selected_candidate_id": None,
+    }

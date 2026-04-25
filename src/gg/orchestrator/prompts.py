@@ -13,6 +13,23 @@ def build_analysis_prompt(*, issue_payload: dict[str, Any], project_context: str
         "missing_questions": [],
         "summary": "concise implementation brief",
         "acceptance_criteria": ["observable success condition"],
+        "classification": {
+            "task_type": "bugfix|feature|maintenance|blocked",
+            "complexity": "small|medium|large",
+        },
+        "implementation": {
+            "candidate_files": ["relative/path.py"],
+            "strategy_hints": ["conservative"],
+        },
+        "verification": {
+            "hints": ["command or expected check"],
+            "required_gates": ["configured-tests"],
+            "advisory_gates": [],
+        },
+        "project_context_details": {
+            "source": "knowledge_engine",
+            "truncated": False,
+        },
         "candidate_files": ["relative/path.py"],
         "risk_flags": ["risk or empty"],
         "verification_hints": ["command or expected check"],

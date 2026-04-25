@@ -421,6 +421,10 @@ class TaskBriefModel(CompatibleArtifactModel):
     summary: str
     acceptance_criteria: list[str] = Field(default_factory=list)
     project_context: str = ""
+    project_context_details: dict[str, Any] = Field(default_factory=dict)
+    classification: dict[str, Any] = Field(default_factory=dict)
+    implementation: dict[str, Any] = Field(default_factory=dict)
+    verification: dict[str, Any] = Field(default_factory=dict)
     constraints: list[str] = Field(default_factory=list)
     blocked: bool = False
     missing_questions: list[str] = Field(default_factory=list)
@@ -459,6 +463,10 @@ class AnalysisResultModel(CompatibleArtifactModel):
     missing_questions: list[str] = Field(default_factory=list)
     summary: str = ""
     acceptance_criteria: list[str] = Field(default_factory=list)
+    classification: dict[str, Any] = Field(default_factory=dict)
+    implementation: dict[str, Any] = Field(default_factory=dict)
+    verification: dict[str, Any] = Field(default_factory=dict)
+    project_context_details: dict[str, Any] = Field(default_factory=dict)
     candidate_files: list[str] = Field(default_factory=list)
     risk_flags: list[str] = Field(default_factory=list)
     verification_hints: list[str] = Field(default_factory=list)
@@ -600,6 +608,9 @@ class ExecutionEvaluationModel(CompatibleArtifactModel):
     review_independence: dict[str, Any] = Field(default_factory=dict)
     deterministic_gates: dict[str, Any] = Field(default_factory=dict)
     llm_evaluation: dict[str, Any] | None = None
+    proposed_run_outcome: dict[str, Any] | None = None
+    failure: dict[str, Any] | None = None
+    suggested_recovery: dict[str, Any] | None = None
 
     @field_validator("verdict")
     @classmethod
@@ -627,10 +638,15 @@ class RunOutcomeModel(CompatibleArtifactModel):
     issue: dict[str, Any] = Field(default_factory=dict)
     state: str = ""
     status: str = ""
+    kind: str = ""
     completed_at: str = ""
     selected_candidate_id: str | None = None
     pr_url: str | None = None
     summary: str = ""
+    task_result: dict[str, Any] = Field(default_factory=dict)
+    source: dict[str, Any] = Field(default_factory=dict)
+    publication: dict[str, Any] = Field(default_factory=dict)
+    trace_refs: list[str] = Field(default_factory=list)
     artifacts: dict[str, str] = Field(default_factory=dict)
     error: dict[str, Any] | None = None
 

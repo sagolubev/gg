@@ -102,6 +102,10 @@ class TaskBrief:
     summary: str
     acceptance_criteria: list[str]
     project_context: str = ""
+    project_context_details: dict[str, Any] = field(default_factory=dict)
+    classification: dict[str, Any] = field(default_factory=dict)
+    implementation: dict[str, Any] = field(default_factory=dict)
+    verification: dict[str, Any] = field(default_factory=dict)
     constraints: list[str] = field(default_factory=list)
     blocked: bool = False
     missing_questions: list[str] = field(default_factory=list)
@@ -124,6 +128,10 @@ class TaskBrief:
             summary=validated.summary,
             acceptance_criteria=list(validated.acceptance_criteria),
             project_context=validated.project_context,
+            project_context_details=dict(validated.project_context_details),
+            classification=dict(validated.classification),
+            implementation=dict(validated.implementation),
+            verification=dict(validated.verification),
             constraints=list(validated.constraints),
             blocked=validated.blocked,
             missing_questions=list(validated.missing_questions),
@@ -191,6 +199,25 @@ class TaskAnalyzer:
         project_context = context[: int(context_budget["project_context_chars"])]
         analysis = self._try_agent_analysis(issue_payload, project_context)
         if analysis is not None:
+            classification = _merge_dicts(
+                _default_classification(issue_payload, blocked=not analysis.ready),
+                analysis.classification,
+            )
+            implementation = _merge_dicts(
+                _default_implementation(
+                    candidate_files=analysis.candidate_files,
+                    risk_flags=analysis.risk_flags,
+                ),
+                analysis.implementation,
+            )
+            verification = _merge_dicts(
+                _default_verification(analysis.verification_hints),
+                analysis.verification,
+            )
+            project_context_details = _merge_dicts(
+                _project_context_details(context_budget),
+                analysis.project_context_details,
+            )
             return TaskBrief(
                 schema_version=1,
                 issue=issue_payload,
@@ -198,6 +225,10 @@ class TaskAnalyzer:
                 acceptance_criteria=analysis.acceptance_criteria
                 or ["Clarify the missing task details." if not analysis.ready else "Implement the requested issue behavior."],
                 project_context=project_context,
+                project_context_details=project_context_details,
+                classification=classification,
+                implementation=implementation,
+                verification=verification,
                 blocked=not analysis.ready,
                 missing_questions=list(analysis.missing_questions),
                 candidate_files=list(analysis.candidate_files),
@@ -220,6 +251,10 @@ class TaskAnalyzer:
                 "Run configured verification commands and report the result.",
             ],
             project_context=project_context,
+            project_context_details=_project_context_details(context_budget),
+            classification=_default_classification(issue_payload, blocked=False),
+            implementation=_default_implementation(candidate_files=[], risk_flags=[]),
+            verification=_default_verification(["Run configured verification commands and inspect the result."]),
             context_budget=context_budget,
         )
 
@@ -275,6 +310,57 @@ class TaskAnalyzer:
 
 def _estimate_tokens(text: str) -> int:
     return (len(text) + CHARS_PER_CONTEXT_TOKEN - 1) // CHARS_PER_CONTEXT_TOKEN
+
+
+def _default_classification(issue_payload: dict[str, Any], *, blocked: bool) -> dict[str, Any]:
+    return {
+        "task_type": "blocked" if blocked else "implementation",
+        "source": "issue",
+        "labels": list(issue_payload.get("labels") or []),
+        "has_comments": bool(issue_payload.get("comments")),
+        "local_inputs": len(issue_payload.get("inputs") or []),
+    }
+
+
+def _default_implementation(
+    *,
+    candidate_files: list[str],
+    risk_flags: list[str],
+) -> dict[str, Any]:
+    return {
+        "candidate_files": list(candidate_files),
+        "risk_flags": list(risk_flags),
+        "strategy_hints": [
+            "conservative",
+            "test-first",
+            "architecture-aware",
+        ],
+    }
+
+
+def _default_verification(verification_hints: list[str]) -> dict[str, Any]:
+    return {
+        "hints": list(verification_hints),
+        "required_gates": ["configured-tests", "configured-lint"],
+        "advisory_gates": [],
+    }
+
+
+def _project_context_details(context_budget: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "source": "knowledge_engine",
+        "estimated_tokens": context_budget.get("estimated_tokens", 0),
+        "truncated": bool(context_budget.get("truncated", False)),
+        "effective_context_tokens": context_budget.get("effective_context_tokens"),
+    }
+
+
+def _merge_dicts(base: dict[str, Any], override: dict[str, Any] | None) -> dict[str, Any]:
+    if not override:
+        return base
+    merged = dict(base)
+    merged.update(override)
+    return merged
 
 
 def extract_single_json_object(text: str) -> dict[str, Any]:

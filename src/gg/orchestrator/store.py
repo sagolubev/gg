@@ -492,6 +492,25 @@ class RunStore:
                     "cancel_requested": state.cancel_requested,
                 },
             )
+        if (
+            current is None
+            or current.blocked_resume_state != state.blocked_resume_state
+            or current.blocked_until != state.blocked_until
+        ):
+            if state.blocked_resume_state is not None or state.blocked_until is not None:
+                self.append_event(
+                    state.run_id,
+                    {
+                        "event": "blocked_resume",
+                        "at": state.updated_at,
+                        "run_id": state.run_id,
+                        "state": state.state.value,
+                        "blocked_resume_state": state.blocked_resume_state.value
+                        if state.blocked_resume_state
+                        else None,
+                        "blocked_until": state.blocked_until,
+                    },
+                )
         if state.last_error and (current is None or current.last_error != state.last_error):
             self.append_error(
                 state.run_id,
@@ -534,6 +553,8 @@ class RunStore:
             "cost": state.cost,
             "publishing_step": state.publishing_step,
             "cancel_requested": state.cancel_requested,
+            "blocked_resume_state": state.blocked_resume_state.value if state.blocked_resume_state else None,
+            "blocked_until": state.blocked_until,
             "pr_url": state.pr_url,
             "artifacts": state.artifacts,
             "candidate_states": {

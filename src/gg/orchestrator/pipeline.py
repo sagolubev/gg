@@ -490,9 +490,14 @@ class OrchestratorPipeline:
             path = self.store.write_json(run_id, f"inputs/input-v1-{sequence_number:04d}.json", artifact)
             state.artifacts["last_input"] = path
             if state.state is TaskState.BLOCKED:
-                state.transition(TaskState.TASK_ANALYSIS, reason="operator provided input")
+                state.transition(
+                    state.blocked_resume_state or TaskState.TASK_ANALYSIS,
+                    reason="operator provided input",
+                )
             else:
                 state.transition(TaskState.AGENT_RUNNING, reason="operator provided input")
+            state.blocked_resume_state = None
+            state.blocked_until = None
             self._best_effort_labels(
                 int(state.issue["number"]),
                 add=[self.config.task_system.work_label],
@@ -548,9 +553,11 @@ class OrchestratorPipeline:
 
     def _transition_after_input(self, state, *, reason: str) -> None:
         if state.state is TaskState.BLOCKED:
-            state.transition(TaskState.TASK_ANALYSIS, reason=reason)
+            state.transition(state.blocked_resume_state or TaskState.TASK_ANALYSIS, reason=reason)
         elif state.state is TaskState.NEEDS_INPUT:
             state.transition(TaskState.AGENT_RUNNING, reason=reason)
+        state.blocked_resume_state = None
+        state.blocked_until = None
 
     def _first_new_external_comment(self, state, issue: Issue):
         threshold = self._input_request_created_at(state) or state.updated_at
@@ -606,6 +613,8 @@ class OrchestratorPipeline:
         state.transition(TaskState.AGENT_SELECTION, reason="select codex backend")
         if not self.agent.is_available():
             state.transition(TaskState.BLOCKED, reason="agent backend unavailable")
+            state.blocked_resume_state = TaskState.AGENT_SELECTION
+            state.blocked_until = None
             state.last_error = {"code": "missing_agent", "message": "Codex CLI is not available"}
             self.store.write(state)
             self._mark_issue_blocked(issue.number, state.run_id, "Codex CLI is not available")
@@ -615,6 +624,8 @@ class OrchestratorPipeline:
         sandbox_error = executor.sandbox_preflight_error()
         if sandbox_error is not None:
             state.transition(TaskState.BLOCKED, reason="sandbox runtime unavailable")
+            state.blocked_resume_state = TaskState.AGENT_SELECTION
+            state.blocked_until = None
             state.last_error = {"code": "missing_sandbox_runtime", "message": sandbox_error}
             self.store.write(state)
             self._mark_issue_blocked(issue.number, state.run_id, sandbox_error)
@@ -725,6 +736,8 @@ class OrchestratorPipeline:
                 state.artifacts["input_request"] = request_path
                 state.artifacts.pop("last_input", None)
                 state.transition(TaskState.NEEDS_INPUT, reason="candidate requested operator input")
+                state.blocked_resume_state = TaskState.AGENT_RUNNING
+                state.blocked_until = None
                 self.store.write(state)
                 self._mark_issue_needs_input(
                     issue.number,
@@ -1633,6 +1646,7 @@ class OrchestratorPipeline:
         )
 
     def _block_on_rate_limit(self, state, issue_number: int, exc: RateLimitThrottleError) -> dict[str, Any]:
+        resume_state = state.state
         artifact = self.store.write_json(
             state.run_id,
             "artifacts/rate-limit.json",
@@ -1657,6 +1671,8 @@ class OrchestratorPipeline:
         }
         if state.state not in TERMINAL_STATES:
             state.recover_to(TaskState.BLOCKED, reason=f"rate limited: {exc.snapshot.bucket}")
+            state.blocked_resume_state = resume_state
+            state.blocked_until = exc.snapshot.reset_at
         self.store.write(state)
         self.knowledge.record_error(issue_number=issue_number, message=str(exc), pattern="RateLimitThrottleError")
         return {
@@ -1685,9 +1701,14 @@ class OrchestratorPipeline:
     ) -> dict[str, Any]:
         message = "; ".join(brief.missing_questions) or "task analysis needs more information"
         if state.state is TaskState.TASK_ANALYSIS:
+            state.blocked_resume_state = TaskState.TASK_ANALYSIS
             state.transition(TaskState.BLOCKED, reason="task analysis missing information")
         elif state.state is not TaskState.BLOCKED:
+            state.blocked_resume_state = TaskState.TASK_ANALYSIS
             state.recover_to(TaskState.BLOCKED, reason="task analysis missing information")
+        elif state.blocked_resume_state is None:
+            state.blocked_resume_state = TaskState.TASK_ANALYSIS
+        state.blocked_until = None
         state.last_error = {"code": "missing_task_info", "message": message, "at": _now_placeholder()}
         self.store.write(state)
         if not dry_run:

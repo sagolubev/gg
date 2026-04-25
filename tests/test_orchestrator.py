@@ -768,6 +768,8 @@ def test_run_state_round_trips_phase_c_resume_fields():
         locks={"run": {"owner_pid": 123, "heartbeat_at": "2026-04-25T12:00:00Z"}},
         operator={"requested_by": "cli"},
         cost={"total_usd": 0.25, "events": 1},
+        blocked_resume_state=TaskState.TASK_ANALYSIS,
+        blocked_until="2026-04-25T12:30:00Z",
     )
 
     loaded = RunState.from_dict(state.to_dict())
@@ -776,6 +778,8 @@ def test_run_state_round_trips_phase_c_resume_fields():
     assert loaded.stage_attempts == {"analysis": 1, "execution": 2}
     assert loaded.locks["run"]["owner_pid"] == 123
     assert loaded.operator == {"requested_by": "cli"}
+    assert loaded.blocked_resume_state is TaskState.TASK_ANALYSIS
+    assert loaded.blocked_until == "2026-04-25T12:30:00Z"
     assert loaded.cost == {
         "total_usd": 0.25,
         "total_tokens": None,
@@ -1027,6 +1031,16 @@ def test_run_state_rejects_illegal_transition():
         pass
     else:
         raise AssertionError("illegal transition should fail")
+
+
+def test_blocked_state_can_terminally_fail_by_policy():
+    state = RunState(run_id="run-1", issue={"number": 1})
+    state.recover_to(TaskState.BLOCKED, reason="test blocked")
+
+    state.fail(code="blocked_timeout", message="blocked too long")
+
+    assert state.state is TaskState.TERMINAL_FAILURE
+    assert state.last_error["code"] == "blocked_timeout"
 
 
 def test_pipeline_dry_run_reaches_ready_for_execution(tmp_path):
@@ -1481,12 +1495,14 @@ def test_task_analysis_includes_issue_comments_and_local_inputs(tmp_path):
     ready = create_ready_run(pipeline)
     state = pipeline.store.load(ready["run_id"])
     state.recover_to(TaskState.BLOCKED, reason="test blocked")
+    state.blocked_resume_state = TaskState.TASK_ANALYSIS
     pipeline.store.write(state)
 
     provided = pipeline.provide(ready["run_id"], message="Use Spanish")
     refreshed = pipeline.resume(ready["run_id"], no_pr=True)
 
     assert provided["accepted"] is True
+    assert provided["state"] == "TaskAnalysis"
     assert refreshed["state"] == "Completed"
     refreshed_state = pipeline.store.load(ready["run_id"])
     brief_path = tmp_path / refreshed_state.artifacts["task_brief"]
@@ -1497,6 +1513,7 @@ def test_task_analysis_includes_issue_comments_and_local_inputs(tmp_path):
     assert raw_issue["issue"]["number"] == 42
     assert raw_issue["comments"][0]["body"] == "Please keep the file UTF-8 encoded."
     assert raw_issue["inputs"][0]["message"] == "Use Spanish"
+    assert refreshed_state.blocked_resume_state is None
     assert brief["issue"]["comments"][0]["body"] == "Please keep the file UTF-8 encoded."
     assert brief["issue"]["inputs"][0]["message"] == "Use Spanish"
     snapshot = json.loads((tmp_path / refreshed_state.artifacts["context_snapshot"]).read_text(encoding="utf-8"))
@@ -2256,6 +2273,7 @@ def test_pipeline_transitions_to_needs_input_and_resume_uses_provided_input(tmp_
     assert result["state"] == "NeedsInput"
     state = pipeline.store.load(result["run_id"])
     assert state.artifacts["input_request"].endswith("artifacts/input-request.json")
+    assert state.blocked_resume_state is TaskState.AGENT_RUNNING
     assert any("needs local input" in body for _, body in platform.comments)
 
     provided = pipeline.provide(result["run_id"], message="Use Spanish")
@@ -2267,6 +2285,7 @@ def test_pipeline_transitions_to_needs_input_and_resume_uses_provided_input(tmp_
 
     assert resumed["state"] == "Completed"
     final_state = pipeline.store.load(result["run_id"])
+    assert final_state.blocked_resume_state is None
     result_path = tmp_path / final_state.candidate_states["candidate-1-retry-2"].result_path
     candidate_result = json.loads(result_path.read_text(encoding="utf-8"))
     assert candidate_result["summary"] == "Created Spanish greeting."
@@ -3245,6 +3264,8 @@ def test_run_issue_blocks_and_persists_rate_limit_artifact(tmp_path):
     assert result["state"] == TaskState.BLOCKED.value
     assert result["error"]["code"] == "rate_limited"
     assert state.state is TaskState.BLOCKED
+    assert state.blocked_resume_state is TaskState.CLAIMING
+    assert state.blocked_until == artifact["reset_at"]
     assert artifact["bucket"] == "github:example/repo:issues:comment"
 
 

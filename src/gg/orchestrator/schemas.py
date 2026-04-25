@@ -298,6 +298,8 @@ class RunStateModel(CompatibleArtifactModel):
     dry_run: bool = False
     publishing_step: str | None = None
     cancel_requested: bool = False
+    blocked_resume_state: str | None = None
+    blocked_until: str | None = None
 
     @field_validator("state")
     @classmethod
@@ -306,10 +308,24 @@ class RunStateModel(CompatibleArtifactModel):
             raise ValueError(f"unknown state: {value}")
         return value
 
+    @field_validator("blocked_resume_state")
+    @classmethod
+    def _blocked_resume_state(cls, value: str | None) -> str | None:
+        if value is not None and value not in TASK_STATES:
+            raise ValueError(f"unknown blocked_resume_state: {value}")
+        return value
+
     @field_validator("created_at", "updated_at")
     @classmethod
     def _timestamp(cls, value: str) -> str:
         return _validate_required_timestamp(value)
+
+    @field_validator("blocked_until")
+    @classmethod
+    def _blocked_until_timestamp(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _validate_optional_timestamp(value)
 
     @field_validator("stage_attempts")
     @classmethod
@@ -772,6 +788,8 @@ class RunSummaryModel(CompatibleArtifactModel):
     cost: dict[str, Any] | None = None
     publishing_step: str | None = None
     cancel_requested: bool = False
+    blocked_resume_state: str | None = None
+    blocked_until: str | None = None
     pr_url: str | None = None
     artifacts: dict[str, str] = Field(default_factory=dict)
     candidate_states: dict[str, CandidateStateModel] = Field(default_factory=dict)
@@ -785,10 +803,24 @@ class RunSummaryModel(CompatibleArtifactModel):
             raise ValueError(f"unknown state: {value}")
         return value
 
+    @field_validator("blocked_resume_state")
+    @classmethod
+    def _blocked_resume_state(cls, value: str | None) -> str | None:
+        if value is not None and value not in TASK_STATES:
+            raise ValueError(f"unknown blocked_resume_state: {value}")
+        return value
+
     @field_validator("created_at", "updated_at")
     @classmethod
     def _timestamp(cls, value: str) -> str:
         return _validate_required_timestamp(value)
+
+    @field_validator("blocked_until")
+    @classmethod
+    def _blocked_until_timestamp(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _validate_optional_timestamp(value)
 
 
 def validation_error_message(location: str, exc: Exception) -> str:

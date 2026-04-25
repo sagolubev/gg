@@ -55,7 +55,12 @@ ALLOWED_TRANSITIONS: dict[TaskState, set[TaskState]] = {
         TaskState.TERMINAL_FAILURE,
         TaskState.CANCELLED,
     },
-    TaskState.BLOCKED: {TaskState.TASK_ANALYSIS, TaskState.AGENT_SELECTION, TaskState.CANCELLED},
+    TaskState.BLOCKED: {
+        TaskState.TASK_ANALYSIS,
+        TaskState.AGENT_SELECTION,
+        TaskState.TERMINAL_FAILURE,
+        TaskState.CANCELLED,
+    },
     TaskState.READY_FOR_EXECUTION: {TaskState.AGENT_SELECTION, TaskState.CANCELLED},
     TaskState.AGENT_SELECTION: {
         TaskState.AGENT_RUNNING,
@@ -124,6 +129,8 @@ class RunState:
     dry_run: bool = False
     publishing_step: str | None = None
     cancel_requested: bool = False
+    blocked_resume_state: TaskState | None = None
+    blocked_until: str | None = None
 
     def transition(self, target: TaskState, *, reason: str = "") -> None:
         if target not in ALLOWED_TRANSITIONS[self.state]:
@@ -204,4 +211,8 @@ class RunState:
             dry_run=validated.dry_run,
             publishing_step=validated.publishing_step,
             cancel_requested=validated.cancel_requested,
+            blocked_resume_state=(
+                TaskState(validated.blocked_resume_state) if validated.blocked_resume_state else None
+            ),
+            blocked_until=validated.blocked_until,
         )

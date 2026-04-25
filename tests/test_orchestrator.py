@@ -971,6 +971,21 @@ def test_run_store_state_backup_is_opt_in_and_recovers_corrupt_primary(tmp_path)
     assert recovered.operator == {"name": "cli"}
 
 
+def test_run_store_atomic_writes_do_not_leave_temp_files(tmp_path):
+    init_repo(tmp_path)
+    store = RunStore(tmp_path, keep_state_backup=True)
+    state = store.create(Issue(number=1, title="Atomic state", body="", labels=["ai-ready"]), dry_run=True)
+    store.write_json(state.run_id, "artifacts/custom.json", {"ok": True})
+    store.write_text(state.run_id, "artifacts/custom.txt", "ok\n")
+    state.operator = {"name": "cli"}
+    store.write(state)
+
+    run_dir = tmp_path / ".gg" / "runs" / state.run_id
+    assert not list(run_dir.rglob("*.tmp"))
+    assert json.loads((run_dir / "state.json").read_text(encoding="utf-8"))["operator"] == {"name": "cli"}
+    assert (run_dir / "state.json.bak").exists()
+
+
 def test_run_store_validates_top_level_verification_artifacts(tmp_path):
     init_repo(tmp_path)
     store = RunStore(tmp_path)

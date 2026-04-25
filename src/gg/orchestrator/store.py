@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
+import tempfile
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -95,10 +97,7 @@ class RunStore:
     def write_json(self, run_id: str, relative_path: str, data: dict) -> str:
         _validate_json_artifact(relative_path, data)
         path = self.path_for(run_id) / relative_path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        tmp.replace(path)
+        _atomic_write_text(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
         return str(path.relative_to(self.project_path))
 
     def read_json(self, relative_path: str) -> dict[str, Any]:
@@ -113,10 +112,7 @@ class RunStore:
 
     def write_text(self, run_id: str, relative_path: str, text: str) -> str:
         path = self.path_for(run_id) / relative_path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(text, encoding="utf-8")
-        tmp.replace(path)
+        _atomic_write_text(path, text)
         return str(path.relative_to(self.project_path))
 
     def write(self, state: RunState) -> None:
@@ -129,14 +125,10 @@ class RunStore:
             if current.state in TERMINAL_STATES and state.state is not current.state:
                 raise RuntimeError(f"refusing to overwrite terminal run state {current.state.value}")
         state.artifacts.setdefault("run_summary", self._run_summary_relative_path(state.run_id))
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(state.to_dict(), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         if self.keep_state_backup and path.exists():
             backup_path = path.with_name("state.json.bak")
-            backup_tmp = backup_path.with_suffix(".bak.tmp")
-            backup_tmp.write_bytes(path.read_bytes())
-            backup_tmp.replace(backup_path)
-        tmp.replace(path)
+            _atomic_write_bytes(backup_path, path.read_bytes())
+        _atomic_write_text(path, json.dumps(state.to_dict(), indent=2, ensure_ascii=False) + "\n")
         self._write_run_summary(run_dir, state)
         self._write_logs(run_dir, state, current)
 
@@ -308,9 +300,7 @@ class RunStore:
             "outcome": outcome,
         }
         ArchiveSummaryModel.model_validate(summary)
-        tmp = archive_path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        tmp.replace(archive_path)
+        _atomic_write_text(archive_path, json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
 
     def _read_outcome(self, run: RunState) -> dict[str, Any] | None:
         outcome_path = run.artifacts.get("run_outcome")
@@ -574,9 +564,7 @@ class RunStore:
             RunSummaryModel.model_validate(payload)
         except Exception as exc:
             raise ValueError(validation_error_message("artifacts/run-summary.json", exc)) from exc
-        tmp = summary_path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(mask_secrets(payload), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        tmp.replace(summary_path)
+        _atomic_write_text(summary_path, json.dumps(mask_secrets(payload), indent=2, ensure_ascii=False) + "\n")
 
     def _resolve_audit_sink(self, audit_sink_path: str | Path | None) -> Path | None:
         if not audit_sink_path:
@@ -668,6 +656,43 @@ def _validate_json_artifact(relative_path: str, data: dict[str, Any]) -> None:
         schema.model_validate(data)
     except Exception as exc:
         raise ValueError(validation_error_message(relative_path, exc)) from exc
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    _atomic_write_bytes(path, text.encode("utf-8"))
+
+
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            "wb",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            tmp_path = handle.name
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        Path(tmp_path).replace(path)
+        _fsync_directory(path.parent)
+    finally:
+        if tmp_path:
+            Path(tmp_path).unlink(missing_ok=True)
+
+
+def _fsync_directory(path: Path) -> None:
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def _validation_relative_path(relative_path: str) -> str:

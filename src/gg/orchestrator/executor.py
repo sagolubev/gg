@@ -254,7 +254,11 @@ class CandidateExecutor:
             needs_input = _extract_needs_input(summary)
             files = changed_files(worktree)
             patch = diff(worktree) if files else ""
-            if needs_input and not files:
+            quota_error = self._disk_quota_error(worktree)
+            if quota_error:
+                status = "failed"
+                error = quota_error
+            elif needs_input and not files:
                 status = "needs_input"
                 error = needs_input
             else:
@@ -378,6 +382,15 @@ class CandidateExecutor:
         )
         return env
 
+    def _disk_quota_error(self, worktree: Path) -> str | None:
+        max_disk_mb = self.config.runtime.resource.max_disk_mb
+        if max_disk_mb <= 0:
+            return None
+        usage_mb = _directory_size_mb(worktree, timeout_seconds=5.0)
+        if usage_mb <= max_disk_mb:
+            return None
+        return f"disk_quota_exceeded: candidate used {usage_mb}MB, limit is {max_disk_mb}MB"
+
     def _prompt(
         self,
         brief: TaskBrief,
@@ -431,6 +444,29 @@ def _extract_needs_input(summary: str) -> str | None:
         return None
     message = text[len(NEEDS_INPUT_PREFIX):].strip()
     return message or "Agent requested additional input."
+
+
+def _directory_size_mb(path: Path, *, timeout_seconds: float) -> int:
+    deadline = time.monotonic() + timeout_seconds
+    total_bytes = 0
+    pending = [path]
+    while pending:
+        if time.monotonic() > deadline:
+            return 0
+        current = pending.pop()
+        try:
+            entries = list(os.scandir(current))
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(Path(entry.path))
+                elif entry.is_file(follow_symlinks=False):
+                    total_bytes += entry.stat(follow_symlinks=False).st_size
+            except OSError:
+                continue
+    return (total_bytes + (1024 * 1024) - 1) // (1024 * 1024)
 
 
 def _repair_context_section(repair_context: dict[str, Any] | None) -> str:

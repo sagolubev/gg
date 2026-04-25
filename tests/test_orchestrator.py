@@ -3686,6 +3686,31 @@ def test_candidate_setup_uses_isolated_package_cache_env(tmp_path):
     assert ".gg-cache" not in result.changed_files
 
 
+def test_candidate_fails_when_worktree_exceeds_disk_quota(monkeypatch, tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text("verify:\n  tests: ''\nruntime:\n  resource:\n    max_disk_mb: 5\n", encoding="utf-8")
+    monkeypatch.setattr("gg.orchestrator.executor._directory_size_mb", lambda *_args, **_kwargs: 6)
+    config = load_config(tmp_path)
+    from gg.orchestrator.task_analysis import TaskBrief
+    task_brief = TaskBrief(
+        schema_version=1,
+        issue={"number": 42, "title": "Add greeting", "body": "", "labels": ["ai-ready"], "url": ""},
+        summary="Do it",
+        acceptance_criteria=["Add file"],
+        project_context="",
+    )
+
+    result = CandidateExecutor(tmp_path, FakeAgent(), config).run(
+        run_id="run-disk-quota",
+        issue_number=42,
+        brief=task_brief,
+    )
+
+    assert result.status == "failed"
+    assert result.error == "disk_quota_exceeded: candidate used 6MB, limit is 5MB"
+    assert result.changed_files == ["greeting.txt"]
+
+
 def test_context_snapshot_uses_content_addressed_objects(tmp_path):
     init_repo(tmp_path)
     pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())

@@ -699,7 +699,14 @@ class OrchestratorPipeline:
             return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
 
         executor = CandidateExecutor(self.project_path, self.agent, self.config)
-        sandbox_error = executor.sandbox_preflight_error()
+        sandbox_preflight = executor.sandbox_preflight()
+        sandbox_preflight["checked_at"] = _now_placeholder()
+        state.artifacts["sandbox_preflight"] = self.store.write_json(
+            state.run_id,
+            "artifacts/sandbox-preflight.json",
+            sandbox_preflight,
+        )
+        sandbox_error = sandbox_preflight.get("error") or executor.sandbox_preflight_error()
         if sandbox_error is not None:
             state.transition(TaskState.BLOCKED, reason="sandbox runtime unavailable")
             state.blocked_resume_state = TaskState.AGENT_SELECTION

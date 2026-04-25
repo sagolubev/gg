@@ -821,6 +821,26 @@ class ResourcePreflightModel(CompatibleArtifactModel):
         return _validate_required_timestamp(value)
 
 
+class SandboxPreflightModel(CompatibleArtifactModel):
+    schema_version: Literal[1] = 1
+    mode: str = ""
+    backend: str = ""
+    required: bool = False
+    available: bool = False
+    use_sandbox_runtime: bool = True
+    allow_unsafe_direct_exec: bool = False
+    executable: str = ""
+    executable_path: str | None = None
+    version: str | None = None
+    error: str | None = None
+    checked_at: str
+
+    @field_validator("checked_at")
+    @classmethod
+    def _checked_timestamp(cls, value: str) -> str:
+        return _validate_required_timestamp(value)
+
+
 class PublishingPreflightModel(CompatibleArtifactModel):
     schema_version: Literal[1] = 1
     candidate_id: str

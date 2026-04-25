@@ -58,6 +58,26 @@ class SandboxRuntime:
     def is_available(self) -> bool:
         return shutil.which(self.executable) is not None
 
+    def executable_path(self) -> str | None:
+        return shutil.which(self.executable)
+
+    def version(self) -> str | None:
+        executable_path = self.executable_path()
+        if executable_path is None:
+            return None
+        try:
+            result = subprocess.run(
+                [executable_path, "--version"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        version = (result.stdout or result.stderr).strip()
+        return version or None
+
     def run(
         self,
         command: list[str],

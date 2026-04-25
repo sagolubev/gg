@@ -644,7 +644,8 @@ class FakeSandbox:
         if on_process_start is not None:
             on_process_start(43210)
         Path(cwd, "sandboxed.txt").write_text("ok\n", encoding="utf-8")
-        Path(command[3]).write_text("sandbox summary\n", encoding="utf-8")
+        output_path = command[command.index("-o") + 1]
+        Path(output_path).write_text("sandbox summary\n", encoding="utf-8")
         return SandboxRunResult(
             command=command,
             status="passed",
@@ -3404,6 +3405,10 @@ def test_pipeline_blocks_missing_required_sandbox_before_baseline(monkeypatch, t
     assert agent.candidate_generated is False
     state = OrchestratorPipeline(tmp_path, platform=platform, agent=FakeAgent()).store.load(result["run_id"])
     assert "baseline_verification" not in state.artifacts
+    preflight = json.loads((tmp_path / state.artifacts["sandbox_preflight"]).read_text(encoding="utf-8"))
+    assert preflight["required"] is True
+    assert preflight["available"] is False
+    assert preflight["error"] == "sandbox-runtime is required but unavailable"
     assert not (tmp_path.parent / ".gg-worktrees" / tmp_path.name).exists()
 
 
@@ -4286,6 +4291,32 @@ runtime:
     assert sandbox.policies == [config.runtime.sandbox_policy]
     assert any(event.get("worktree_path") for event in status_events)
     assert {"sandbox_pid": 43210} in status_events
+
+
+def test_candidate_executor_uses_configured_codex_command_in_sandbox(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        """verify:
+  tests: ''
+agent:
+  codex_command: python -m codex_cli
+""",
+        encoding="utf-8",
+    )
+    sandbox = FakeSandbox()
+    executor = CandidateExecutor(tmp_path, CodexAgent(), load_config(tmp_path), sandbox=sandbox)
+    from gg.orchestrator.task_analysis import TaskBrief
+    task_brief = TaskBrief(
+        schema_version=1,
+        issue={"number": 42, "title": "Add greeting", "body": "", "labels": ["ai-ready"], "url": ""},
+        summary="Do it",
+        acceptance_criteria=["Add file"],
+    )
+
+    result = executor.run(run_id="run-custom-codex", issue_number=42, brief=task_brief)
+
+    assert result.status == "success"
+    assert sandbox.commands[0][:5] == ["python", "-m", "codex_cli", "exec", "-o"]
 
 
 def test_candidate_setup_failure_is_persisted_without_running_agent(tmp_path):

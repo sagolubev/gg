@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -199,6 +200,36 @@ class CandidateExecutor:
             return None
         return "sandbox-runtime is required but unavailable"
 
+    def sandbox_preflight(self) -> dict[str, Any]:
+        required = self._requires_sandbox_preflight()
+        available = self.sandbox.is_available()
+        executable = str(getattr(self.sandbox, "executable", ""))
+        executable_path = _call_optional(self.sandbox, "executable_path")
+        version = _call_optional(self.sandbox, "version") if available else None
+        mode = (
+            "sandbox"
+            if self.config.runtime.use_sandbox_runtime and available
+            else (
+                "unsafe-direct-exec"
+                if self.config.runtime.allow_unsafe_direct_exec
+                else "direct-exec"
+            )
+        )
+        error = "sandbox-runtime is required but unavailable" if required and not available else None
+        return {
+            "schema_version": 1,
+            "mode": mode,
+            "backend": self.config.agent.backend,
+            "required": required,
+            "available": available,
+            "use_sandbox_runtime": self.config.runtime.use_sandbox_runtime,
+            "allow_unsafe_direct_exec": self.config.runtime.allow_unsafe_direct_exec,
+            "executable": executable,
+            "executable_path": executable_path,
+            "version": version,
+            "error": error,
+        }
+
     def _requires_sandbox_preflight(self) -> bool:
         return (
             self.config.runtime.use_sandbox_runtime
@@ -361,8 +392,9 @@ class CandidateExecutor:
         on_status: CandidateStatusCallback | None = None,
     ) -> str:
         out_path = Path(tempfile.mktemp(prefix="gg-candidate-", suffix=".md", dir=str(worktree)))
+        codex_command = shlex.split(self.config.agent.codex_command.strip() or "codex")
         result = self.sandbox.run(
-            ["codex", "exec", "-o", str(out_path), prompt],
+            [*codex_command, "exec", "-o", str(out_path), prompt],
             cwd=worktree,
             timeout=self.config.runtime.candidate_timeout_seconds,
             policy=self._sandbox_policy(),
@@ -541,6 +573,16 @@ def _structured_brief_section(brief: TaskBrief) -> str:
         "Structured task brief:\n"
         f"{json.dumps(payload, indent=2, ensure_ascii=False)}\n\n"
     )
+
+
+def _call_optional(target: Any, method_name: str) -> Any:
+    method = getattr(target, method_name, None)
+    if method is None:
+        return None
+    try:
+        return method()
+    except Exception:
+        return None
 
 
 def _utc_now() -> str:

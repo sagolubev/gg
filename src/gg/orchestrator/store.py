@@ -7,8 +7,20 @@ import shutil
 import subprocess
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 
 from gg.orchestrator.logging import append_jsonl, mask_secrets
+from gg.orchestrator.schemas import (
+    CandidateResultModel,
+    EvaluationArtifactModel,
+    InputArtifactModel,
+    InputRequestModel,
+    RateLimitArtifactModel,
+    RunSummaryModel,
+    TaskBriefModel,
+    VerificationArtifactModel,
+    validation_error_message,
+)
 from gg.orchestrator.state import TERMINAL_STATES, RunState, utc_now
 from gg.platforms.base import Issue
 
@@ -67,6 +79,7 @@ class RunStore:
         return path
 
     def write_json(self, run_id: str, relative_path: str, data: dict) -> str:
+        _validate_json_artifact(relative_path, data)
         path = self.path_for(run_id) / relative_path
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".tmp")
@@ -88,7 +101,7 @@ class RunStore:
         path = run_dir / "state.json"
         current: RunState | None = None
         if path.exists():
-            current = RunState.from_dict(json.loads(path.read_text(encoding="utf-8")))
+            current = self._load_state_file(path)
             if current.state in TERMINAL_STATES and state.state is not current.state:
                 raise RuntimeError(f"refusing to overwrite terminal run state {current.state.value}")
         state.artifacts.setdefault("run_summary", self._run_summary_relative_path(state.run_id))
@@ -100,16 +113,26 @@ class RunStore:
 
     def load(self, run_id: str) -> RunState:
         path = self.path_for(run_id) / "state.json"
-        return RunState.from_dict(json.loads(path.read_text(encoding="utf-8")))
+        return self._load_state_file(path)
 
     def list_runs(self) -> list[RunState]:
         runs: list[RunState] = []
         for path in sorted(self.runs_dir.glob("*/state.json")):
             try:
-                runs.append(RunState.from_dict(json.loads(path.read_text(encoding="utf-8"))))
+                runs.append(self._load_state_file(path))
             except (OSError, json.JSONDecodeError, KeyError, ValueError):
                 continue
         return sorted(runs, key=lambda run: run.updated_at, reverse=True)
+
+    def _load_state_file(self, path: Path) -> RunState:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{path}: invalid JSON: {exc.msg}") from exc
+        try:
+            return RunState.from_dict(data)
+        except Exception as exc:
+            raise ValueError(validation_error_message(str(path), exc)) from exc
 
     def clean_terminal_runs(self, *, dry_run: bool = True) -> list[str]:
         target_runs = [run for run in self.list_runs() if run.state in TERMINAL_STATES]
@@ -347,6 +370,10 @@ class RunStore:
                 "cost": str((run_dir / "cost.jsonl").relative_to(self.project_path)),
             },
         }
+        try:
+            RunSummaryModel.model_validate(payload)
+        except Exception as exc:
+            raise ValueError(validation_error_message("artifacts/run-summary.json", exc)) from exc
         tmp = summary_path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(mask_secrets(payload), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         tmp.replace(summary_path)
@@ -391,3 +418,27 @@ class RunStore:
         except (OSError, json.JSONDecodeError):
             return ""
         return ""
+
+
+def _validate_json_artifact(relative_path: str, data: dict[str, Any]) -> None:
+    schema: type | None = None
+    if relative_path == "artifacts/task-brief.json":
+        schema = TaskBriefModel
+    elif relative_path == "artifacts/evaluation.json":
+        schema = EvaluationArtifactModel
+    elif relative_path == "artifacts/input-request.json":
+        schema = InputRequestModel
+    elif relative_path == "artifacts/rate-limit.json":
+        schema = RateLimitArtifactModel
+    elif relative_path == "artifacts/baseline-verification.json" or relative_path.endswith("/verification.json"):
+        schema = VerificationArtifactModel
+    elif relative_path.startswith("inputs/input-v1-") and relative_path.endswith(".json"):
+        schema = InputArtifactModel
+    elif relative_path.endswith("/candidate-result.json"):
+        schema = CandidateResultModel
+    if schema is None:
+        return
+    try:
+        schema.model_validate(data)
+    except Exception as exc:
+        raise ValueError(validation_error_message(relative_path, exc)) from exc

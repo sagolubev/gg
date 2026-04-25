@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 
 from gg.knowledge.engine import KnowledgeEngine
+from gg.orchestrator.schemas import TaskBriefModel
 from gg.platforms.base import Issue, IssueComment
 
 MAX_ISSUE_BODY_CHARS = 12000
@@ -83,17 +84,20 @@ class TaskBrief:
     constraints: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        data = asdict(self)
+        TaskBriefModel.model_validate(data)
+        return data
 
     @classmethod
     def from_dict(cls, data: dict) -> "TaskBrief":
+        validated = TaskBriefModel.model_validate(data)
         return cls(
-            schema_version=int(data.get("schema_version", 1)),
-            issue=dict(data.get("issue", {})),
-            summary=str(data.get("summary", "")),
-            acceptance_criteria=list(data.get("acceptance_criteria", [])),
-            project_context=str(data.get("project_context", "")),
-            constraints=list(data.get("constraints", [])),
+            schema_version=validated.schema_version,
+            issue=validated.issue,
+            summary=validated.summary,
+            acceptance_criteria=list(validated.acceptance_criteria),
+            project_context=validated.project_context,
+            constraints=list(validated.constraints),
         )
 
 

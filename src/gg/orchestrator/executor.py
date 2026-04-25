@@ -13,6 +13,7 @@ from gg.orchestrator.config import GGConfig
 from gg.orchestrator.git import changed_files, current_commit, diff, safe_branch_slug
 from gg.orchestrator.git import WorktreeManager
 from gg.orchestrator.sandbox import SandboxPolicy, SandboxRuntime
+from gg.orchestrator.schemas import CandidateResultModel
 from gg.orchestrator.task_analysis import TaskBrief
 
 NEEDS_INPUT_PREFIX = "NEEDS_INPUT:"
@@ -33,7 +34,9 @@ class CandidateResult:
     error: str | None = None
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        data = asdict(self)
+        CandidateResultModel.model_validate(data)
+        return data
 
 
 class CandidateExecutor:

@@ -4,6 +4,8 @@ import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from gg.orchestrator.schemas import CheckResultModel
+
 
 @dataclass(frozen=True)
 class CheckResult:
@@ -14,7 +16,9 @@ class CheckResult:
     stderr: str = ""
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        data = asdict(self)
+        CheckResultModel.model_validate(data)
+        return data
 
 
 class VerificationRunner:

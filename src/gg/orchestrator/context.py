@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 
+from gg.orchestrator.schemas import ContextSnapshotModel, validation_error_message
 from gg.orchestrator.state import utc_now
 from gg.orchestrator.task_analysis import TaskBrief
 
@@ -53,8 +54,12 @@ class ContextSnapshotStore:
                 "labels": brief.issue.get("labels", []),
                 "url": brief.issue.get("url", ""),
             },
-            "objects": refs,
+                "objects": refs,
         }
+        try:
+            ContextSnapshotModel.model_validate(snapshot)
+        except Exception as exc:
+            raise ValueError(validation_error_message("artifacts/context-snapshot-v1.json", exc)) from exc
         path = self.project_path / ".gg" / "runs" / run_id / "artifacts" / "context-snapshot-v1.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".json.tmp")

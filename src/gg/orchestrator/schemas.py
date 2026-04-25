@@ -295,7 +295,7 @@ class CandidateResultModel(CompatibleArtifactModel):
 class EvaluationCandidateModel(CompatibleArtifactModel):
     candidate_id: str
     status: str
-    score: int
+    score: int = 0
     selected: bool = False
     reasons: list[str] = Field(default_factory=list)
     verification_passed: bool = False

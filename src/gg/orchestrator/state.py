@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
+from gg.orchestrator.schemas import RunStateModel
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -149,29 +151,35 @@ class RunState:
         data["candidate_states"] = {
             key: asdict(value) for key, value in self.candidate_states.items()
         }
+        RunStateModel.model_validate(data)
         return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "RunState":
+        validated = RunStateModel.model_validate(data)
         candidate_states = {
-            key: CandidateState(**value)
-            for key, value in data.get("candidate_states", {}).items()
+            key: CandidateState(**value.model_dump())
+            for key, value in validated.candidate_states.items()
         }
+        transitions = [
+            transition.model_dump(by_alias=True)
+            for transition in validated.transitions
+        ]
         return cls(
-            run_id=data["run_id"],
-            issue=data.get("issue", {}),
-            state=TaskState(data.get("state", TaskState.EXTERNAL_TASK_READY.value)),
-            schema_version=data.get("schema_version", 1),
-            attempt=data.get("attempt", 1),
-            max_attempts=data.get("max_attempts", 1),
-            created_at=data.get("created_at", utc_now()),
-            updated_at=data.get("updated_at", utc_now()),
+            run_id=validated.run_id,
+            issue=validated.issue,
+            state=TaskState(validated.state),
+            schema_version=validated.schema_version,
+            attempt=validated.attempt,
+            max_attempts=validated.max_attempts,
+            created_at=validated.created_at,
+            updated_at=validated.updated_at,
             candidate_states=candidate_states,
-            artifacts=data.get("artifacts", {}),
-            transitions=data.get("transitions", []),
-            last_error=data.get("last_error"),
-            pr_url=data.get("pr_url"),
-            dry_run=data.get("dry_run", False),
-            publishing_step=data.get("publishing_step"),
-            cancel_requested=data.get("cancel_requested", False),
+            artifacts=validated.artifacts,
+            transitions=transitions,
+            last_error=validated.last_error,
+            pr_url=validated.pr_url,
+            dry_run=validated.dry_run,
+            publishing_step=validated.publishing_step,
+            cancel_requested=validated.cancel_requested,
         )

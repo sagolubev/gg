@@ -37,6 +37,8 @@ class ContextSnapshotStore:
         self.objects_dir.mkdir(parents=True, exist_ok=True)
 
     def write_task_snapshot(self, run_id: str, brief: TaskBrief) -> str:
+        run_artifacts = self.project_path / ".gg" / "runs" / run_id / "artifacts"
+        version = _next_snapshot_version(run_artifacts)
         refs = {
             "issue_body": self._put_text(str(brief.issue.get("body", ""))),
             "issue_comments": self._put_text(_comments_text(list(brief.issue.get("comments", [])))),
@@ -44,23 +46,41 @@ class ContextSnapshotStore:
             "summary": self._put_text(brief.summary),
             "project_context": self._put_text(brief.project_context),
         }
+        object_metadata = {
+            name: _object_metadata(name, self.read_text(digest))
+            for name, digest in refs.items()
+        }
         snapshot = {
             "schema_version": 1,
+            "snapshot_version": version,
             "created_at": utc_now(),
             "run_id": run_id,
+            "purpose": "task_analysis_handoff",
             "issue": {
                 "number": brief.issue.get("number"),
                 "title": brief.issue.get("title"),
                 "labels": brief.issue.get("labels", []),
                 "url": brief.issue.get("url", ""),
             },
-                "objects": refs,
+            "objects": refs,
+            "object_metadata": object_metadata,
+            "source_refs": _source_refs(brief),
+            "summaries": {
+                "summary": brief.summary,
+                "acceptance_criteria": list(brief.acceptance_criteria),
+                "candidate_files": list(brief.candidate_files),
+                "risk_flags": list(brief.risk_flags),
+                "classification": dict(brief.classification),
+            },
+            "prior_answer_refs": _prior_answer_refs(brief),
         }
         try:
             ContextSnapshotModel.model_validate(snapshot)
         except Exception as exc:
-            raise ValueError(validation_error_message("artifacts/context-snapshot-v1.json", exc)) from exc
-        path = self.project_path / ".gg" / "runs" / run_id / "artifacts" / "context-snapshot-v1.json"
+            raise ValueError(
+                validation_error_message(f"artifacts/context-snapshot-v{version}.json", exc)
+            ) from exc
+        path = run_artifacts / f"context-snapshot-v{version}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(snapshot, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -79,3 +99,56 @@ class ContextSnapshotStore:
             tmp.write_text(text, encoding="utf-8")
             tmp.replace(path)
         return digest
+
+
+def _next_snapshot_version(artifacts_dir: Path) -> int:
+    existing = []
+    if artifacts_dir.exists():
+        for path in artifacts_dir.glob("context-snapshot-v*.json"):
+            try:
+                existing.append(int(path.stem.rsplit("-v", 1)[1]))
+            except (IndexError, ValueError):
+                continue
+    return (max(existing) + 1) if existing else 1
+
+
+def _object_metadata(name: str, text: str) -> dict:
+    return {
+        "name": name,
+        "chars": len(text),
+        "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+    }
+
+
+def _source_refs(brief: TaskBrief) -> list[dict]:
+    refs = [
+        {
+            "kind": "issue",
+            "number": brief.issue.get("number"),
+            "title": brief.issue.get("title"),
+            "url": brief.issue.get("url", ""),
+        }
+    ]
+    refs.extend(
+        {
+            "kind": "issue_comment",
+            "author": comment.get("author", ""),
+            "created_at": comment.get("created_at", ""),
+            "url": comment.get("url", ""),
+        }
+        for comment in list(brief.issue.get("comments", []))
+    )
+    return refs
+
+
+def _prior_answer_refs(brief: TaskBrief) -> list[dict]:
+    return [
+        {
+            "kind": "local_input",
+            "sequence_number": item.get("sequence_number", 0),
+            "source": item.get("source", ""),
+            "created_at": item.get("created_at", ""),
+            "answered_state": item.get("answered_state", ""),
+        }
+        for item in list(brief.issue.get("inputs", []))
+    ]

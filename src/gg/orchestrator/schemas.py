@@ -809,6 +809,9 @@ class ResourcePreflightModel(CompatibleArtifactModel):
     available_mb: int = Field(ge=0)
     required_mb: int = Field(ge=0)
     max_disk_mb: int = Field(ge=1)
+    repo_size_mb: int = Field(default=0, ge=0)
+    per_candidate_mb: int = Field(default=1, ge=1)
+    estimate_strategy: str = ""
     requested_candidates: int = Field(ge=0)
     allowed_candidates: int = Field(ge=0)
     downscaled: bool = False
@@ -918,6 +921,12 @@ class ContextSnapshotModel(CompatibleArtifactModel):
     run_id: str
     issue: dict[str, Any]
     objects: dict[str, str]
+    snapshot_version: int = Field(default=1, ge=1)
+    purpose: str = ""
+    source_refs: list[dict[str, Any]] = Field(default_factory=list)
+    object_metadata: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    summaries: dict[str, Any] = Field(default_factory=dict)
+    prior_answer_refs: list[dict[str, Any]] = Field(default_factory=list)
 
     @field_validator("created_at")
     @classmethod

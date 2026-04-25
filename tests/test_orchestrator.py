@@ -1478,6 +1478,8 @@ def test_resource_preflight_blocks_when_disk_budget_unavailable(monkeypatch, tmp
     assert result["error"]["code"] == "insufficient_disk"
     assert artifact["passed"] is False
     assert artifact["allowed_candidates"] == 0
+    assert artifact["repo_size_mb"] >= 1
+    assert artifact["per_candidate_mb"] >= artifact["max_disk_mb"]
 
 
 def test_resource_preflight_downscales_initial_candidates(monkeypatch, tmp_path):
@@ -1503,6 +1505,7 @@ runtime:
     assert artifact["passed"] is True
     assert artifact["downscaled"] is True
     assert artifact["allowed_candidates"] == 1
+    assert artifact["estimate_strategy"] == "max(configured_candidate_limit, repo_checkout_size)"
     assert list(state.candidate_states) == ["candidate-1"]
 
 
@@ -1873,6 +1876,10 @@ def test_task_analysis_includes_issue_comments_and_local_inputs(tmp_path):
     assert brief["issue"]["comments"][0]["body"] == "Please keep the file UTF-8 encoded."
     assert brief["issue"]["inputs"][0]["message"] == "Use Spanish"
     snapshot = json.loads((tmp_path / refreshed_state.artifacts["context_snapshot"]).read_text(encoding="utf-8"))
+    assert refreshed_state.artifacts["context_snapshot"].endswith("context-snapshot-v2.json")
+    assert snapshot["snapshot_version"] == 2
+    assert snapshot["purpose"] == "task_analysis_handoff"
+    assert snapshot["prior_answer_refs"][0]["sequence_number"] == 1
     for key in ("issue_comments", "local_inputs"):
         digest = snapshot["objects"][key]
         assert ContextSnapshotStore(tmp_path).read_text(digest)
@@ -4449,6 +4456,11 @@ def test_context_snapshot_uses_content_addressed_objects(tmp_path):
     store = ContextSnapshotStore(tmp_path)
 
     assert "project_context" in data["objects"]
+    assert data["snapshot_version"] == 1
+    assert data["purpose"] == "task_analysis_handoff"
+    assert data["source_refs"][0]["kind"] == "issue"
+    assert data["object_metadata"]["summary"]["sha256"] == data["objects"]["summary"]
+    assert data["summaries"]["summary"]
     assert store.read_text(data["objects"]["summary"])
 
 

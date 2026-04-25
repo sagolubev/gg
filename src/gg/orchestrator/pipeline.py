@@ -994,12 +994,14 @@ class OrchestratorPipeline:
     def _resource_preflight(self, state, requested_candidates: int) -> dict[str, Any]:
         resource = self.config.runtime.resource
         available_mb = _available_disk_mb(self.project_path)
-        required_mb = max(1, requested_candidates) * resource.max_disk_mb
+        repo_size_mb = _repo_size_mb(self.project_path)
+        per_candidate_mb = max(resource.max_disk_mb, repo_size_mb)
+        required_mb = max(1, requested_candidates) * per_candidate_mb
         allowed_candidates = requested_candidates
         downscaled = False
         passed = available_mb >= required_mb
         if not passed and resource.allow_candidate_downscale:
-            allowed_candidates = max(1, available_mb // resource.max_disk_mb)
+            allowed_candidates = max(1, available_mb // per_candidate_mb)
             downscaled = allowed_candidates < requested_candidates
             passed = allowed_candidates >= 1
         payload = {
@@ -1007,6 +1009,9 @@ class OrchestratorPipeline:
             "available_mb": available_mb,
             "required_mb": required_mb,
             "max_disk_mb": resource.max_disk_mb,
+            "repo_size_mb": repo_size_mb,
+            "per_candidate_mb": per_candidate_mb,
+            "estimate_strategy": "max(configured_candidate_limit, repo_checkout_size)",
             "requested_candidates": requested_candidates,
             "allowed_candidates": allowed_candidates if passed else 0,
             "downscaled": downscaled,
@@ -2630,6 +2635,33 @@ def _terminate_process_group(pid: int) -> bool:
 def _available_disk_mb(path: Path) -> int:
     usage = shutil.disk_usage(path)
     return usage.free // (1024 * 1024)
+
+
+def _repo_size_mb(path: Path) -> int:
+    total = 0
+    excluded = {".git", ".gg", ".gg-cache"}
+    deadline = time.monotonic() + 5
+    pending = [path]
+    while pending:
+        if time.monotonic() > deadline:
+            return 0
+        current = pending.pop()
+        try:
+            entries = list(os.scandir(current))
+        except OSError:
+            continue
+        for entry in entries:
+            name = entry.name
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    if current == path and name in excluded:
+                        continue
+                    pending.append(Path(entry.path))
+                elif entry.is_file(follow_symlinks=False):
+                    total += entry.stat(follow_symlinks=False).st_size
+            except OSError:
+                continue
+    return (total + (1024 * 1024) - 1) // (1024 * 1024)
 
 
 def _verification_passed(

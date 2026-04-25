@@ -19,6 +19,7 @@ from gg.orchestrator.schemas import (
     AnalysisAgentResponseModel,
     ArchiveSummaryModel,
     CandidateResultModel,
+    ContextSnapshotModel,
     EvaluationArtifactModel,
     ExecutionEvaluationModel,
     InputArtifactModel,
@@ -653,6 +654,8 @@ def _validate_json_artifact(relative_path: str, data: dict[str, Any]) -> None:
     schema: type | None = None
     if relative_path == "artifacts/task-brief.json" or re.match(r"artifacts/task-brief-v\d+\.json$", relative_path):
         schema = TaskBriefModel
+    elif re.match(r"artifacts/context-snapshot-v\d+\.json$", relative_path):
+        schema = ContextSnapshotModel
     elif relative_path == "artifacts/raw-issue.json" or re.match(r"artifacts/raw-issue-v\d+\.json$", relative_path):
         schema = RawIssueArtifactModel
     elif re.match(r"artifacts/analysis-agent-response-v\d+\.json$", relative_path):

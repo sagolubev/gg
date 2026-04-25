@@ -20,6 +20,7 @@ from gg.orchestrator.pipeline import OrchestratorPipeline
 from gg.orchestrator.rate_limit import RateLimitStore
 from gg.orchestrator.sandbox import SandboxPolicy, SandboxRunResult, SandboxRuntime
 from gg.orchestrator.state import CandidateState, InvalidTransitionError, RunState, TaskState
+from gg.orchestrator.store import RunStore
 from gg.platforms.base import GitPlatform, Issue
 from gg.platforms.gitlab import GitLabPlatform
 
@@ -280,6 +281,12 @@ def init_repo(path: Path) -> None:
     )
 
 
+def read_jsonl(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
 def test_run_state_rejects_illegal_transition():
     state = RunState(run_id="run-1", issue={"number": 1})
     try:
@@ -337,8 +344,63 @@ def test_pipeline_no_pr_completes_with_one_candidate(tmp_path):
     assert (run_dir / "candidates" / "candidate-1" / "patch.diff").read_text(encoding="utf-8")
     assert (run_dir / "candidates" / "candidate-1" / "verification.json").exists()
     assert (run_dir / "artifacts" / "evaluation.json").exists()
+    assert (run_dir / "artifacts" / "run-summary.json").exists()
     assert (run_dir / "pipeline.jsonl").exists()
     assert (run_dir / "cost.jsonl").exists()
+
+    pipeline_events = read_jsonl(run_dir / "pipeline.jsonl")
+    transitions = [event for event in pipeline_events if event["event"] == "state_transition"]
+    assert [event["to_state"] for event in transitions] == [
+        "Claiming",
+        "Queued",
+        "RunStarted",
+        "TaskAnalysis",
+        "ReadyForExecution",
+        "AgentSelection",
+        "AgentRunning",
+        "ResultEvaluation",
+        "OutcomePublishing",
+        "Completed",
+    ]
+    assert any(
+        event["event"] == "artifact_updated" and event["artifact"] == "run_summary"
+        for event in pipeline_events
+    )
+    assert any(
+        event["event"] == "candidate_state"
+        and event["candidate_id"] == "candidate-1"
+        and event["status"] == "success"
+        for event in pipeline_events
+    )
+
+    cost_events = read_jsonl(run_dir / "cost.jsonl")
+    assert cost_events == [
+        {
+            "event": "candidate_metrics",
+            "at": cost_events[0]["at"],
+            "run_id": result["run_id"],
+            "candidate_id": "candidate-1",
+            "attempt": 1,
+            "strategy": "conservative",
+            "status": "success",
+            "error": None,
+            "duration_seconds": cost_events[0]["duration_seconds"],
+            "verification_duration_seconds": cost_events[0]["verification_duration_seconds"],
+            "verification_passed": True,
+            "verification_mutated_worktree": False,
+            "verification_failed_commands": [],
+            "changed_files": ["greeting.txt"],
+            "changed_files_count": 1,
+            "total_usd": None,
+            "token_usage": None,
+        }
+    ]
+
+    summary = json.loads((run_dir / "artifacts" / "run-summary.json").read_text(encoding="utf-8"))
+    assert summary["state"] == "Completed"
+    assert summary["artifacts"]["run_summary"].endswith("artifacts/run-summary.json")
+    assert summary["candidate_states"]["candidate-1"]["status"] == "success"
+    assert summary["logs"]["pipeline"].endswith("pipeline.jsonl")
 
 
 def test_pipeline_fanout_selects_first_passing_candidate(tmp_path):
@@ -872,6 +934,33 @@ def test_error_logs_mask_secrets(tmp_path):
     errors = (tmp_path / ".gg" / "runs" / ready["run_id"] / "errors.jsonl").read_text(encoding="utf-8")
     assert "ghp_" not in errors
     assert "***" in errors
+
+
+def test_observability_artifacts_mask_secrets(tmp_path):
+    init_repo(tmp_path)
+    store = RunStore(tmp_path)
+    issue = Issue(number=42, title="Secrets", body="Track tokens.", labels=["ai-ready"], url="")
+    state = store.create(issue, dry_run=True)
+
+    store.append_event(state.run_id, {"event": "custom", "message": "keep sk-abcdefghijklmnopqrstuvwxyz secret"})
+    store.append_cost(state.run_id, {"event": "custom", "detail": "github_pat_abcdefghijklmnopqrstuvwxyz_123"})
+    state.last_error = {"code": "boom", "message": "leaked ghp_abcdefghijklmnopqrstuvwxyz12345", "at": state.updated_at}
+    store.write(state)
+
+    run_dir = tmp_path / ".gg" / "runs" / state.run_id
+    pipeline = (run_dir / "pipeline.jsonl").read_text(encoding="utf-8")
+    cost = (run_dir / "cost.jsonl").read_text(encoding="utf-8")
+    errors = (run_dir / "errors.jsonl").read_text(encoding="utf-8")
+    summary = (run_dir / "artifacts" / "run-summary.json").read_text(encoding="utf-8")
+
+    assert "sk-" not in pipeline
+    assert "github_pat_" not in cost
+    assert "ghp_" not in errors
+    assert "ghp_" not in summary
+    assert "***" in pipeline
+    assert "***" in cost
+    assert "***" in errors
+    assert "***" in summary
 
 
 def test_file_lock_times_out_for_second_holder(tmp_path):

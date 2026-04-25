@@ -4,9 +4,10 @@ import json
 import re
 import shutil
 import subprocess
+from dataclasses import asdict
 from pathlib import Path
 
-from gg.orchestrator.logging import append_jsonl
+from gg.orchestrator.logging import append_jsonl, mask_secrets
 from gg.orchestrator.state import TERMINAL_STATES, RunState, utc_now
 from gg.platforms.base import Issue
 
@@ -81,13 +82,11 @@ class RunStore:
             current = RunState.from_dict(json.loads(path.read_text(encoding="utf-8")))
             if current.state in TERMINAL_STATES and state.state is not current.state:
                 raise RuntimeError(f"refusing to overwrite terminal run state {current.state.value}")
-            if current.cancel_requested and not state.cancel_requested:
-                state.cancel_requested = True
-                if state.last_error is None:
-                    state.last_error = current.last_error
+        state.artifacts.setdefault("run_summary", self._run_summary_relative_path(state.run_id))
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(state.to_dict(), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         tmp.replace(path)
+        self._write_run_summary(run_dir, state)
         self._write_logs(run_dir, state, current)
 
     def load(self, run_id: str) -> RunState:
@@ -196,15 +195,91 @@ class RunStore:
         append_jsonl(self.path_for(run_id) / "errors.jsonl", payload)
 
     def _write_logs(self, run_dir: Path, state: RunState, current: RunState | None) -> None:
-        if current is None or current.state != state.state or current.updated_at != state.updated_at:
+        if current is None:
             self.append_event(
                 state.run_id,
                 {
+                    "event": "run_created",
+                    "at": state.created_at,
+                    "run_id": state.run_id,
+                    "state": state.state.value,
+                    "issue": state.issue,
+                    "dry_run": state.dry_run,
+                    "attempt": state.attempt,
+                },
+            )
+        previous_transitions = len(current.transitions) if current else 0
+        for transition in state.transitions[previous_transitions:]:
+            self.append_event(
+                state.run_id,
+                {
+                    "event": "state_transition",
+                    "at": transition["at"],
+                    "run_id": state.run_id,
+                    "from_state": transition["from"],
+                    "to_state": transition["to"],
+                    "reason": transition.get("reason", ""),
+                    "attempt": state.attempt,
+                    "publishing_step": state.publishing_step,
+                    "cancel_requested": state.cancel_requested,
+                },
+            )
+        current_artifacts = current.artifacts if current else {}
+        for name, artifact_path in sorted(state.artifacts.items()):
+            if current_artifacts.get(name) == artifact_path:
+                continue
+            self.append_event(
+                state.run_id,
+                {
+                    "event": "artifact_updated",
+                    "at": state.updated_at,
+                    "run_id": state.run_id,
+                    "artifact": name,
+                    "path": artifact_path,
+                    "state": state.state.value,
+                },
+            )
+        current_candidates = current.candidate_states if current else {}
+        for candidate_id, candidate in sorted(state.candidate_states.items()):
+            if current_candidates.get(candidate_id) == candidate:
+                continue
+            previous = current_candidates.get(candidate_id)
+            self.append_event(
+                state.run_id,
+                {
+                    "event": "candidate_state",
+                    "at": candidate.finished_at or candidate.started_at or state.updated_at,
+                    "run_id": state.run_id,
+                    "candidate_id": candidate_id,
+                    "status": candidate.status,
+                    "previous_status": previous.status if previous else None,
+                    "branch": candidate.branch,
+                    "worktree_path": candidate.worktree_path,
+                    "result_path": candidate.result_path,
+                    "error": candidate.error,
+                },
+            )
+        if current is None or current.publishing_step != state.publishing_step:
+            if state.publishing_step is not None:
+                self.append_event(
+                    state.run_id,
+                    {
+                        "event": "publishing_step",
+                        "at": state.updated_at,
+                        "run_id": state.run_id,
+                        "state": state.state.value,
+                        "publishing_step": state.publishing_step,
+                        "previous_step": current.publishing_step if current else None,
+                    },
+                )
+        if current is None or current.cancel_requested != state.cancel_requested:
+            self.append_event(
+                state.run_id,
+                {
+                    "event": "cancel_request",
                     "at": state.updated_at,
                     "run_id": state.run_id,
                     "state": state.state.value,
-                    "attempt": state.attempt,
-                    "publishing_step": state.publishing_step,
                     "cancel_requested": state.cancel_requested,
                 },
             )
@@ -212,9 +287,53 @@ class RunStore:
             self.append_error(
                 state.run_id,
                 {
+                    "event": "run_error",
                     "at": state.last_error.get("at", utc_now()),
                     "run_id": state.run_id,
                     "state": state.state.value,
+                    "attempt": state.attempt,
+                    "publishing_step": state.publishing_step,
+                    "cancel_requested": state.cancel_requested,
+                    "candidate_statuses": {
+                        candidate_id: candidate.status
+                        for candidate_id, candidate in sorted(state.candidate_states.items())
+                    },
                     **state.last_error,
                 },
             )
+
+    def _run_summary_relative_path(self, run_id: str) -> str:
+        return str((self.path_for(run_id) / "artifacts" / "run-summary.json").relative_to(self.project_path))
+
+    def _write_run_summary(self, run_dir: Path, state: RunState) -> None:
+        summary_path = run_dir / "artifacts" / "run-summary.json"
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema_version": 1,
+            "run_id": state.run_id,
+            "issue": state.issue,
+            "state": state.state.value,
+            "attempt": state.attempt,
+            "max_attempts": state.max_attempts,
+            "created_at": state.created_at,
+            "updated_at": state.updated_at,
+            "dry_run": state.dry_run,
+            "publishing_step": state.publishing_step,
+            "cancel_requested": state.cancel_requested,
+            "pr_url": state.pr_url,
+            "artifacts": state.artifacts,
+            "candidate_states": {
+                candidate_id: asdict(candidate)
+                for candidate_id, candidate in sorted(state.candidate_states.items())
+            },
+            "last_error": state.last_error,
+            "logs": {
+                "state": str((run_dir / "state.json").relative_to(self.project_path)),
+                "pipeline": str((run_dir / "pipeline.jsonl").relative_to(self.project_path)),
+                "errors": str((run_dir / "errors.jsonl").relative_to(self.project_path)),
+                "cost": str((run_dir / "cost.jsonl").relative_to(self.project_path)),
+            },
+        }
+        tmp = summary_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(mask_secrets(payload), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        tmp.replace(summary_path)

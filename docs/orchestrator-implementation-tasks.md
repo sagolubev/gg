@@ -29,6 +29,14 @@
 - [x] Add richer signal handling and zombie process cleanup.
 - [x] Add `gg provide` for local answers to `Blocked` / `NeedsInput`.
 
+## Implemented Run Artifacts / Observability
+
+- [x] Persist `state.json` plus append-only `pipeline.jsonl`, `errors.jsonl`, and `cost.jsonl` under `.gg/runs/<run_id>/`.
+- [x] Record state transitions with reasons, candidate status changes, publishing-step changes, and tracked artifact updates in `pipeline.jsonl`.
+- [x] Record candidate execution/verification metrics in `cost.jsonl` (durations, changed files, verification outcome, failed commands).
+- [x] Redact common token patterns in observability logs before they are written to disk.
+- [x] Materialize `artifacts/run-summary.json` as a single redacted snapshot of run status, artifacts, candidates, and log paths.
+
 ## P3 Production
 
 - [ ] Add plugin interfaces for task systems and executor backends.

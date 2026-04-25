@@ -8,6 +8,27 @@ from gg.orchestrator.state import utc_now
 from gg.orchestrator.task_analysis import TaskBrief
 
 
+def _comments_text(comments: list[dict]) -> str:
+    return "\n".join(
+        f"{comment.get('author') or 'unknown'} @ {comment.get('created_at') or 'unknown time'}: {comment.get('body', '')}"
+        for comment in comments
+        if str(comment.get("body", "")).strip()
+    )
+
+
+def _inputs_text(inputs: list[dict]) -> str:
+    return "\n".join(
+        (
+            f"Input #{item.get('sequence_number', 0)} "
+            f"from {item.get('source') or 'unknown'} "
+            f"for {item.get('answered_state') or 'unknown'}: "
+            f"{item.get('message', '')}"
+        )
+        for item in inputs
+        if str(item.get("message", "")).strip()
+    )
+
+
 class ContextSnapshotStore:
     def __init__(self, project_path: str | Path):
         self.project_path = Path(project_path).resolve()
@@ -17,6 +38,8 @@ class ContextSnapshotStore:
     def write_task_snapshot(self, run_id: str, brief: TaskBrief) -> str:
         refs = {
             "issue_body": self._put_text(str(brief.issue.get("body", ""))),
+            "issue_comments": self._put_text(_comments_text(list(brief.issue.get("comments", [])))),
+            "local_inputs": self._put_text(_inputs_text(list(brief.issue.get("inputs", [])))),
             "summary": self._put_text(brief.summary),
             "project_context": self._put_text(brief.project_context),
         }

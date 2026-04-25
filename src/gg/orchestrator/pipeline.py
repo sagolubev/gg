@@ -68,11 +68,7 @@ class OrchestratorPipeline:
                 state.transition(TaskState.TASK_ANALYSIS, reason="create task brief")
                 self.store.write(state)
 
-                brief = TaskAnalyzer(str(self.project_path)).analyze(issue)
-                brief_path = self.store.write_json(state.run_id, "artifacts/task-brief.json", brief.to_dict())
-                state.artifacts["task_brief"] = brief_path
-                snapshot_path = ContextSnapshotStore(self.project_path).write_task_snapshot(state.run_id, brief)
-                state.artifacts["context_snapshot"] = snapshot_path
+                brief = self._refresh_task_analysis(state, issue)
                 state.transition(TaskState.READY_FOR_EXECUTION, reason="task brief ready")
                 self.store.write(state)
 
@@ -112,6 +108,38 @@ class OrchestratorPipeline:
     def resume(self, run_id: str, *, no_pr: bool = False) -> dict[str, Any]:
         state = self.store.load(run_id)
         issue_number = int(state.issue["number"])
+        if state.state in TERMINAL_STATES:
+            return {
+                "run_id": run_id,
+                "state": state.state.value,
+                "resumed": False,
+                "message": "Terminal runs are immutable; start a new run for a fresh attempt.",
+            }
+        brief_path = state.artifacts.get("task_brief")
+        if not brief_path:
+            state.fail(code="missing_task_brief", message="cannot resume without task brief artifact")
+            self.store.write(state)
+            return {"run_id": run_id, "state": state.state.value, "error": state.last_error}
+        issue = self.platform.get_issue(issue_number)
+        if state.state is TaskState.OUTCOME_PUBLISHING:
+            return self._resume_publishing(state, issue, no_pr=no_pr)
+        if state.state is TaskState.NEEDS_INPUT:
+            return {
+                "run_id": run_id,
+                "state": state.state.value,
+                "resumed": False,
+                "message": "Run is waiting for local input. Use gg provide before resuming.",
+            }
+        for candidate in state.candidate_states.values():
+            if candidate.status == "running":
+                candidate.status = "failed"
+                candidate.finished_at = _now_placeholder()
+                candidate.error = "interrupted before completion"
+        brief = self._refresh_task_analysis(state, issue)
+        if state.state is not TaskState.READY_FOR_EXECUTION:
+            state.recover_to(TaskState.READY_FOR_EXECUTION, reason=f"resume from {state.state.value}")
+            self.store.write(state)
+        state.dry_run = False
         try:
             with self.locks.issue(issue_number):
                 state = self.store.load(run_id)
@@ -232,6 +260,11 @@ class OrchestratorPipeline:
                 state.transition(TaskState.TASK_ANALYSIS, reason="operator provided input")
             else:
                 state.transition(TaskState.AGENT_RUNNING, reason="operator provided input")
+            self._best_effort_labels(
+                int(state.issue["number"]),
+                add=[self.config.task_system.work_label],
+                remove=[self.config.task_system.blocked_label],
+            )
             self.store.write(state)
             return {
                 "run_id": run_id,
@@ -340,6 +373,32 @@ class OrchestratorPipeline:
             evaluation_path = self._write_evaluation(state, selected, candidate_records)
             state.artifacts["evaluation"] = evaluation_path
             self.store.write(state)
+            needs_input = next(
+                (record for record in attempt_records if record["effective_status"] == "needs_input"),
+                None,
+            )
+            if selected is None and needs_input is not None:
+                request_path = self.store.write_json(
+                    state.run_id,
+                    "artifacts/input-request.json",
+                    {
+                        "schema_version": 1,
+                        "candidate_id": needs_input["candidate"].candidate_id,
+                        "attempt": needs_input["attempt"],
+                        "message": needs_input["error"] or "Agent requested additional input.",
+                        "created_at": _now_placeholder(),
+                    },
+                )
+                state.artifacts["input_request"] = request_path
+                state.transition(TaskState.NEEDS_INPUT, reason="candidate requested operator input")
+                self.store.write(state)
+                self._mark_issue_needs_input(issue.number, needs_input["error"] or "agent requested additional input")
+                return {
+                    "run_id": state.run_id,
+                    "state": state.state.value,
+                    "message": needs_input["error"] or "Agent requested additional input.",
+                    "input_request": request_path,
+                }
             if selected is None and state.attempt < state.max_attempts:
                 state.attempt += 1
                 state.transition(TaskState.AGENT_RUNNING, reason="repair candidate requested")
@@ -681,6 +740,17 @@ class OrchestratorPipeline:
             f"<!-- gg-stage=blocked -->\ngg blocked this issue: {message}",
         )
 
+    def _mark_issue_needs_input(self, issue_number: int, message: str) -> None:
+        self._best_effort_labels(
+            issue_number,
+            add=[self.config.task_system.blocked_label],
+            remove=[self.config.task_system.work_label],
+        )
+        self._best_effort_comment(
+            issue_number,
+            f"<!-- gg-stage=needs-input -->\ngg needs local input to continue: {message}",
+        )
+
     def _mark_issue_failed(self, issue_number: int, message: str) -> None:
         self._best_effort_labels(issue_number, add=[], remove=[self.config.task_system.work_label])
         self._best_effort_comment(
@@ -768,6 +838,24 @@ class OrchestratorPipeline:
                 ],
             },
         )
+
+    def _refresh_task_analysis(self, state, issue: Issue) -> TaskBrief:
+        brief = TaskAnalyzer(str(self.project_path)).analyze(issue, inputs=self._load_inputs(state.run_id))
+        brief_path = self.store.write_json(state.run_id, "artifacts/task-brief.json", brief.to_dict())
+        state.artifacts["task_brief"] = brief_path
+        snapshot_path = ContextSnapshotStore(self.project_path).write_task_snapshot(state.run_id, brief)
+        state.artifacts["context_snapshot"] = snapshot_path
+        return brief
+
+    def _load_inputs(self, run_id: str) -> list[dict[str, Any]]:
+        inputs_dir = self.store.path_for(run_id) / "inputs"
+        artifacts: list[dict[str, Any]] = []
+        for path in sorted(inputs_dir.glob("input-v1-*.json")):
+            try:
+                artifacts.append(json.loads(path.read_text(encoding="utf-8")))
+            except (OSError, json.JSONDecodeError):
+                continue
+        return artifacts
 
 
 def _parse_pr_number(pr_url: str) -> int:

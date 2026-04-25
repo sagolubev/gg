@@ -2,7 +2,34 @@ from __future__ import annotations
 
 import json
 
-from gg.platforms.base import GitPlatform, Issue
+from gg.platforms.base import GitPlatform, Issue, IssueComment
+
+MAX_COMMENTS = 10
+MAX_COMMENT_CHARS = 4000
+
+
+def _parse_comments(payload: dict) -> list[IssueComment]:
+    raw_comments = payload.get("comments") or []
+    if isinstance(raw_comments, dict):
+        raw_comments = raw_comments.get("nodes") or raw_comments.get("edges") or raw_comments.get("items") or []
+    comments: list[IssueComment] = []
+    for item in raw_comments:
+        node = item.get("node", item) if isinstance(item, dict) else {}
+        body = str(node.get("body") or node.get("bodyText") or "").strip()
+        if not body:
+            continue
+        author = node.get("author") or {}
+        if isinstance(author, dict):
+            author = author.get("login") or author.get("name") or ""
+        comments.append(
+            IssueComment(
+                body=body[:MAX_COMMENT_CHARS],
+                author=str(author or ""),
+                created_at=str(node.get("createdAt") or ""),
+                url=str(node.get("url") or ""),
+            )
+        )
+    return comments[-MAX_COMMENTS:]
 
 
 class GitHubPlatform(GitPlatform):
@@ -41,8 +68,9 @@ class GitHubPlatform(GitPlatform):
     def get_issue(self, number: int) -> Issue:
         raw = self._run([
             "issue", "view", str(number),
-            "--json", "number,title,body,labels,assignees,state,url",
-        ], bucket=self._bucket("issues:read"))
+            "--comments",
+            "--json", "number,title,body,labels,assignees,state,url,comments",
+        ])
         i = json.loads(raw)
         return Issue(
             number=i["number"],
@@ -52,6 +80,7 @@ class GitHubPlatform(GitPlatform):
             assignees=[a["login"] for a in i.get("assignees", [])],
             state=i.get("state", "open"),
             url=i.get("url", ""),
+            comments=_parse_comments(i),
         )
 
     def create_pr(self, *, title: str, body: str, head: str, base: str) -> str:

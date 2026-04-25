@@ -15,6 +15,8 @@ from gg.orchestrator.git import WorktreeManager
 from gg.orchestrator.sandbox import SandboxPolicy, SandboxRuntime
 from gg.orchestrator.task_analysis import TaskBrief
 
+NEEDS_INPUT_PREFIX = "NEEDS_INPUT:"
+
 
 @dataclass(frozen=True)
 class CandidateResult:
@@ -63,10 +65,15 @@ class CandidateExecutor:
         started = time.monotonic()
         try:
             summary = self._generate(prompt, worktree)
+            needs_input = _extract_needs_input(summary)
             files = changed_files(worktree)
             patch = diff(worktree) if files else ""
-            status = "success" if files else "failed"
-            error = None if files else "agent produced no file changes"
+            if needs_input and not files:
+                status = "needs_input"
+                error = needs_input
+            else:
+                status = "success" if files else "failed"
+                error = None if files else "agent produced no file changes"
             return CandidateResult(
                 schema_version=1,
                 candidate_id=candidate_id,
@@ -74,7 +81,7 @@ class CandidateExecutor:
                 branch=branch,
                 worktree_path=str(worktree),
                 base_commit=base_commit,
-                summary=summary.strip() or "Agent completed.",
+                summary=(needs_input or summary).strip() or "Agent completed.",
                 changed_files=files,
                 patch=patch,
                 duration_seconds=round(time.monotonic() - started, 3),
@@ -146,6 +153,7 @@ class CandidateExecutor:
             "You are implementing a GitHub issue in this repository.\n"
             "Make the smallest correct code change, update tests when needed, and leave the worktree with the patch applied.\n"
             "Do not create commits or push. The orchestrator will commit and publish after verification.\n\n"
+            f"If you cannot continue without a human answer, make no file changes and respond with exactly one line starting with {NEEDS_INPUT_PREFIX!r} followed by the concise question.\n\n"
             f"Strategy: {strategy}\n{strategy_text}\n\n"
             f"Issue #{brief.issue['number']}: {brief.issue['title']}\n\n"
             f"Summary:\n{brief.summary}\n\n"
@@ -153,3 +161,11 @@ class CandidateExecutor:
             f"Project context:\n{brief.project_context}\n\n"
             "Return a concise implementation summary."
         )
+
+
+def _extract_needs_input(summary: str) -> str | None:
+    text = summary.strip()
+    if not text.startswith(NEEDS_INPUT_PREFIX):
+        return None
+    message = text[len(NEEDS_INPUT_PREFIX):].strip()
+    return message or "Agent requested additional input."

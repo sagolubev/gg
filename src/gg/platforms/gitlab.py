@@ -2,7 +2,39 @@ from __future__ import annotations
 
 import json
 
-from gg.platforms.base import GitPlatform, Issue
+from gg.platforms.base import GitPlatform, Issue, IssueComment
+
+MAX_COMMENTS = 10
+MAX_COMMENT_CHARS = 4000
+
+
+def _parse_comments(payload: dict) -> list[IssueComment]:
+    raw_comments = payload.get("comments") or payload.get("notes") or payload.get("discussions") or []
+    if isinstance(raw_comments, dict):
+        raw_comments = raw_comments.get("nodes") or raw_comments.get("items") or []
+    comments: list[IssueComment] = []
+    for item in raw_comments:
+        node = item if isinstance(item, dict) else {}
+        if "notes" in node and isinstance(node["notes"], list):
+            nested = node["notes"]
+        else:
+            nested = [node]
+        for note in nested:
+            body = str(note.get("body") or note.get("note") or note.get("text") or "").strip()
+            if not body:
+                continue
+            author = note.get("author") or {}
+            if isinstance(author, dict):
+                author = author.get("username") or author.get("name") or ""
+            comments.append(
+                IssueComment(
+                    body=body[:MAX_COMMENT_CHARS],
+                    author=str(author or ""),
+                    created_at=str(note.get("created_at") or note.get("createdAt") or ""),
+                    url=str(note.get("web_url") or note.get("url") or ""),
+                )
+            )
+    return comments[-MAX_COMMENTS:]
 
 
 class GitLabPlatform(GitPlatform):
@@ -39,7 +71,7 @@ class GitLabPlatform(GitPlatform):
         ]
 
     def get_issue(self, number: int) -> Issue:
-        raw = self._run(["issue", "view", str(number), "--output", "json"], bucket=self._bucket("issues:read"))
+        raw = self._run(["issue", "view", str(number), "--comments", "--output", "json"])
         i = json.loads(raw)
         return Issue(
             number=i.get("iid", number),
@@ -49,6 +81,7 @@ class GitLabPlatform(GitPlatform):
             assignees=[a.get("username", "") for a in i.get("assignees", [])],
             state=i.get("state", "opened"),
             url=i.get("web_url", ""),
+            comments=_parse_comments(i),
         )
 
     def create_pr(self, *, title: str, body: str, head: str, base: str) -> str:

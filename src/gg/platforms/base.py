@@ -16,6 +16,14 @@ from gg.utils.git_ops import get_remote_url, parse_remote_url
 
 
 @dataclass(frozen=True)
+class IssueComment:
+    body: str
+    author: str = ""
+    created_at: str = ""
+    url: str = ""
+
+
+@dataclass(frozen=True)
 class Issue:
     number: int
     title: str
@@ -24,6 +32,7 @@ class Issue:
     assignees: list[str] = field(default_factory=list)
     state: str = "open"
     url: str = ""
+    comments: list[IssueComment] = field(default_factory=list)
 
 
 class GitPlatform(ABC):

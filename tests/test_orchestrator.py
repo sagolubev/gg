@@ -20,8 +20,7 @@ from gg.orchestrator.pipeline import OrchestratorPipeline
 from gg.orchestrator.rate_limit import RateLimitStore
 from gg.orchestrator.sandbox import SandboxPolicy, SandboxRunResult, SandboxRuntime
 from gg.orchestrator.state import CandidateState, InvalidTransitionError, RunState, TaskState
-from gg.orchestrator.store import RunStore
-from gg.platforms.base import GitPlatform, Issue
+from gg.platforms.base import GitPlatform, Issue, IssueComment
 from gg.platforms.gitlab import GitLabPlatform
 
 
@@ -31,7 +30,12 @@ class FakePlatform(GitPlatform):
         self.labels: list[tuple[int, list[str]]] = []
         self.removed_labels: list[tuple[int, list[str]]] = []
         self.prs: list[dict] = []
-        self.issue = Issue(number=42, title="Add greeting", body="Write a greeting file.", labels=["ai-ready"])
+        self.issue = Issue(
+            number=42,
+            title="Add greeting",
+            body="Write a greeting file.",
+            labels=["ai-ready"],
+        )
         self.issues = [self.issue]
 
     def list_issues(self, state: str = "open", limit: int = 30) -> list[Issue]:
@@ -132,6 +136,31 @@ class RepairAgent(AgentBackend):
         if self.calls > 1:
             Path(cwd, "repaired.txt").write_text("fixed\n", encoding="utf-8")
         return f"Repair call {self.calls}"
+
+    def is_available(self) -> bool:
+        return True
+
+
+class NeedsInputAgent(AgentBackend):
+    def __init__(self):
+        self.calls = 0
+
+    def generate(
+        self,
+        prompt: str,
+        *,
+        cwd: str | None = None,
+        timeout: int | None = None,
+        context: str | None = None,
+    ) -> str:
+        self.calls += 1
+        assert cwd is not None
+        if self.calls == 1:
+            return "NEEDS_INPUT: Which greeting language should I use?"
+        if "Use Spanish" not in prompt:
+            raise AssertionError("resume prompt should include provided input artifact")
+        Path(cwd, "greeting.txt").write_text("hola desde gg\n", encoding="utf-8")
+        return "Created Spanish greeting."
 
     def is_available(self) -> bool:
         return True
@@ -570,6 +599,38 @@ def test_resume_ready_run_executes_same_run(tmp_path):
     assert result["run_id"] == ready["run_id"]
 
 
+def test_task_analysis_includes_issue_comments_and_local_inputs(tmp_path):
+    init_repo(tmp_path)
+    issue = Issue(
+        number=42,
+        title="Add greeting",
+        body="Write a greeting file.",
+        labels=["ai-ready"],
+        comments=[
+            IssueComment(body="Please keep the file UTF-8 encoded.", author="maintainer", created_at="2026-04-25T12:00:00Z"),
+        ],
+    )
+    platform = FakePlatform()
+    platform.issue = issue
+    platform.issues = [issue]
+    pipeline = OrchestratorPipeline(tmp_path, platform=platform, agent=FakeAgent())
+
+    ready = pipeline.run_issue(42, dry_run=True)
+    state = pipeline.store.load(ready["run_id"])
+    pipeline.provide(ready["run_id"], message="Use Spanish")
+    refreshed = pipeline.resume(ready["run_id"], no_pr=True)
+
+    assert refreshed["state"] == "Completed"
+    brief_path = tmp_path / state.artifacts["task_brief"]
+    brief = json.loads(brief_path.read_text(encoding="utf-8"))
+    assert brief["issue"]["comments"][0]["body"] == "Please keep the file UTF-8 encoded."
+    assert brief["issue"]["inputs"][0]["message"] == "Use Spanish"
+    snapshot = json.loads((tmp_path / state.artifacts["context_snapshot"]).read_text(encoding="utf-8"))
+    for key in ("issue_comments", "local_inputs"):
+        digest = snapshot["objects"][key]
+        assert ContextSnapshotStore(tmp_path).read_text(digest)
+
+
 def test_resume_interrupted_agent_running_marks_stale_candidate(tmp_path):
     init_repo(tmp_path)
     pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
@@ -685,6 +746,32 @@ def test_retry_ready_run_aliases_resume(tmp_path):
     assert result["retried"] is True
 
 
+def test_pipeline_transitions_to_needs_input_and_resume_uses_provided_input(tmp_path):
+    init_repo(tmp_path)
+    platform = FakePlatform()
+    pipeline = OrchestratorPipeline(tmp_path, platform=platform, agent=NeedsInputAgent())
+
+    result = pipeline.run_issue(42, no_pr=True)
+
+    assert result["state"] == "NeedsInput"
+    state = pipeline.store.load(result["run_id"])
+    assert state.artifacts["input_request"].endswith("artifacts/input-request.json")
+    assert any("needs local input" in body for _, body in platform.comments)
+
+    provided = pipeline.provide(result["run_id"], message="Use Spanish")
+
+    assert provided["accepted"] is True
+    assert provided["state"] == "AgentRunning"
+
+    resumed = pipeline.resume(result["run_id"], no_pr=True)
+
+    assert resumed["state"] == "Completed"
+    final_state = pipeline.store.load(result["run_id"])
+    result_path = tmp_path / final_state.candidate_states["candidate-1-retry-2"].result_path
+    candidate_result = json.loads(result_path.read_text(encoding="utf-8"))
+    assert candidate_result["summary"] == "Created Spanish greeting."
+
+
 def test_provide_accepts_blocked_run_input(tmp_path):
     init_repo(tmp_path)
     pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
@@ -700,6 +787,7 @@ def test_provide_accepts_blocked_run_input(tmp_path):
     input_path = tmp_path / result["input"]
     assert input_path.exists()
     assert "content_hash" in input_path.read_text(encoding="utf-8")
+    assert platform.labels[-1] == (42, ["gg:in-progress"])
 
 
 def test_provide_rejects_non_blocked_run(tmp_path):
@@ -711,6 +799,66 @@ def test_provide_rejects_non_blocked_run(tmp_path):
 
     assert result["accepted"] is False
     assert result["state"] == "ReadyForExecution"
+
+
+def test_github_platform_get_issue_parses_comments():
+    platform = GitHubPlatform(".")
+    platform._run = lambda args: json.dumps(  # type: ignore[method-assign]
+        {
+            "number": 7,
+            "title": "Add comments",
+            "body": "Body",
+            "labels": [{"name": "ai-ready"}],
+            "assignees": [{"login": "octocat"}],
+            "state": "open",
+            "url": "https://github.com/example/repo/issues/7",
+            "comments": [
+                {
+                    "author": {"login": "maintainer"},
+                    "body": "Please preserve CLI compatibility.",
+                    "createdAt": "2026-04-25T12:00:00Z",
+                    "url": "https://github.com/example/repo/issues/7#issuecomment-1",
+                }
+            ],
+        }
+    )
+
+    issue = platform.get_issue(7)
+
+    assert issue.comments[0].author == "maintainer"
+    assert issue.comments[0].body == "Please preserve CLI compatibility."
+
+
+def test_gitlab_platform_get_issue_parses_comments():
+    platform = GitLabPlatform(".")
+    platform._run = lambda args: json.dumps(  # type: ignore[method-assign]
+        {
+            "iid": 7,
+            "title": "Add comments",
+            "description": "Body",
+            "labels": ["ai-ready"],
+            "assignees": [{"username": "maintainer"}],
+            "state": "opened",
+            "web_url": "https://gitlab.com/example/repo/-/issues/7",
+            "discussions": [
+                {
+                    "notes": [
+                        {
+                            "author": {"username": "reviewer"},
+                            "body": "Please keep the GitLab flow working.",
+                            "created_at": "2026-04-25T12:00:00Z",
+                            "web_url": "https://gitlab.com/example/repo/-/issues/7#note_1",
+                        }
+                    ]
+                }
+            ],
+        }
+    )
+
+    issue = platform.get_issue(7)
+
+    assert issue.comments[0].author == "reviewer"
+    assert issue.comments[0].body == "Please keep the GitLab flow working."
 
 
 def test_cli_status_reads_runs(tmp_path):

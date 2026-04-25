@@ -41,7 +41,7 @@ from gg.orchestrator.schemas import (
 from gg.orchestrator.state import CandidateState, InvalidTransitionError, RunState, TaskState
 from gg.orchestrator.store import RunStore
 from gg.orchestrator.task_analysis import TaskAnalyzer, extract_single_json_object
-from gg.orchestrator.verification import VerificationRunner
+from gg.orchestrator.verification import VerificationCommand, VerificationRunner
 from gg.platforms.base import GitPlatform, Issue, IssueComment
 from gg.platforms.github import GitHubPlatform
 from gg.platforms.gitlab import GitLabPlatform
@@ -2841,6 +2841,28 @@ def test_load_config_reads_extended_verification_commands(tmp_path):
     assert config.verify.test_retry_count == 2
 
 
+def test_pipeline_assigns_default_verification_parsers(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        """verify:
+  tests: pytest
+  lint: ruff check .
+  typecheck: mypy src
+  security: bandit -r src
+""",
+        encoding="utf-8",
+    )
+
+    commands = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())._verification_commands()
+
+    assert [(command.category, command.parser) for command in commands] == [
+        ("test", "pytest"),
+        ("lint", "ruff"),
+        ("typecheck", "mypy"),
+        ("security", "bandit,secret-scan"),
+    ]
+
+
 def test_pipeline_uses_registered_platform_and_agent_backend(tmp_path):
     init_repo(tmp_path)
     (tmp_path / ".gg" / "params.yaml").write_text(
@@ -2899,6 +2921,84 @@ def test_verification_runner_retries_and_marks_flaky(tmp_path):
     assert result.status == "flaky"
     assert result.flaky is True
     assert result.attempts == 2
+
+
+def test_verification_runner_parses_pytest_findings(tmp_path):
+    command = VerificationCommand(
+        id="tests",
+        category="test",
+        command="python -c \"print('FAILED tests/test_app.py::test_greeting - AssertionError: nope'); raise SystemExit(1)\"",
+        parser="pytest",
+    )
+
+    result = VerificationRunner([command], timeout=5).run(tmp_path)[0]
+
+    assert result.status == "failed"
+    assert result.findings == [
+        {
+            "type": "test_failure",
+            "category": "test",
+            "parser": "pytest",
+            "severity": "error",
+            "stream": "stdout",
+            "line": 1,
+            "test": "tests/test_app.py::test_greeting",
+            "message": "AssertionError: nope",
+        }
+    ]
+
+
+def test_verification_runner_parses_ruff_findings(tmp_path):
+    command = VerificationCommand(
+        id="lint",
+        category="lint",
+        command="python -c \"print('src/app.py:3:7: F401 imported but unused'); raise SystemExit(1)\"",
+        parser="ruff",
+    )
+
+    result = VerificationRunner([command], timeout=5).run(tmp_path)[0]
+
+    assert result.findings == [
+        {
+            "type": "lint",
+            "category": "lint",
+            "parser": "ruff",
+            "severity": "error",
+            "stream": "stdout",
+            "line": 3,
+            "column": 7,
+            "file": "src/app.py",
+            "code": "F401",
+            "message": "imported but unused",
+        }
+    ]
+
+
+def test_verification_runner_parses_mypy_and_bandit_findings(tmp_path):
+    mypy = VerificationCommand(
+        id="typecheck",
+        category="typecheck",
+        command="python -c \"print('src/app.py:4: error: Incompatible return value [return-value]'); raise SystemExit(1)\"",
+        parser="mypy",
+    )
+    bandit = VerificationCommand(
+        id="security",
+        category="security",
+        command=(
+            "python -c \"print('>> Issue: [B101:assert_used] Use of assert detected.\\n"
+            "   Severity: Low   Confidence: High\\n"
+            "   Location: src/app.py:8:4'); raise SystemExit(0)\""
+        ),
+        parser="bandit",
+    )
+
+    mypy_result, bandit_result = VerificationRunner([mypy, bandit], timeout=5).run(tmp_path)
+
+    assert mypy_result.findings[0]["code"] == "return-value"
+    assert mypy_result.findings[0]["category"] == "typecheck"
+    assert bandit_result.status == "failed"
+    assert bandit_result.findings[0]["code"] == "B101:assert_used"
+    assert bandit_result.findings[0]["file"] == "src/app.py"
 
 
 def test_rate_limit_store_uses_sqlite_wal(tmp_path):

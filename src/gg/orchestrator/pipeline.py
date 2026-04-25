@@ -1696,7 +1696,7 @@ class OrchestratorPipeline:
                         category=category,
                         command=command,
                         required=True,
-                        parser="secret-scan" if category == "security" else "",
+                        parser=_default_verification_parser(category, command),
                     )
                 )
         for index, command in enumerate(self.config.verify.custom, start=1):
@@ -1901,6 +1901,21 @@ def _raw_issue_artifact(issue: Issue, brief: TaskBrief) -> dict[str, Any]:
 
 def _failed_commands(checks) -> list[str]:
     return [check.command for check in checks if check.status not in {"passed", "skipped", "flaky"}]
+
+
+def _default_verification_parser(category: str, command: str) -> str:
+    if category == "test":
+        return "pytest"
+    if category == "lint":
+        return "ruff"
+    if category == "typecheck":
+        return "mypy"
+    if category == "security":
+        parsers = ["secret-scan"]
+        if "bandit" in command.lower():
+            parsers.insert(0, "bandit")
+        return ",".join(parsers)
+    return ""
 
 
 def _verification_passed(checks, baseline, *, allow_known_baseline_failures: bool) -> bool:

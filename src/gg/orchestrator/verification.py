@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -150,7 +151,7 @@ class VerificationRunner:
             stderr, stderr_path, stderr_truncated = self._materialize_output(command, "stderr", stderr)
             findings = _parse_findings(command, stdout=stdout, stderr=stderr)
             status = "passed" if completed.returncode == 0 else "failed"
-            if findings and command.category == "security" and command.parser == "secret-scan":
+            if findings and command.category == "security":
                 status = "failed"
             return CheckResult(
                 command=command.command,
@@ -240,8 +241,36 @@ def _decode_output(output: bytes | str | None) -> tuple[str, bool]:
 
 
 def _parse_findings(command: VerificationCommand, *, stdout: str, stderr: str) -> list[dict[str, Any]]:
-    if command.category != "security" or command.parser != "secret-scan":
-        return []
+    parsers = _parser_names(command)
+    findings: list[dict[str, Any]] = []
+    if "pytest" in parsers:
+        findings.extend(_parse_pytest_findings(stdout, stderr))
+    if "ruff" in parsers:
+        findings.extend(_parse_ruff_findings(stdout, stderr))
+    if "mypy" in parsers:
+        findings.extend(_parse_mypy_findings(stdout, stderr))
+    if "bandit" in parsers:
+        findings.extend(_parse_bandit_findings(stdout, stderr))
+    if command.category == "security" or "secret-scan" in parsers:
+        findings.extend(_parse_secret_findings(stdout, stderr))
+    return findings
+
+
+def _parser_names(command: VerificationCommand) -> set[str]:
+    if command.parser:
+        return {part.strip() for part in command.parser.split(",") if part.strip()}
+    if command.category == "test":
+        return {"pytest"}
+    if command.category == "lint":
+        return {"ruff"}
+    if command.category == "typecheck":
+        return {"mypy"}
+    if command.category == "security":
+        return {"secret-scan"}
+    return set()
+
+
+def _parse_secret_findings(stdout: str, stderr: str) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     for stream, text in (("stdout", stdout), ("stderr", stderr)):
         for line_number, line in enumerate(text.splitlines(), start=1):
@@ -259,6 +288,178 @@ def _parse_findings(command: VerificationCommand, *, stdout: str, stderr: str) -
                         }
                     )
                     break
+    return findings
+
+
+def _parse_pytest_findings(stdout: str, stderr: str) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    pattern = re.compile(r"^(FAILED|ERROR)\s+(?P<nodeid>\S+)\s+-\s+(?P<message>.+)$")
+    for stream, text in (("stdout", stdout), ("stderr", stderr)):
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            match = pattern.match(line.strip())
+            if not match:
+                continue
+            findings.append(
+                {
+                    "type": "test_failure",
+                    "category": "test",
+                    "parser": "pytest",
+                    "severity": "error",
+                    "stream": stream,
+                    "line": line_number,
+                    "test": match.group("nodeid"),
+                    "message": match.group("message"),
+                }
+            )
+    return findings
+
+
+def _parse_ruff_findings(stdout: str, stderr: str) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    findings.extend(_parse_ruff_json(stdout, "stdout"))
+    findings.extend(_parse_ruff_json(stderr, "stderr"))
+    if findings:
+        return findings
+
+    one_line = re.compile(
+        r"^(?P<file>[^:\n]+):(?P<line>\d+):(?P<column>\d+):\s+"
+        r"(?P<code>[A-Z]+[0-9]+)\s+(?P<message>.+)$"
+    )
+    for stream, text in (("stdout", stdout), ("stderr", stderr)):
+        lines = text.splitlines()
+        for line_number, line in enumerate(lines, start=1):
+            match = one_line.match(line.strip())
+            if match:
+                findings.append(
+                    {
+                        "type": "lint",
+                        "category": "lint",
+                        "parser": "ruff",
+                        "severity": "error",
+                        "stream": stream,
+                        "line": int(match.group("line")),
+                        "column": int(match.group("column")),
+                        "file": match.group("file"),
+                        "code": match.group("code"),
+                        "message": match.group("message"),
+                    }
+                )
+                continue
+            if line.strip().startswith("-->") and line_number > 1:
+                location = re.match(r"^-->\s+(?P<file>.+?):(?P<line>\d+):(?P<column>\d+)$", line.strip())
+                previous = lines[line_number - 2].strip()
+                code_message = re.match(r"^(?P<code>[A-Z]+[0-9]+)\s+(?P<message>.+)$", previous)
+                if location and code_message:
+                    findings.append(
+                        {
+                            "type": "lint",
+                            "category": "lint",
+                            "parser": "ruff",
+                            "severity": "error",
+                            "stream": stream,
+                            "line": int(location.group("line")),
+                            "column": int(location.group("column")),
+                            "file": location.group("file"),
+                            "code": code_message.group("code"),
+                            "message": code_message.group("message"),
+                        }
+                    )
+    return findings
+
+
+def _parse_ruff_json(text: str, stream: str) -> list[dict[str, Any]]:
+    stripped = text.strip()
+    if not stripped.startswith("["):
+        return []
+    try:
+        payload = json.loads(stripped)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(payload, list):
+        return []
+    findings: list[dict[str, Any]] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        location = item.get("location") or {}
+        findings.append(
+            {
+                "type": "lint",
+                "category": "lint",
+                "parser": "ruff",
+                "severity": "error",
+                "stream": stream,
+                "line": int(location.get("row") or 0),
+                "column": int(location.get("column") or 0),
+                "file": str(item.get("filename") or ""),
+                "code": str(item.get("code") or ""),
+                "message": str(item.get("message") or ""),
+            }
+        )
+    return findings
+
+
+def _parse_mypy_findings(stdout: str, stderr: str) -> list[dict[str, Any]]:
+    pattern = re.compile(
+        r"^(?P<file>.+?):(?P<line>\d+):(?:(?P<column>\d+):)?\s+"
+        r"(?P<severity>error|warning|note):\s+(?P<message>.*?)(?:\s+\[(?P<code>[^\]]+)\])?$"
+    )
+    findings: list[dict[str, Any]] = []
+    for stream, text in (("stdout", stdout), ("stderr", stderr)):
+        for raw in text.splitlines():
+            match = pattern.match(raw.strip())
+            if not match:
+                continue
+            severity = "info" if match.group("severity") == "note" else match.group("severity")
+            findings.append(
+                {
+                    "type": "typecheck",
+                    "category": "typecheck",
+                    "parser": "mypy",
+                    "severity": severity,
+                    "stream": stream,
+                    "file": match.group("file"),
+                    "line": int(match.group("line")),
+                    "column": int(match.group("column") or 0),
+                    "code": match.group("code") or "",
+                    "message": match.group("message"),
+                }
+            )
+    return findings
+
+
+def _parse_bandit_findings(stdout: str, stderr: str) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    for stream, text in (("stdout", stdout), ("stderr", stderr)):
+        current: dict[str, Any] | None = None
+        for raw in text.splitlines():
+            line = raw.strip()
+            if line.startswith(">> Issue:"):
+                match = re.match(r">>\s+Issue:\s+\[(?P<code>[^\]]+)\]\s+(?P<message>.+)$", line)
+                current = {
+                    "type": "security",
+                    "category": "security",
+                    "parser": "bandit",
+                    "severity": "warning",
+                    "stream": stream,
+                    "code": match.group("code") if match else "",
+                    "message": match.group("message") if match else line.removeprefix(">> Issue:").strip(),
+                }
+                continue
+            if current is None:
+                continue
+            if line.startswith("Severity:"):
+                severity = line.split("Severity:", 1)[1].split()[0].lower()
+                current["severity"] = severity
+            elif line.startswith("Location:"):
+                location = line.split("Location:", 1)[1].strip()
+                loc_match = re.match(r"(?P<file>.+?):(?P<line>\d+):(?P<column>\d+)$", location)
+                if loc_match:
+                    current["file"] = loc_match.group("file")
+                    current["line"] = int(loc_match.group("line"))
+                    current["column"] = int(loc_match.group("column"))
+                findings.append(current)
+                current = None
     return findings
 
 

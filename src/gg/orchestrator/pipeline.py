@@ -175,6 +175,9 @@ class OrchestratorPipeline:
                 brief_data = json.loads((self.project_path / brief_path).read_text(encoding="utf-8"))
                 brief = TaskBrief.from_dict(brief_data)
                 issue = self.platform.get_issue(issue_number)
+                if state.state in {TaskState.BLOCKED, TaskState.NEEDS_INPUT}:
+                    self._ingest_issue_comment_input(state, issue)
+                    state = self.store.load(run_id)
                 if state.artifacts.get("last_input"):
                     brief = self._refresh_task_analysis(state, issue)
                     if brief.blocked:
@@ -295,6 +298,68 @@ class OrchestratorPipeline:
                 "content_hash": content_hash,
                 "sequence_number": sequence_number,
             }
+
+    def _ingest_issue_comment_input(self, state, issue: Issue) -> str | None:
+        comment = self._first_new_external_comment(state, issue)
+        if comment is None:
+            return None
+        message = comment.body.strip()
+        content_hash = hashlib.sha256(message.encode("utf-8")).hexdigest()
+        inputs_dir = self.store.path_for(state.run_id) / "inputs"
+        existing = sorted(inputs_dir.glob("input-v1-*.json"))
+        for path in existing:
+            try:
+                artifact = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if artifact.get("content_hash") == content_hash:
+                state.artifacts["last_input"] = str(path.relative_to(self.project_path))
+                self.store.write(state)
+                return state.artifacts["last_input"]
+        sequence_number = len(existing) + 1
+        path = self.store.write_json(
+            state.run_id,
+            f"inputs/input-v1-{sequence_number:04d}.json",
+            {
+                "schema_version": 1,
+                "source": f"{self.platform.platform_name()}-comment",
+                "sequence_number": sequence_number,
+                "content_hash": content_hash,
+                "message": message,
+                "created_at": comment.created_at or _now_placeholder(),
+                "answered_state": state.state.value,
+            },
+        )
+        state.artifacts["last_input"] = path
+        if state.state is TaskState.BLOCKED:
+            state.transition(TaskState.TASK_ANALYSIS, reason="issue comment provided input")
+        elif state.state is TaskState.NEEDS_INPUT:
+            state.transition(TaskState.AGENT_RUNNING, reason="issue comment provided input")
+        self.store.write(state)
+        return path
+
+    def _first_new_external_comment(self, state, issue: Issue):
+        threshold = self._input_request_created_at(state) or state.updated_at
+        candidates = [
+            comment
+            for comment in issue.comments
+            if comment.body.strip()
+            and not comment.body.lstrip().startswith("<!-- gg-run-id=")
+            and (not threshold or comment.created_at > threshold)
+        ]
+        if not candidates:
+            return None
+        return sorted(candidates, key=lambda comment: comment.created_at)[0]
+
+    def _input_request_created_at(self, state) -> str | None:
+        request_path = state.artifacts.get("input_request")
+        if not request_path:
+            return None
+        try:
+            data = json.loads((self.project_path / request_path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return data.get("created_at")
 
     def _execute_ready_state(
         self,

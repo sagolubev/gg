@@ -1227,6 +1227,31 @@ def test_pipeline_transitions_to_needs_input_and_resume_uses_provided_input(tmp_
     assert candidate_result["summary"] == "Created Spanish greeting."
 
 
+def test_needs_input_can_resume_from_issue_comment(tmp_path):
+    init_repo(tmp_path)
+    platform = FakePlatform()
+    pipeline = OrchestratorPipeline(tmp_path, platform=platform, agent=NeedsInputAgent())
+
+    result = pipeline.run_issue(42, no_pr=True)
+    platform.issue.comments.append(
+        IssueComment(
+            body="Use Spanish",
+            author="maintainer",
+            created_at="2999-01-01T00:00:00Z",
+            url="https://github.com/example/repo/issues/42#issuecomment-2",
+        )
+    )
+
+    resumed = pipeline.resume(result["run_id"], no_pr=True)
+
+    assert resumed["state"] == "Completed"
+    final_state = pipeline.store.load(result["run_id"])
+    input_path = tmp_path / final_state.artifacts["last_input"]
+    input_artifact = json.loads(input_path.read_text(encoding="utf-8"))
+    assert input_artifact["source"] == "github-comment"
+    assert input_artifact["message"] == "Use Spanish"
+
+
 def test_provide_accepts_blocked_run_input(tmp_path):
     init_repo(tmp_path)
     platform = FakePlatform()

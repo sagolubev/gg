@@ -105,19 +105,48 @@ class OrchestratorPipeline:
                 raise
 
     def run_next(self, *, dry_run: bool = False, no_pr: bool = False) -> dict[str, Any]:
+        batch = self.run_batch(batch_size=1, dry_run=dry_run, no_pr=no_pr)
+        if batch["state"] == "DryRun":
+            issues = batch.get("issues", [])
+            if not issues:
+                return {"state": "NoEligibleIssue", "message": "No eligible open issues found."}
+            return {"state": "DryRun", "issue": issues[0]}
+        if batch["state"] == "NoEligibleIssue" or "results" not in batch:
+            return batch
+        return batch["results"][0]
+
+    def run_batch(self, *, batch_size: int, dry_run: bool = False, no_pr: bool = False) -> dict[str, Any]:
+        requested = max(1, batch_size)
         with self.locks.queue():
             try:
-                issues = self.platform.list_issues(limit=30)
+                issues = self.platform.list_issues(limit=max(30, requested))
             except RateLimitThrottleError as exc:
                 return self._throttled_response(exc)
-            eligible = self._eligible_issues(issues)
-            if not eligible:
+            selected = self._eligible_issues(issues)[:requested]
+            if not selected:
                 return {"state": "NoEligibleIssue", "message": "No eligible open issues found."}
-            issue = eligible[0]
             if dry_run:
-                return {"state": "DryRun", "issue": {"number": issue.number, "title": issue.title, "labels": issue.labels}}
-            issue_number = issue.number
-        return self.run_issue(issue_number, dry_run=dry_run, no_pr=no_pr)
+                return {
+                    "state": "DryRun",
+                    "issues": [
+                        {"number": issue.number, "title": issue.title, "labels": issue.labels}
+                        for issue in selected
+                    ],
+                    "count": len(selected),
+                }
+            issue_numbers = [issue.number for issue in selected]
+        workers = min(len(issue_numbers), self.config.runtime.max_parallel_runs)
+        if workers <= 1:
+            results = [self.run_issue(issue_number, no_pr=no_pr) for issue_number in issue_numbers]
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                results = list(pool.map(lambda number: self.run_issue(number, no_pr=no_pr), issue_numbers))
+        return {
+            "state": "BatchCompleted",
+            "count": len(results),
+            "max_parallel_runs": workers,
+            "results": results,
+        }
 
     def status(self) -> list[dict[str, Any]]:
         return [run.to_dict() for run in self.store.list_runs()]

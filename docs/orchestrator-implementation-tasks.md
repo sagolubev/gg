@@ -42,4 +42,4 @@
 - [x] Add plugin interfaces for task systems and executor backends.
 - [x] Add audit hashing / external audit sink options.
 - [x] Add advanced LFS, supply-chain, and compliance policies.
-- [ ] Add daemon/parallel batch mode with shared resource budgets.
+- [x] Add daemon/parallel batch mode with shared resource budgets.

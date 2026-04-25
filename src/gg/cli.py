@@ -181,8 +181,9 @@ def constitution(path, debug):
 @click.option("--path", type=click.Path(exists=True), default=".", help="Project path.")
 @click.option("--dry-run", is_flag=True, help="Show the next eligible issue without side effects.")
 @click.option("--no-pr", is_flag=True, help="Run locally without creating a pull request.")
+@click.option("--batch", "batch_size", default=1, show_default=True, help="Process up to N eligible issues.")
 @click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
-def run(path, dry_run, no_pr, as_json):
+def run(path, dry_run, no_pr, batch_size, as_json):
     """Supervisor loop: pick issues and orchestrate agents."""
     import json
 
@@ -190,7 +191,12 @@ def run(path, dry_run, no_pr, as_json):
 
     from gg.orchestrator.pipeline import OrchestratorPipeline
 
-    result = OrchestratorPipeline(path).run_next(dry_run=dry_run, no_pr=no_pr)
+    pipeline = OrchestratorPipeline(path)
+    result = (
+        pipeline.run_batch(batch_size=batch_size, dry_run=dry_run, no_pr=no_pr)
+        if batch_size > 1
+        else pipeline.run_next(dry_run=dry_run, no_pr=no_pr)
+    )
     if as_json:
         click.echo(json.dumps(result, indent=2, ensure_ascii=False))
         return
@@ -199,6 +205,12 @@ def run(path, dry_run, no_pr, as_json):
     if result.get("issue"):
         issue_data = result["issue"]
         console.print(f"Next issue: #{issue_data['number']} {issue_data['title']}")
+    if result.get("issues"):
+        for issue_data in result["issues"]:
+            console.print(f"Next issue: #{issue_data['number']} {issue_data['title']}")
+    if result.get("results"):
+        for item in result["results"]:
+            console.print(f"Run: {item.get('run_id')} state={item.get('state')}")
     if result.get("run_id"):
         console.print(f"Run: {result['run_id']}")
     if result.get("pr_url"):

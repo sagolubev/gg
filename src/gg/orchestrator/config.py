@@ -29,6 +29,7 @@ class RuntimeConfig:
     agent_backend: str = "codex"
     candidates: int = 1
     max_parallel_candidates: int = 1
+    max_parallel_runs: int = 1
     max_attempts: int = 1
     repair_candidates: int = 1
     use_sandbox_runtime: bool = True
@@ -132,6 +133,7 @@ def load_config(project_path: str | Path) -> GGConfig:
             agent_backend=str(runtime.get("agent_backend", raw.get("agent_backend", "codex"))),
             candidates=max(1, int(runtime.get("candidates", 1))),
             max_parallel_candidates=max(1, int(runtime.get("max_parallel_candidates", 1))),
+            max_parallel_runs=max(1, int(runtime.get("max_parallel_runs", 1))),
             max_attempts=max(1, int(runtime.get("max_attempts", 1))),
             repair_candidates=max(1, int(runtime.get("repair_candidates", 1))),
             use_sandbox_runtime=bool(runtime.get("use_sandbox_runtime", True)),

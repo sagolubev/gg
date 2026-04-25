@@ -72,6 +72,19 @@ class FakePlatform(GitPlatform):
         return "github"
 
 
+class MultiIssuePlatform(FakePlatform):
+    def __init__(self, issues: list[Issue]):
+        super().__init__()
+        self.issues = issues
+        self.issue = issues[0]
+
+    def get_issue(self, number: int) -> Issue:
+        for issue in self.issues:
+            if issue.number == number:
+                return issue
+        raise AssertionError(f"unexpected issue {number}")
+
+
 class CancellingFindPrPlatform(FakePlatform):
     def __init__(self):
         super().__init__()
@@ -1025,6 +1038,43 @@ def test_run_next_selects_highest_priority_ai_ready_issue(tmp_path):
     assert result["issue"]["number"] == 3
 
 
+def test_run_batch_dry_run_lists_next_eligible_issues(tmp_path):
+    init_repo(tmp_path)
+    platform = MultiIssuePlatform([
+        Issue(number=9, title="P2 task", body="", labels=["P2", "ai-ready"]),
+        Issue(number=3, title="P0 task", body="", labels=["P0", "ai-ready"]),
+        Issue(number=2, title="Claimed", body="", labels=["P0", "ai-ready", "gg:in-progress"]),
+        Issue(number=5, title="P1 task", body="", labels=["P1", "ai-ready"]),
+    ])
+
+    result = OrchestratorPipeline(tmp_path, platform=platform, agent=FakeAgent()).run_batch(
+        batch_size=2,
+        dry_run=True,
+    )
+
+    assert result["state"] == "DryRun"
+    assert [issue["number"] for issue in result["issues"]] == [3, 5]
+
+
+def test_run_batch_processes_selected_issues(tmp_path):
+    init_repo(tmp_path)
+    platform = MultiIssuePlatform([
+        Issue(number=1, title="First", body="Do one.", labels=["ai-ready"]),
+        Issue(number=2, title="Second", body="Do two.", labels=["ai-ready"]),
+    ])
+
+    result = OrchestratorPipeline(tmp_path, platform=platform, agent=FakeAgent()).run_batch(
+        batch_size=2,
+        no_pr=True,
+    )
+
+    assert result["state"] == "BatchCompleted"
+    assert result["count"] == 2
+    assert [item["state"] for item in result["results"]] == ["Completed", "Completed"]
+    run_store = OrchestratorPipeline(tmp_path, platform=platform, agent=FakeAgent()).store
+    assert sorted(run.issue["number"] for run in run_store.list_runs()) == [1, 2]
+
+
 def test_init_params_generation(tmp_path):
     init_repo(tmp_path)
     (tmp_path / "pyproject.toml").write_text("[project]\nname = 'sample'\n", encoding="utf-8")
@@ -1040,6 +1090,7 @@ def test_init_params_generation(tmp_path):
     assert config.selection.include_labels == ("ai-ready",)
     assert config.runtime.agent_backend == "codex"
     assert config.runtime.candidates == 1
+    assert config.runtime.max_parallel_runs == 1
     assert config.runtime.sandbox_policy.deny_read == ["~/.ssh", ".env"]
     assert config.audit.hash_events is False
     assert config.audit.external_sink == ""

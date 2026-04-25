@@ -430,6 +430,7 @@ def _write_params(project_path: Path, console: Console) -> None:
             "agent_backend": "codex",
             "candidates": 1,
             "max_parallel_candidates": 1,
+            "max_parallel_runs": 1,
             "max_attempts": 1,
             "repair_candidates": 1,
             "use_sandbox_runtime": True,

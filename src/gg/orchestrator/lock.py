@@ -68,6 +68,9 @@ class FileLock:
         return metadata
 
     def metadata(self) -> dict[str, Any] | None:
+        if self._handle is not None:
+            with self._metadata_lock:
+                return self.read_metadata(self.path)
         return self.read_metadata(self.path)
 
     def _write_metadata(

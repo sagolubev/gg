@@ -621,21 +621,6 @@ class OrchestratorPipeline:
             allow_known_baseline_failures=self.config.verify.allow_known_baseline_failures,
         )
         policy_violations = self._candidate_policy_violations(candidate.worktree_path, final_files)
-        candidate_data = candidate.to_dict()
-        candidate_data["changed_files"] = final_files
-        candidate_data["attempt"] = state.attempt
-        candidate_data["strategy"] = strategy
-        candidate_data["patch_path"] = patch_path
-        candidate_data["verification"] = verification_path
-        candidate_data["verification_passed"] = verification_passed
-        candidate_data["verification_mutated_worktree"] = verification_mutated_worktree
-        candidate_data["baseline_failed_commands"] = _failed_commands(baseline)
-        candidate_data["policy_violations"] = policy_violations
-        result_path = self.store.write_json(
-            state.run_id,
-            f"{candidate_dir}/candidate-result.json",
-            {**candidate_data, "patch": ""},
-        )
         effective_status = candidate.status
         error = candidate.error
         if candidate.status == "success" and not verification_passed:
@@ -647,6 +632,22 @@ class OrchestratorPipeline:
         if candidate.status == "success" and policy_violations:
             effective_status = "failed"
             error = "; ".join(item["message"] for item in policy_violations)
+        candidate_data = candidate.to_dict()
+        candidate_data["changed_files"] = final_files
+        candidate_data["attempt"] = state.attempt
+        candidate_data["strategy"] = strategy
+        candidate_data["patch_path"] = patch_path
+        candidate_data["verification"] = verification_path
+        candidate_data["verification_passed"] = verification_passed
+        candidate_data["verification_mutated_worktree"] = verification_mutated_worktree
+        candidate_data["baseline_failed_commands"] = _failed_commands(baseline)
+        candidate_data["policy_violations"] = policy_violations
+        candidate_data["effective_status"] = effective_status
+        result_path = self.store.write_json(
+            state.run_id,
+            f"{candidate_dir}/candidate-result.json",
+            {**candidate_data, "patch": ""},
+        )
         self.store.append_cost(
             state.run_id,
             {

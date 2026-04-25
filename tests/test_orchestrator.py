@@ -1994,6 +1994,7 @@ security:
     candidate = state.candidate_states["candidate-1"]
     assert candidate.error == "Dependency manifest changes are disabled by policy"
     candidate_result = json.loads((tmp_path / candidate.result_path).read_text(encoding="utf-8"))
+    assert candidate_result["effective_status"] == "failed"
     assert candidate_result["policy_violations"][0]["code"] == "dependency_changes_blocked"
     assert candidate_result["policy_violations"][0]["paths"] == ["package.json"]
 

@@ -37,6 +37,15 @@ TEST_SUGGESTIONS: dict[str, dict[str, str]] = {
     "Rust": {"tool": "cargo test", "install": ""},
 }
 
+OPERATIONAL_GITIGNORE_ENTRIES = (
+    ".gg/runs/",
+    ".gg/runs-archive/",
+    ".gg/objects/",
+    ".gg/rate-limits.sqlite3*",
+    ".gg-worktrees/",
+    ".omx/",
+)
+
 
 def run_init(
     *,
@@ -197,6 +206,7 @@ def run_init(
     # 10. Write config
     _write_config(project_path, platform, console)
     _write_params(project_path, console)
+    _write_operational_gitignore(project_path, console)
 
     # 11. Summary
     _print_final(project_path, console)
@@ -434,6 +444,22 @@ def _merge_missing_params(target: dict, defaults: dict) -> bool:
         if isinstance(target[key], dict) and isinstance(value, dict):
             changed = _merge_missing_params(target[key], value) or changed
     return changed
+
+
+def _write_operational_gitignore(project_path: Path, console: Console) -> None:
+    path = project_path / ".gitignore"
+    existing = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    existing_set = set(existing)
+    missing = [entry for entry in OPERATIONAL_GITIGNORE_ENTRIES if entry not in existing_set]
+    if not missing:
+        console.print("  [dim].gitignore already has gg operational entries[/dim]")
+        return
+    lines = [*existing]
+    if lines and lines[-1].strip():
+        lines.append("")
+    lines.extend(missing)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    console.print("  [green]  -> .gitignore gg operational entries[/green]")
 
 
 def _print_final(project_path: Path, console: Console) -> None:

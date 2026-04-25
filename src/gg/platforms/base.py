@@ -35,6 +35,26 @@ class Issue:
     comments: list[IssueComment] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class PlatformCapabilities:
+    issue_listing: bool = True
+    issue_comments: bool = True
+    labels: bool = False
+    pull_requests: bool = True
+    find_pr: bool = False
+    assign: bool = False
+
+    def to_dict(self) -> dict[str, bool]:
+        return {
+            "issue_listing": self.issue_listing,
+            "issue_comments": self.issue_comments,
+            "labels": self.labels,
+            "pull_requests": self.pull_requests,
+            "find_pr": self.find_pr,
+            "assign": self.assign,
+        }
+
+
 class GitPlatform(ABC):
     def __init__(self, cwd: str = ".", *, rate_limit_store: RateLimitStore | None = None):
         self._cwd = str(cwd)
@@ -58,6 +78,10 @@ class GitPlatform(ABC):
     def find_pr(self, *, head: str) -> str | None:
         """Find an existing open pull/merge request by head branch when supported."""
         return None
+
+    def capabilities(self) -> PlatformCapabilities:
+        """Describe mutation/read features the adapter supports."""
+        return PlatformCapabilities()
 
     def validate_auth(self) -> None:
         """Validate tracker CLI authentication before mutating external state."""

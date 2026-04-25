@@ -15,7 +15,7 @@ from click.testing import CliRunner
 from gg.agents.base import AgentBackend
 from gg.agents.codex import CodexAgent
 from gg.cli import cli
-from gg.commands.init import _write_params
+from gg.commands.init import _write_operational_gitignore, _write_params
 from gg.orchestrator.config import load_config
 from gg.orchestrator.context import ContextSnapshotStore
 from gg.orchestrator.evaluation import CandidateEvaluator
@@ -563,6 +563,19 @@ def read_jsonl(path: Path) -> list[dict]:
     if not path.exists():
         return []
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def test_platform_adapters_report_capabilities(tmp_path):
+    init_repo(tmp_path)
+
+    github = GitHubPlatform(str(tmp_path)).capabilities().to_dict()
+    gitlab = GitLabPlatform(str(tmp_path)).capabilities().to_dict()
+
+    assert github["labels"] is True
+    assert github["find_pr"] is True
+    assert github["issue_comments"] is True
+    assert gitlab["labels"] is True
+    assert gitlab["find_pr"] is True
 
 
 def create_ready_run(
@@ -2218,7 +2231,27 @@ def test_cli_doctor_reports_machine_readable_checks(tmp_path):
     check_names = {check["name"] for check in payload["checks"]}
     assert payload["schema_version"] == 1
     assert "params" in check_names
+    assert "config_schema" in check_names
     assert "git_worktree" in check_names
+    assert "sandbox_mode" in check_names
+    assert "dirty_workspace" in check_names
+    assert "secrets" in check_names
+
+
+def test_cli_doctor_fails_when_params_contain_obvious_secret(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        "runtime:\n  agent_backend: fake-agent\ntask_system:\n  work_label: token=abcdefghijklmnop\n",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(cli, ["doctor", "--path", str(tmp_path), "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    checks = {check["name"]: check for check in payload["checks"]}
+    assert payload["status"] == "fail"
+    assert checks["secrets"]["status"] == "fail"
 
 
 def test_clean_dry_run_lists_only_terminal_runs(tmp_path):
@@ -2411,6 +2444,26 @@ def test_init_params_generation(tmp_path):
     assert config.evaluation.max_context_tokens == 60000
     assert config.ci.forbid_interactive_prompts is True
     assert config.recovery.keep_state_backup is True
+
+
+def test_init_writes_operational_gitignore_entries(tmp_path):
+    init_repo(tmp_path)
+    gitignore = tmp_path / ".gitignore"
+    gitignore.write_text("dist/\n", encoding="utf-8")
+
+    _write_operational_gitignore(
+        tmp_path,
+        console=type("Console", (), {"print": lambda *args, **kwargs: None})(),
+    )
+
+    lines = gitignore.read_text(encoding="utf-8").splitlines()
+    assert "dist/" in lines
+    assert ".gg/runs/" in lines
+    assert ".gg/runs-archive/" in lines
+    assert ".gg/objects/" in lines
+    assert ".gg/rate-limits.sqlite3*" in lines
+    assert ".gg-worktrees/" in lines
+    assert ".omx/" in lines
 
 
 def test_init_params_merges_missing_defaults_without_overwriting_user_values(tmp_path):

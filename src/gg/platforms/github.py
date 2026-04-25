@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from gg.platforms.base import GitPlatform, Issue, IssueComment
+from gg.platforms.base import GitPlatform, Issue, IssueComment, PlatformCapabilities
 
 MAX_COMMENTS = 10
 MAX_COMMENT_CHARS = 4000
@@ -45,6 +45,9 @@ class GitHubPlatform(GitPlatform):
         env = super()._command_env()
         env.setdefault("GH_DEBUG", "api")
         return env
+
+    def capabilities(self) -> PlatformCapabilities:
+        return PlatformCapabilities(labels=True, find_pr=True)
 
     def list_issues(self, state: str = "open", limit: int = 30) -> list[Issue]:
         raw = self._run([

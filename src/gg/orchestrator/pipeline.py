@@ -84,6 +84,17 @@ class OrchestratorPipeline:
         self.agent = agent or create_agent_backend(self.config.runtime.agent_backend)
         self.knowledge = KnowledgeEngine(self.project_path)
         self._state_update_lock = threading.Lock()
+        self._shutdown_requested = False
+        self._port_allocations: dict[str, int] = {}
+
+    def _install_signal_handlers(self) -> None:
+        def _handler(signum, frame):
+            self._shutdown_requested = True
+        try:
+            signal.signal(signal.SIGINT, _handler)
+            signal.signal(signal.SIGTERM, _handler)
+        except (OSError, ValueError):
+            pass
 
     def configure_runtime(
         self,
@@ -122,6 +133,7 @@ class OrchestratorPipeline:
     ) -> dict[str, Any]:
         if dry_run:
             return self._dry_run_issue(issue_number, skip_existing=skip_existing)
+        self._install_signal_handlers()
         state = None
         issue = None
         try:
@@ -333,11 +345,18 @@ class OrchestratorPipeline:
         return None
 
     def resume(self, run_id: str, *, no_pr: bool = False) -> dict[str, Any]:
+        self._install_signal_handlers()
         state = self.store.load(run_id)
         issue_number = int(state.issue["number"])
         try:
             with self.locks.issue(issue_number):
                 state = self.store.load(run_id)
+                reconciliation_issues = self._reconcile_state_events(state)
+                if reconciliation_issues:
+                    self.knowledge.record_error(
+                        message=f"State/event reconciliation issues: {reconciliation_issues}",
+                        pattern="reconciliation_mismatch",
+                    )
                 if state.state in TERMINAL_STATES:
                     return {
                         "run_id": run_id,
@@ -426,9 +445,9 @@ class OrchestratorPipeline:
             "message": "Retry is only available for recoverable runs.",
         }
 
-    def clean(self, *, dry_run: bool = True) -> dict[str, Any]:
+    def clean(self, *, dry_run: bool = True, run_id: str | None = None) -> dict[str, Any]:
         with self.locks.queue():
-            target_runs = self.store.clean_terminal_runs(dry_run=True)
+            target_runs = self.store.clean_terminal_runs(dry_run=True, run_id=run_id)
             stale_runs = self.store.clean_stale_waiting_runs(
                 blocked_timeout_days=self.config.cleanup.blocked_timeout_days,
                 dry_run=True,
@@ -443,7 +462,7 @@ class OrchestratorPipeline:
                 stale_targets = stale_runs
                 orphans = self.store.clean_orphan_worktrees(dry_run=True)
             else:
-                targets = self.store.clean_terminal_runs(dry_run=False)
+                targets = self.store.clean_terminal_runs(dry_run=False, run_id=run_id)
                 stale_targets = self.store.clean_stale_waiting_runs(
                     blocked_timeout_days=self.config.cleanup.blocked_timeout_days,
                     dry_run=False,
@@ -849,8 +868,11 @@ class OrchestratorPipeline:
     ) -> list[dict[str, Any]]:
         workers = min(len(planned_candidates), self.config.runtime.max_parallel_candidates)
         if workers <= 1:
-            return [
-                self._run_candidate_attempt(
+            results = []
+            for index, candidate_id, strategy, repair_context in planned_candidates:
+                if self._shutdown_requested:
+                    break
+                results.append(self._run_candidate_attempt(
                     state=state,
                     issue=issue,
                     brief=brief,
@@ -860,12 +882,14 @@ class OrchestratorPipeline:
                     candidate_id=candidate_id,
                     strategy=strategy,
                     repair_context=repair_context,
-                )
-                for index, candidate_id, strategy, repair_context in planned_candidates
-            ]
+                ))
+            return results
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = [
-                pool.submit(
+            futures = []
+            for index, candidate_id, strategy, repair_context in planned_candidates:
+                if self._shutdown_requested:
+                    break
+                futures.append(pool.submit(
                     self._run_candidate_attempt,
                     state=state,
                     issue=issue,
@@ -876,9 +900,7 @@ class OrchestratorPipeline:
                     candidate_id=candidate_id,
                     strategy=strategy,
                     repair_context=repair_context,
-                )
-                for index, candidate_id, strategy, repair_context in planned_candidates
-            ]
+                ))
             results = [future.result() for future in futures]
         return sorted(results, key=lambda item: item["index"])
 
@@ -2120,6 +2142,103 @@ class OrchestratorPipeline:
         except (OSError, ValueError):
             return None
         return data.get("candidate_id")
+
+    def _enforce_context_budget(self, state, brief: "TaskBrief") -> str | None:
+        """Return error code if context budget is exceeded, None otherwise."""
+        analysis = self.config.analysis
+        if len(brief.candidate_files) > analysis.max_candidate_files:
+            return "context_too_large"
+        return None
+
+    def _handle_context_too_large(self, state, code: str) -> dict[str, Any]:
+        policy = self.config.analysis.context_too_large_policy
+        if policy == "blocked":
+            state.transition(
+                TaskState.BLOCKED,
+                reason=f"context too large (policy={policy})",
+            )
+            state.last_error = {"code": code, "message": "Context budget exceeded", "at": _now_placeholder()}
+            self.store.write(state)
+            return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
+        state.fail(code=code, message="Context budget exceeded")
+        self.store.write(state)
+        return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
+
+    def _check_disk_usage(self, worktree_path: str | Path) -> bool:
+        """Return True if disk is OK, False if over quota."""
+        try:
+            path = Path(worktree_path) if worktree_path else self.project_path
+            available_mb = _available_disk_mb(path)
+            return available_mb >= self.config.runtime.resource.max_disk_mb
+        except OSError:
+            return True
+
+    def _allocate_port(self, candidate_id: str, port_range: tuple[int, int] | None = None) -> int:
+        """Allocate a port for a candidate deterministically, probing for availability."""
+        import socket as _socket
+        lo, hi = port_range or self.config.runtime.port_range
+        span = hi - lo
+        digest = int(hashlib.sha256(candidate_id.encode()).hexdigest(), 16)
+        base = lo + (digest % span)
+        used = set(self._port_allocations.values())
+        for offset in range(span):
+            port = lo + (base - lo + offset) % span
+            if port in used:
+                continue
+            try:
+                with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
+                    s.bind(("127.0.0.1", port))
+                self._port_allocations[candidate_id] = port
+                return port
+            except OSError:
+                continue
+        raise RuntimeError(f"No available port in range {lo}-{hi} for candidate {candidate_id}")
+
+    def _timestamp_is_elapsed(self, ts: str, threshold_seconds: float) -> bool:
+        """Check if a timestamp is older than threshold, with clock skew tolerance."""
+        tolerance = self.config.ci.clock_skew_tolerance_seconds
+        try:
+            from datetime import datetime, timezone
+            dt = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            age = (datetime.now(timezone.utc) - dt).total_seconds()
+            return age > (threshold_seconds + tolerance)
+        except (ValueError, TypeError):
+            return False
+
+    def _reconcile_state_events(self, state) -> list[dict[str, Any]]:
+        """Compare state.transitions against pipeline.jsonl STATE_TRANSITION events."""
+        mismatches: list[dict[str, Any]] = []
+        run_dir = self.store.path_for(state.run_id)
+        pipeline_log = run_dir / "pipeline.jsonl"
+        if not pipeline_log.exists():
+            return mismatches
+        try:
+            log_transitions: list[dict[str, Any]] = []
+            for line in pipeline_log.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if entry.get("event") == "STATE_TRANSITION":
+                    log_transitions.append(entry)
+            state_transitions = [
+                {
+                    "from": t.from_state if hasattr(t, "from_state") else t.get("from", ""),
+                    "to": t.to_state if hasattr(t, "to_state") else t.get("to", ""),
+                }
+                for t in state.transitions
+            ]
+            if len(state_transitions) != len(log_transitions):
+                mismatches.append({
+                    "mismatch": "count",
+                    "state_count": len(state_transitions),
+                    "log_count": len(log_transitions),
+                })
+        except OSError:
+            pass
+        return mismatches
 
 
 def _parse_pr_number(pr_url: str) -> int:

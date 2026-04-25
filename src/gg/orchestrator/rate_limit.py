@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import shutil
 import sqlite3
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -8,6 +10,11 @@ from pathlib import Path
 import re
 
 from gg.orchestrator.state import utc_now
+
+_SCHEMA_VERSION = 1
+_CB_STATE_CLOSED = "closed"
+_CB_STATE_OPEN = "open"
+_CB_STATE_HALF_OPEN = "half_open"
 
 
 @dataclass(frozen=True)
@@ -36,25 +43,72 @@ class RateLimitStore:
         self._init()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path, timeout=15)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=15000")
-        return conn
+        try:
+            conn = sqlite3.connect(self.path, timeout=15)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=15000")
+            conn.execute("PRAGMA integrity_check")
+            return conn
+        except sqlite3.DatabaseError:
+            corrupt_path = self.path.with_suffix(
+                f".corrupt.{int(time.time())}.sqlite3"
+            )
+            shutil.move(str(self.path), str(corrupt_path))
+            conn = sqlite3.connect(self.path, timeout=15)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=15000")
+            self._do_init(conn)
+            return conn
+
+    def _do_init(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO metadata (key, value) VALUES ('schema_version', ?)",
+            (str(_SCHEMA_VERSION),),
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS rate_limit_entries (
+                key TEXT PRIMARY KEY,
+                provider TEXT NOT NULL DEFAULT '',
+                repo_id TEXT NOT NULL DEFAULT '',
+                operation TEXT NOT NULL DEFAULT '',
+                failures INTEGER NOT NULL DEFAULT 0,
+                window_started_at TEXT NOT NULL DEFAULT '',
+                cooldown_until TEXT NOT NULL DEFAULT '',
+                retry_after TEXT NOT NULL DEFAULT '',
+                state TEXT NOT NULL DEFAULT 'closed',
+                remaining INTEGER NOT NULL DEFAULT -1,
+                reset_at TEXT NOT NULL DEFAULT '',
+                limit_value INTEGER,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS rate_limits (
+                bucket TEXT PRIMARY KEY,
+                remaining INTEGER NOT NULL,
+                reset_at TEXT NOT NULL,
+                limit_value INTEGER,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
 
     def _init(self) -> None:
         with self._connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS rate_limits (
-                    bucket TEXT PRIMARY KEY,
-                    remaining INTEGER NOT NULL,
-                    reset_at TEXT NOT NULL,
-                    limit_value INTEGER,
-                    updated_at TEXT NOT NULL
-                )
-                """
-            )
+            self._do_init(conn)
 
     def update(
         self,
@@ -126,6 +180,133 @@ class RateLimitStore:
         if snapshot is None or snapshot.remaining > 0:
             return False
         return _parse_utc(snapshot.reset_at) > _parse_utc(now or utc_now())
+
+    def record_failure(
+        self,
+        key: str,
+        *,
+        failure_threshold: int = 5,
+        window_seconds: int = 600,
+        cooldown_seconds: int = 900,
+        provider: str = "",
+        repo_id: str = "",
+        operation: str = "",
+    ) -> str:
+        now = utc_now()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT failures, window_started_at, state FROM rate_limit_entries WHERE key = ?",
+                (key,),
+            ).fetchone()
+            if row is None:
+                failures = 1
+                window_started_at = now
+            else:
+                window_dt = _try_parse_utc(str(row["window_started_at"]))
+                now_dt = _parse_utc(now)
+                if window_dt and (now_dt - window_dt).total_seconds() > window_seconds:
+                    failures = 1
+                    window_started_at = now
+                else:
+                    failures = (row["failures"] or 0) + 1
+                    window_started_at = row["window_started_at"] or now
+            new_state = _CB_STATE_OPEN if failures >= failure_threshold else _CB_STATE_CLOSED
+            cooldown_until = ""
+            if new_state == _CB_STATE_OPEN:
+                cooldown_until = _format_utc(
+                    _parse_utc(now) + timedelta(seconds=cooldown_seconds)
+                )
+            conn.execute(
+                """
+                INSERT INTO rate_limit_entries
+                    (key, provider, repo_id, operation, failures, window_started_at,
+                     cooldown_until, state, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    failures = excluded.failures,
+                    window_started_at = excluded.window_started_at,
+                    cooldown_until = excluded.cooldown_until,
+                    state = excluded.state,
+                    updated_at = excluded.updated_at
+                """,
+                (key, provider, repo_id, operation, failures,
+                 window_started_at, cooldown_until, new_state, now),
+            )
+        return new_state
+
+    def record_success(self, key: str) -> None:
+        now = utc_now()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO rate_limit_entries (key, failures, state, updated_at)
+                VALUES (?, 0, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    failures = 0,
+                    state = ?,
+                    cooldown_until = '',
+                    updated_at = ?
+                """,
+                (key, _CB_STATE_CLOSED, now, _CB_STATE_CLOSED, now),
+            )
+
+    def is_open(self, key: str, *, now: str | None = None) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT state, cooldown_until FROM rate_limit_entries WHERE key = ?",
+                (key,),
+            ).fetchone()
+        if row is None:
+            return False
+        state = row["state"]
+        if state == _CB_STATE_CLOSED:
+            return False
+        if state == _CB_STATE_OPEN:
+            cooldown_until = _try_parse_utc(str(row["cooldown_until"] or ""))
+            if cooldown_until and _parse_utc(now or utc_now()) >= cooldown_until:
+                return False
+            return True
+        return False
+
+    def try_half_open(self, key: str, *, now: str | None = None) -> bool:
+        """Transition to half-open if cooldown has elapsed. Returns True if transitioned."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT state, cooldown_until FROM rate_limit_entries WHERE key = ?",
+                (key,),
+            ).fetchone()
+            if row is None or row["state"] != _CB_STATE_OPEN:
+                return False
+            cooldown_until = _try_parse_utc(str(row["cooldown_until"] or ""))
+            if cooldown_until and _parse_utc(now or utc_now()) < cooldown_until:
+                return False
+            conn.execute(
+                "UPDATE rate_limit_entries SET state = ?, updated_at = ? WHERE key = ?",
+                (_CB_STATE_HALF_OPEN, now or utc_now(), key),
+            )
+        return True
+
+    def prune_stale(self, max_age_seconds: int) -> int:
+        cutoff = _format_utc(_parse_utc(utc_now()) - timedelta(seconds=max_age_seconds))
+        with self._connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM rate_limit_entries WHERE updated_at < ? AND state = ?",
+                (cutoff, _CB_STATE_CLOSED),
+            )
+            deleted = cur.rowcount
+            cur2 = conn.execute(
+                "DELETE FROM rate_limits WHERE updated_at < ?",
+                (cutoff,),
+            )
+            deleted += cur2.rowcount
+        return deleted
+
+
+def _try_parse_utc(value: str) -> datetime | None:
+    try:
+        return _parse_utc(value)
+    except ValueError:
+        return None
 
 
 def _parse_utc(value: str) -> datetime:

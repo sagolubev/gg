@@ -18,6 +18,7 @@ MAX_COMMENTS = 10
 MAX_COMMENT_BODY_CHARS = 2000
 MAX_INPUTS = 10
 MAX_INPUT_MESSAGE_CHARS = 2000
+MAX_AGENT_RESPONSE_CHARS = 12000
 
 
 def _serialize_comments(comments: list[IssueComment]) -> list[dict[str, str]]:
@@ -123,6 +124,9 @@ class TaskAnalyzer:
         self.project_path = project_path
         self.agent = agent
         self.timeout = timeout
+        self.last_agent_response: str = ""
+        self.last_agent_error: str = ""
+        self.last_agent_response_truncated = False
 
     def analyze(self, issue: Issue, *, inputs: list[dict] | None = None) -> TaskBrief:
         serialized_comments = _serialize_comments(issue.comments)
@@ -181,6 +185,9 @@ class TaskAnalyzer:
         if self.agent is None or not self.agent.is_available():
             return None
         prompt = build_analysis_prompt(issue_payload=issue_payload, project_context=context[:MAX_PROJECT_CONTEXT_CHARS])
+        self.last_agent_response = ""
+        self.last_agent_error = ""
+        self.last_agent_response_truncated = False
         try:
             raw = self.agent.generate(
                 prompt,
@@ -188,9 +195,12 @@ class TaskAnalyzer:
                 timeout=self.timeout,
                 context="Task analysis only. Return exactly one JSON object and do not edit files.",
             )
+            self.last_agent_response_truncated = len(raw) > MAX_AGENT_RESPONSE_CHARS
+            self.last_agent_response = raw[:MAX_AGENT_RESPONSE_CHARS]
             payload = extract_single_json_object(raw)
             return AnalysisResultModel.model_validate(payload)
-        except Exception:
+        except Exception as exc:
+            self.last_agent_error = str(exc)
             return None
 
 

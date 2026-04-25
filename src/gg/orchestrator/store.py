@@ -14,6 +14,7 @@ from gg.orchestrator.logging import append_jsonl, mask_secrets
 from gg.orchestrator.schemas import (
     AgentHandoffModel,
     AgentResultModel,
+    AnalysisAgentResponseModel,
     ArchiveSummaryModel,
     CandidateResultModel,
     EvaluationArtifactModel,
@@ -603,6 +604,8 @@ def _validate_json_artifact(relative_path: str, data: dict[str, Any]) -> None:
         schema = TaskBriefModel
     elif relative_path == "artifacts/raw-issue.json" or re.match(r"artifacts/raw-issue-v\d+\.json$", relative_path):
         schema = RawIssueArtifactModel
+    elif re.match(r"artifacts/analysis-agent-response-v\d+\.json$", relative_path):
+        schema = AnalysisAgentResponseModel
     elif relative_path == "artifacts/evaluation.json":
         schema = EvaluationArtifactModel
     elif relative_path == "artifacts/execution-evaluation.json" or relative_path.endswith("/execution-evaluation.json"):

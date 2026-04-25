@@ -389,6 +389,21 @@ class AnalysisResultModel(CompatibleArtifactModel):
         return self
 
 
+class AnalysisAgentResponseModel(CompatibleArtifactModel):
+    schema_version: Literal[1] = 1
+    ok: bool = False
+    error: str = ""
+    response: str = ""
+    truncated: bool = False
+    limits: dict[str, Any] = Field(default_factory=dict)
+    created_at: str
+
+    @field_validator("created_at")
+    @classmethod
+    def _timestamp(cls, value: str) -> str:
+        return _validate_required_timestamp(value)
+
+
 class CheckResultModel(CompatibleArtifactModel):
     command: str
     status: str

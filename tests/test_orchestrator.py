@@ -236,6 +236,22 @@ class MalformedAnalysisAgent(AgentBackend):
         return True
 
 
+class MalformedThenImplementingAgent(FakeAgent):
+    supports_task_analysis = True
+
+    def generate(
+        self,
+        prompt: str,
+        *,
+        cwd: str | None = None,
+        timeout: int | None = None,
+        context: str | None = None,
+    ) -> str:
+        if context and context.startswith("Task analysis only"):
+            return "Here is not quite JSON"
+        return super().generate(prompt, cwd=cwd, timeout=timeout, context=context)
+
+
 class BlockedAnalysisAgent(AgentBackend):
     supports_task_analysis = True
 
@@ -1424,10 +1440,31 @@ def test_task_analyzer_falls_back_when_agent_json_is_malformed(tmp_path):
     init_repo(tmp_path)
     issue = Issue(number=42, title="Add greeting", body="Write a greeting file.", labels=["ai-ready"])
 
-    brief = TaskAnalyzer(str(tmp_path), agent=MalformedAnalysisAgent()).analyze(issue)
+    analyzer = TaskAnalyzer(str(tmp_path), agent=MalformedAnalysisAgent())
+    brief = analyzer.analyze(issue)
 
     assert brief.summary == "Write a greeting file."
     assert brief.acceptance_criteria[0] == "Implement the requested issue behavior."
+    assert analyzer.last_agent_error == "no JSON object found in model response"
+
+
+def test_pipeline_persists_malformed_analysis_agent_response(tmp_path):
+    init_repo(tmp_path)
+
+    result = OrchestratorPipeline(
+        tmp_path,
+        platform=FakePlatform(),
+        agent=MalformedThenImplementingAgent(),
+    ).run_issue(42, no_pr=True)
+
+    state = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent()).store.load(result["run_id"])
+    artifact_path = tmp_path / state.artifacts["analysis_agent_response"]
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    assert artifact_path.name == "analysis-agent-response-v1.json"
+    assert artifact["ok"] is False
+    assert artifact["error"] == "no JSON object found in model response"
+    assert artifact["response"] == "Here is not quite JSON"
+    assert artifact["truncated"] is False
 
 
 def test_task_analyzer_can_return_blocked_brief(tmp_path):

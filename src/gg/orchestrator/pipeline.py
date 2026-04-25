@@ -30,6 +30,7 @@ from gg.orchestrator.git import reset_worktree as git_reset_worktree
 from gg.orchestrator.git import resolve_ref as git_resolve_ref
 from gg.orchestrator.git import safe_branch_slug, WorktreeManager
 from gg.orchestrator.lock import LockManager
+from gg.orchestrator.logging import mask_secrets
 from gg.orchestrator.plugins import create_agent_backend, create_platform
 from gg.orchestrator.rate_limit import RateLimitThrottleError
 from gg.orchestrator.state import CandidateState, TaskState
@@ -38,6 +39,7 @@ from gg.orchestrator.store import RunStore
 from gg.orchestrator.task_analysis import (
     MAX_COMMENTS,
     MAX_COMMENT_BODY_CHARS,
+    MAX_AGENT_RESPONSE_CHARS,
     MAX_INPUTS,
     MAX_INPUT_MESSAGE_CHARS,
     MAX_ISSUE_BODY_CHARS,
@@ -203,12 +205,14 @@ class OrchestratorPipeline:
                 state.transition(TaskState.RUN_STARTED, reason="dry-run start pipeline")
                 state.transition(TaskState.TASK_ANALYSIS, reason="dry-run create task brief")
                 shadow_store.write(state)
-                brief = TaskAnalyzer(
+                analyzer = TaskAnalyzer(
                     str(self.project_path),
                     agent=self._task_analysis_agent(),
                     timeout=self.config.runtime.analysis_timeout_seconds,
-                ).analyze(issue, inputs=[])
+                )
+                brief = analyzer.analyze(issue, inputs=[])
                 self._write_task_analysis_artifacts(shadow_store, state, issue, brief)
+                self._write_analysis_agent_response_artifact(shadow_store, state, analyzer)
                 snapshot_path = ContextSnapshotStore(shadow_root).write_task_snapshot(state.run_id, brief)
                 state.artifacts["context_snapshot"] = snapshot_path
                 if brief.blocked:
@@ -1766,13 +1770,43 @@ class OrchestratorPipeline:
         state.artifacts["task_brief"] = brief_path
         state.artifacts["task_brief_version"] = str(version)
 
+    def _write_analysis_agent_response_artifact(
+        self,
+        store: RunStore,
+        state,
+        analyzer: TaskAnalyzer,
+    ) -> None:
+        if not analyzer.last_agent_error:
+            return
+        version = _next_artifact_version(store.path_for(state.run_id) / "artifacts", "analysis-agent-response")
+        response = mask_secrets(analyzer.last_agent_response)
+        error = mask_secrets(analyzer.last_agent_error)
+        path = store.write_json(
+            state.run_id,
+            f"artifacts/analysis-agent-response-v{version}.json",
+            {
+                "schema_version": 1,
+                "ok": False,
+                "error": str(error),
+                "response": str(response),
+                "truncated": analyzer.last_agent_response_truncated,
+                "limits": {
+                    "max_agent_response_chars": MAX_AGENT_RESPONSE_CHARS,
+                },
+                "created_at": _now_placeholder(),
+            },
+        )
+        state.artifacts["analysis_agent_response"] = path
+
     def _refresh_task_analysis(self, state, issue: Issue) -> TaskBrief:
-        brief = TaskAnalyzer(
+        analyzer = TaskAnalyzer(
             str(self.project_path),
             agent=self._task_analysis_agent(),
             timeout=self.config.runtime.analysis_timeout_seconds,
-        ).analyze(issue, inputs=self._load_inputs(state.run_id))
+        )
+        brief = analyzer.analyze(issue, inputs=self._load_inputs(state.run_id))
         self._write_task_analysis_artifacts(self.store, state, issue, brief)
+        self._write_analysis_agent_response_artifact(self.store, state, analyzer)
         snapshot_path = ContextSnapshotStore(self.project_path).write_task_snapshot(state.run_id, brief)
         state.artifacts["context_snapshot"] = snapshot_path
         return brief

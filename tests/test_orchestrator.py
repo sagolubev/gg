@@ -2543,7 +2543,8 @@ def test_retry_ready_run_aliases_resume(tmp_path):
     result = pipeline.retry(ready["run_id"], no_pr=True)
 
     assert result["state"] == "Completed"
-    assert result["retried"] is True
+    assert result["retried"] is False
+    assert result["retry_equivalent_to_resume"] is True
 
 
 def test_pipeline_transitions_to_needs_input_and_resume_uses_provided_input(tmp_path):

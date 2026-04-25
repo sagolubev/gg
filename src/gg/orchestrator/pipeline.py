@@ -44,7 +44,12 @@ from gg.orchestrator.task_analysis import (
     TaskAnalyzer,
     TaskBrief,
 )
-from gg.orchestrator.verification import CheckResult, VerificationRunner, verification_gate_summary
+from gg.orchestrator.verification import (
+    CheckResult,
+    VerificationCommand,
+    VerificationRunner,
+    verification_gate_summary,
+)
 from gg.platforms.base import GitPlatform, Issue
 from gg.utils.git_ops import find_repo_root
 
@@ -799,7 +804,7 @@ class OrchestratorPipeline:
             verification = [CheckResult(command="", status="skipped", exit_code=None, attempts=0)]
         else:
             verification = VerificationRunner(
-                self.config.verify.commands(),
+                self._verification_commands(),
                 timeout=self.config.runtime.command_timeout_seconds,
                 retry_count=self.config.verify.test_retry_count,
             ).run(candidate.worktree_path)
@@ -938,7 +943,7 @@ class OrchestratorPipeline:
             },
         )
         verification = VerificationRunner(
-            self.config.verify.commands(),
+            self._verification_commands(),
             timeout=self.config.runtime.command_timeout_seconds,
             retry_count=self.config.verify.test_retry_count,
         ).run(worktree)
@@ -1291,7 +1296,7 @@ class OrchestratorPipeline:
             state.publishing_step = "patch_applied"
             self.store.write(state)
         verification = VerificationRunner(
-            self.config.verify.commands(),
+            self._verification_commands(),
             timeout=self.config.runtime.command_timeout_seconds,
             retry_count=self.config.verify.test_retry_count,
         ).run(worktree)
@@ -1666,6 +1671,36 @@ class OrchestratorPipeline:
             "artifacts/run-outcome.json",
             build_run_outcome(state, selected_candidate_metadata, completed_at=_now_placeholder()),
         )
+
+    def _verification_commands(self) -> list[VerificationCommand]:
+        commands: list[VerificationCommand] = []
+        for id_, category, command in (
+            ("tests", "test", self.config.verify.tests),
+            ("lint", "lint", self.config.verify.lint),
+            ("typecheck", "typecheck", self.config.verify.typecheck),
+            ("security", "security", self.config.verify.security),
+        ):
+            if command.strip():
+                commands.append(
+                    VerificationCommand(
+                        id=id_,
+                        category=category,
+                        command=command,
+                        required=True,
+                        parser="secret-scan" if category == "security" else "",
+                    )
+                )
+        for index, command in enumerate(self.config.verify.custom, start=1):
+            if command.strip():
+                commands.append(
+                    VerificationCommand(
+                        id=f"custom-{index}",
+                        category="custom",
+                        command=command,
+                        required=True,
+                    )
+                )
+        return commands
 
     def _write_task_analysis_artifacts(
         self,

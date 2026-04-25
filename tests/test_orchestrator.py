@@ -959,6 +959,10 @@ def test_run_store_uses_unique_run_ids(tmp_path):
 
 def test_pipeline_no_pr_completes_with_one_candidate(tmp_path):
     init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        "verify:\n  tests: \"python -c 'print(1)'\"\n",
+        encoding="utf-8",
+    )
     platform = FakePlatform()
     result = OrchestratorPipeline(tmp_path, platform=platform, agent=FakeAgent()).run_issue(
         42,
@@ -978,6 +982,10 @@ def test_pipeline_no_pr_completes_with_one_candidate(tmp_path):
     assert (run_dir / "candidates" / "candidate-1" / "agent-result.json").exists()
     assert (run_dir / "candidates" / "candidate-1" / "patch.diff").read_text(encoding="utf-8")
     assert (run_dir / "candidates" / "candidate-1" / "verification.json").exists()
+    verification = json.loads((run_dir / "candidates" / "candidate-1" / "verification.json").read_text(encoding="utf-8"))
+    assert verification["checks"][0]["id"] == "tests"
+    assert verification["checks"][0]["category"] == "test"
+    assert verification["required_passed"] is True
     assert (run_dir / "artifacts" / "evaluation.json").exists()
     assert (run_dir / "artifacts" / "execution-evaluation.json").exists()
     assert (run_dir / "artifacts" / "run-outcome.json").exists()

@@ -2512,8 +2512,32 @@ def test_cli_doctor_reports_machine_readable_checks(tmp_path):
     assert "config_schema" in check_names
     assert "git_worktree" in check_names
     assert "sandbox_mode" in check_names
+    assert "platform_auth" in check_names
+    assert "filesystem_safety" in check_names
     assert "dirty_workspace" in check_names
     assert "secrets" in check_names
+
+
+def test_doctor_reports_platform_auth_failure(monkeypatch, tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        "task_system:\n  platform: github\nverify:\n  tests: ''\nruntime:\n  agent_backend: fake-agent\n",
+        encoding="utf-8",
+    )
+
+    def fake_create_platform(name, project_path):
+        return AuthFailPlatform()
+
+    monkeypatch.setattr("gg.orchestrator.doctor.create_platform", fake_create_platform)
+
+    result = CliRunner().invoke(cli, ["doctor", "--path", str(tmp_path), "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    checks = {check["name"]: check for check in payload["checks"]}
+    assert payload["status"] == "fail"
+    assert checks["platform_auth"]["status"] == "fail"
+    assert "missing token" in checks["platform_auth"]["message"]
 
 
 def test_cli_doctor_fails_when_params_contain_obvious_secret(tmp_path):

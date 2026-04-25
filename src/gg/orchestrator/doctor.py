@@ -8,6 +8,7 @@ from pathlib import Path
 
 from gg.agents.codex import CodexAgent
 from gg.orchestrator.config import GGConfig, load_config
+from gg.orchestrator.plugins import create_platform
 from gg.orchestrator.sandbox import SandboxRuntime
 from gg.utils.git_ops import find_repo_root
 
@@ -60,6 +61,8 @@ def run_doctor(project_path: str | Path) -> dict:
                 )
             )
         checks.append(_platform_cli_check(config.task_system.platform))
+        checks.append(_platform_auth_check(root, config))
+        checks.append(_filesystem_safety_check(root, config))
         checks.append(
             DoctorCheck(
                 "sandbox_mode",
@@ -121,6 +124,51 @@ def _platform_cli_check(platform: str) -> DoctorCheck:
         found = "gh" if gh_available else "glab"
         return DoctorCheck("platform_cli", "pass", f"{found} found for auto platform mode")
     return DoctorCheck("platform_cli", "warn", "gh/glab not found; platform operations may fail")
+
+
+def _platform_auth_check(root: Path, config: GGConfig) -> DoctorCheck:
+    platform_name = config.task_system.platform
+    if platform_name == "auto":
+        platform_name = _auto_platform_name(root)
+    if platform_name not in {"github", "gitlab"}:
+        return DoctorCheck(
+            "platform_auth",
+            "warn",
+            f"auth preflight skipped for unsupported platform {config.task_system.platform}",
+        )
+    try:
+        platform = create_platform(platform_name, root)
+        platform.validate_auth()
+    except Exception as exc:
+        return DoctorCheck("platform_auth", "fail", str(exc))
+    return DoctorCheck("platform_auth", "pass", f"{platform_name} auth validated")
+
+
+def _filesystem_safety_check(root: Path, config: GGConfig) -> DoctorCheck:
+    if config.runtime.resource.allow_unsafe_fs:
+        return DoctorCheck("filesystem_safety", "warn", "unsafe filesystem mode is explicitly allowed")
+    if config.runtime.resource.allow_network_fs:
+        return DoctorCheck("filesystem_safety", "warn", "network/shared filesystem mode is explicitly allowed")
+    if _is_probably_network_filesystem(root):
+        return DoctorCheck(
+            "filesystem_safety",
+            "fail",
+            "workspace appears to be on a network/shared filesystem; set runtime.resource.allow_network_fs only if accepted",
+        )
+    return DoctorCheck("filesystem_safety", "pass", "workspace path passed local filesystem preflight")
+
+
+def _auto_platform_name(root: Path) -> str:
+    from gg.platforms.base import detect_platform
+
+    detected = detect_platform(root)
+    return detected if detected in {"github", "gitlab"} else "github"
+
+
+def _is_probably_network_filesystem(root: Path) -> bool:
+    text = str(root).lower()
+    markers = ("/nfs/", "/net/", "/network/", "/volumes/")
+    return any(marker in text for marker in markers)
 
 
 def _git_worktree_check(root: Path) -> DoctorCheck:

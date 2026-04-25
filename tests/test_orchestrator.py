@@ -203,6 +203,24 @@ class JsonAnalysisAgent(AgentBackend):
         return True
 
 
+class TimeoutRecordingAnalysisAgent(JsonAnalysisAgent):
+    supports_task_analysis = True
+
+    def __init__(self) -> None:
+        self.timeouts: list[int | None] = []
+
+    def generate(
+        self,
+        prompt: str,
+        *,
+        cwd: str | None = None,
+        timeout: int | None = None,
+        context: str | None = None,
+    ) -> str:
+        self.timeouts.append(timeout)
+        return super().generate(prompt, cwd=cwd, timeout=timeout, context=context)
+
+
 class MalformedAnalysisAgent(AgentBackend):
     def generate(
         self,
@@ -1339,6 +1357,20 @@ def test_task_analyzer_uses_versioned_json_contract_when_agent_provided(tmp_path
     assert brief.candidate_files == ["greeting.txt"]
     assert brief.verification_hints == ["cat greeting.txt"]
     assert brief.context_budget["estimated_tokens"] == 120
+
+
+def test_pipeline_uses_analysis_timeout_for_task_analysis_agent(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        "verify:\n  tests: ''\nruntime:\n  analysis_timeout_seconds: 123\n",
+        encoding="utf-8",
+    )
+    agent = TimeoutRecordingAnalysisAgent()
+
+    result = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=agent).run_issue(42, dry_run=True)
+
+    assert result["state"] == "ReadyForExecution"
+    assert agent.timeouts == [123]
 
 
 def test_task_analyzer_falls_back_when_agent_json_is_malformed(tmp_path):

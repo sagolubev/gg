@@ -201,7 +201,7 @@ class OrchestratorPipeline:
                 brief = TaskAnalyzer(
                     str(self.project_path),
                     agent=self._task_analysis_agent(),
-                    timeout=self.config.runtime.command_timeout_seconds,
+                    timeout=self.config.runtime.analysis_timeout_seconds,
                 ).analyze(issue, inputs=[])
                 self._write_task_analysis_artifacts(shadow_store, state, issue, brief)
                 snapshot_path = ContextSnapshotStore(shadow_root).write_task_snapshot(state.run_id, brief)
@@ -1693,7 +1693,7 @@ class OrchestratorPipeline:
         brief = TaskAnalyzer(
             str(self.project_path),
             agent=self._task_analysis_agent(),
-            timeout=self.config.runtime.command_timeout_seconds,
+            timeout=self.config.runtime.analysis_timeout_seconds,
         ).analyze(issue, inputs=self._load_inputs(state.run_id))
         self._write_task_analysis_artifacts(self.store, state, issue, brief)
         snapshot_path = ContextSnapshotStore(self.project_path).write_task_snapshot(state.run_id, brief)

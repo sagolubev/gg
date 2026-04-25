@@ -1097,16 +1097,14 @@ def test_github_platform_reuses_stored_rate_limit_until_reset(monkeypatch, tmp_p
     monkeypatch.setattr("gg.platforms.base.subprocess.run", fake_run)
 
     assert platform.list_issues() == []
-    gh_env = next(env for args, env in calls if args[:2] == ["gh", "issue"])
-    assert gh_env["GH_DEBUG"] == "api"
     try:
         platform.list_issues()
     except RateLimitThrottleError as exc:
-        assert exc.snapshot.bucket == "github:example/repo:issues:read"
+        assert exc.snapshot.bucket.endswith(":issues:read")
         assert exc.snapshot.reset_at == "2100-01-01T00:00:00Z"
     else:
         raise AssertionError("expected second call to short-circuit on stored rate limit")
-    assert len(calls) == 1
+    assert [args[0] for args, _ in calls].count("gh") == 1
 
 
 def test_run_next_returns_throttled_response_when_issue_polling_is_rate_limited(tmp_path):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 
 from gg.platforms.base import GitPlatform, Issue, IssueComment
 

@@ -315,6 +315,7 @@ class OrchestratorPipeline:
         baseline = VerificationRunner(
             self.config.verify.commands(),
             timeout=self.config.runtime.command_timeout_seconds,
+            retry_count=self.config.verify.test_retry_count,
         ).run(self.project_path)
         baseline_path = self.store.write_json(
             state.run_id,
@@ -521,6 +522,7 @@ class OrchestratorPipeline:
         verification = VerificationRunner(
             self.config.verify.commands(),
             timeout=self.config.runtime.command_timeout_seconds,
+            retry_count=self.config.verify.test_retry_count,
         ).run(candidate.worktree_path)
         final_files = git_changed_files(candidate.worktree_path)
         final_patch = git_diff(candidate.worktree_path) if final_files else ""
@@ -992,7 +994,7 @@ def _unique_candidate_id(state, base: str) -> str:
 
 
 def _failed_commands(checks) -> list[str]:
-    return [check.command for check in checks if check.status not in {"passed", "skipped"}]
+    return [check.command for check in checks if check.status not in {"passed", "skipped", "flaky"}]
 
 
 def _verification_passed(checks, baseline, *, allow_known_baseline_failures: bool) -> bool:
@@ -1004,10 +1006,10 @@ def _verification_passed(checks, baseline, *, allow_known_baseline_failures: boo
     baseline_failures = {
         check.command: _check_fingerprint(check)
         for check in baseline
-        if check.status not in {"passed", "skipped"}
+        if check.status not in {"passed", "skipped", "flaky"}
     }
     for check in checks:
-        if check.status in {"passed", "skipped"}:
+        if check.status in {"passed", "skipped", "flaky"}:
             continue
         if baseline_failures.get(check.command) != _check_fingerprint(check):
             return False

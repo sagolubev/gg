@@ -32,6 +32,7 @@ from gg.orchestrator.schemas import (
 from gg.orchestrator.state import CandidateState, InvalidTransitionError, RunState, TaskState
 from gg.orchestrator.store import RunStore
 from gg.orchestrator.task_analysis import TaskAnalyzer, extract_single_json_object
+from gg.orchestrator.verification import VerificationRunner
 from gg.platforms.base import GitPlatform, Issue, IssueComment
 from gg.platforms.github import GitHubPlatform
 from gg.platforms.gitlab import GitLabPlatform
@@ -1437,7 +1438,11 @@ def test_init_params_generation(tmp_path):
     assert config.security.allow_lfs_changes is False
     assert config.security.allow_binary_changes is True
     assert config.security.allow_dependency_changes is True
+    assert config.verify.setup == ""
     assert config.verify.tests == "pytest"
+    assert config.verify.security == ""
+    assert config.verify.custom == ()
+    assert config.verify.test_retry_count == 0
 
 
 def test_load_config_reads_sandbox_policy(tmp_path):
@@ -1466,6 +1471,35 @@ def test_load_config_reads_sandbox_policy(tmp_path):
     assert config.runtime.sandbox_policy.deny_read == ["secrets.txt"]
     assert config.runtime.sandbox_policy.allow_write == ["tmp"]
     assert config.runtime.sandbox_policy.deny_write == ["dist"]
+
+
+def test_load_config_reads_extended_verification_commands(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        """verify:
+  setup: uv sync
+  tests: pytest
+  lint: ruff check .
+  typecheck: mypy src
+  security: bandit -r src
+  custom:
+    - python scripts/check.py
+  test_retry_count: 2
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(tmp_path)
+
+    assert config.verify.commands() == [
+        "uv sync",
+        "pytest",
+        "ruff check .",
+        "mypy src",
+        "bandit -r src",
+        "python scripts/check.py",
+    ]
+    assert config.verify.test_retry_count == 2
 
 
 def test_pipeline_uses_registered_platform_and_agent_backend(tmp_path):
@@ -1510,6 +1544,22 @@ def test_sandbox_runtime_requires_executable(monkeypatch, tmp_path):
         assert "srt-py" in str(exc)
     else:
         raise AssertionError("missing sandbox runtime should fail")
+
+
+def test_verification_runner_retries_and_marks_flaky(tmp_path):
+    command = (
+        "python -c \"from pathlib import Path; "
+        "p=Path('attempts.txt'); "
+        "n=int(p.read_text() if p.exists() else '0'); "
+        "p.write_text(str(n + 1)); "
+        "raise SystemExit(1 if n == 0 else 0)\""
+    )
+
+    result = VerificationRunner([command], timeout=5, retry_count=1).run(tmp_path)[0]
+
+    assert result.status == "flaky"
+    assert result.flaky is True
+    assert result.attempts == 2
 
 
 def test_rate_limit_store_uses_sqlite_wal(tmp_path):

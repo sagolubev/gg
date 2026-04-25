@@ -96,9 +96,13 @@ class RuntimeConfigModel(StrictArtifactModel):
 
 
 class VerifyConfigModel(StrictArtifactModel):
+    setup: str = ""
     tests: str = ""
     lint: str = ""
     typecheck: str = ""
+    security: str = ""
+    custom: tuple[str, ...] = ()
+    test_retry_count: int = Field(default=0, ge=0)
     allow_known_baseline_failures: bool = False
 
 
@@ -263,6 +267,8 @@ class CheckResultModel(CompatibleArtifactModel):
     exit_code: int | None
     stdout: str = ""
     stderr: str = ""
+    attempts: int = Field(default=1, ge=0)
+    flaky: bool = False
 
     @field_validator("status")
     @classmethod

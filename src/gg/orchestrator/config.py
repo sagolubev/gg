@@ -42,13 +42,21 @@ class RuntimeConfig:
 
 @dataclass(frozen=True)
 class VerifyConfig:
+    setup: str = ""
     tests: str = ""
     lint: str = ""
     typecheck: str = ""
+    security: str = ""
+    custom: tuple[str, ...] = ()
+    test_retry_count: int = 0
     allow_known_baseline_failures: bool = False
 
     def commands(self) -> list[str]:
-        return [cmd for cmd in (self.tests, self.lint, self.typecheck) if cmd.strip()]
+        return [
+            cmd
+            for cmd in (self.setup, self.tests, self.lint, self.typecheck, self.security, *self.custom)
+            if cmd.strip()
+        ]
 
 
 @dataclass(frozen=True)
@@ -126,9 +134,13 @@ def load_config(project_path: str | Path) -> GGConfig:
                     ),
                 },
                 "verify": {
+                    "setup": verify.get("setup", ""),
                     "tests": verify.get("tests", _default_test_command(root)),
                     "lint": verify.get("lint", ""),
                     "typecheck": verify.get("typecheck", ""),
+                    "security": verify.get("security", ""),
+                    "custom": verify.get("custom", []),
+                    "test_retry_count": verify.get("test_retry_count", 0),
                     "allow_known_baseline_failures": verify.get("allow_known_baseline_failures", False),
                 },
                 "runtime": {
@@ -180,9 +192,13 @@ def load_config(project_path: str | Path) -> GGConfig:
             exclude_labels=model.selection.exclude_labels,
         ),
         verify=VerifyConfig(
+            setup=model.verify.setup,
             tests=model.verify.tests,
             lint=model.verify.lint,
             typecheck=model.verify.typecheck,
+            security=model.verify.security,
+            custom=model.verify.custom,
+            test_retry_count=model.verify.test_retry_count,
             allow_known_baseline_failures=model.verify.allow_known_baseline_failures,
         ),
         runtime=RuntimeConfig(

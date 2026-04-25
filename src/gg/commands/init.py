@@ -421,9 +421,13 @@ def _write_params(project_path: Path, console: Console) -> None:
             "exclude_labels": ["gg:in-progress", "gg:blocked", "gg:done"],
         },
         "verify": {
+            "setup": "",
             "tests": _default_verify_command(project_path),
             "lint": "",
             "typecheck": "",
+            "security": "",
+            "custom": [],
+            "test_retry_count": 0,
             "allow_known_baseline_failures": False,
         },
         "runtime": {

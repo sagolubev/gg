@@ -1299,6 +1299,38 @@ def test_publish_skips_duplicate_result_comment_when_marker_exists(tmp_path):
     assert platform.comments == []
 
 
+def test_publish_fails_with_preflight_artifact_when_base_commit_missing(tmp_path):
+    init_repo(tmp_path)
+    platform = FakePlatform()
+    pipeline = OrchestratorPipeline(tmp_path, platform=platform, agent=FakeAgent())
+    ready = pipeline.run_issue(42, dry_run=True)
+    state = pipeline.store.load(ready["run_id"])
+    state.recover_to(TaskState.OUTCOME_PUBLISHING, reason="test publish preflight")
+    state.publishing_step = "started"
+    pipeline.store.write(state)
+
+    result = pipeline._publish_winner(
+        state,
+        platform.issue,
+        {
+            "candidate_id": "candidate-1",
+            "worktree_path": str(tmp_path),
+            "branch": "gg/test",
+            "base_commit": "deadbeef",
+            "summary": "done",
+            "verification_path": "verify.json",
+        },
+        no_pr=False,
+    )
+
+    failed = pipeline.store.load(ready["run_id"])
+    preflight = json.loads((tmp_path / failed.artifacts["publishing_preflight"]).read_text(encoding="utf-8"))
+    assert result["state"] == "TerminalFailure"
+    assert result["error"]["code"] == "base_rewritten"
+    assert preflight["base_reachable"] is False
+    assert platform.prs == []
+
+
 def test_interrupt_during_publishing_preserves_publish_resume_state(tmp_path):
     init_repo(tmp_path)
     pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())

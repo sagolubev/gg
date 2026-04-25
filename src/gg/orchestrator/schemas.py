@@ -404,6 +404,24 @@ class RateLimitArtifactModel(CompatibleArtifactModel):
         return _validate_required_timestamp(value)
 
 
+class PublishingPreflightModel(CompatibleArtifactModel):
+    schema_version: Literal[1] = 1
+    candidate_id: str
+    branch: str
+    base_commit: str
+    default_branch: str
+    default_commit: str | None = None
+    base_reachable: bool
+    base_is_ancestor_of_default: bool
+    stale_base: bool
+    checked_at: str
+
+    @field_validator("checked_at")
+    @classmethod
+    def _timestamp(cls, value: str) -> str:
+        return _validate_required_timestamp(value)
+
+
 class ContextSnapshotModel(CompatibleArtifactModel):
     schema_version: Literal[1] = 1
     created_at: str

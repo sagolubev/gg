@@ -30,6 +30,41 @@ def current_commit(cwd: str | Path) -> str:
     return run_git(["rev-parse", "HEAD"], cwd)
 
 
+def commit_exists(cwd: str | Path, commit: str) -> bool:
+    completed = subprocess.run(
+        ["git", "cat-file", "-e", f"{commit}^{{commit}}"],
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return completed.returncode == 0
+
+
+def is_ancestor(cwd: str | Path, ancestor: str, descendant: str) -> bool:
+    completed = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", ancestor, descendant],
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return completed.returncode == 0
+
+
+def resolve_ref(cwd: str | Path, ref: str) -> str | None:
+    completed = subprocess.run(
+        ["git", "rev-parse", "--verify", ref],
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if completed.returncode != 0:
+        return None
+    return completed.stdout.strip()
+
+
 def changed_files(cwd: str | Path) -> list[str]:
     output = run_git(["status", "--short"], cwd)
     files: list[str] = []

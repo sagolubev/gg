@@ -19,7 +19,10 @@ from gg.orchestrator.git import binary_changed_files as git_binary_changed_files
 from gg.orchestrator.git import changed_files as git_changed_files
 from gg.orchestrator.git import dependency_changed_files as git_dependency_changed_files
 from gg.orchestrator.git import commit_all, diff as git_diff, push_branch
+from gg.orchestrator.git import commit_exists as git_commit_exists
+from gg.orchestrator.git import is_ancestor as git_is_ancestor
 from gg.orchestrator.git import lfs_changed_files as git_lfs_changed_files
+from gg.orchestrator.git import resolve_ref as git_resolve_ref
 from gg.orchestrator.lock import LockManager
 from gg.orchestrator.plugins import create_agent_backend, create_platform
 from gg.orchestrator.rate_limit import RateLimitThrottleError
@@ -551,6 +554,7 @@ class OrchestratorPipeline:
                 "candidate_id": winner.candidate_id,
                 "worktree_path": winner.worktree_path,
                 "branch": winner.branch,
+                "base_commit": winner.base_commit,
                 "summary": winner.summary,
                 "verification_path": verification_path,
             },
@@ -765,6 +769,14 @@ class OrchestratorPipeline:
             state.publishing_step = "local_no_pr"
         else:
             if state.publishing_step not in {"committed", "branch_pushed", "pr_created", "result_commented"}:
+                preflight = self._publish_preflight(state, winner)
+                if not preflight["base_reachable"]:
+                    state.fail(
+                        code="base_rewritten",
+                        message=f"base commit {preflight['base_commit']} is not reachable",
+                    )
+                    self.store.write(state)
+                    return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
                 committed = commit_all(
                     winner["worktree_path"],
                     message=f"Implement issue #{issue.number}",
@@ -858,11 +870,45 @@ class OrchestratorPipeline:
                 "candidate_id": winner_id,
                 "worktree_path": candidate.worktree_path,
                 "branch": candidate.branch,
+                "base_commit": result.get("base_commit", ""),
                 "summary": result.get("summary", "Agent completed."),
                 "verification_path": result.get("verification", ""),
             },
             no_pr=no_pr,
         )
+
+    def _publish_preflight(self, state, winner: dict[str, Any]) -> dict[str, Any]:
+        worktree_path = winner["worktree_path"]
+        base_commit = winner.get("base_commit", "")
+        default_ref = self.config.git.default_branch
+        default_commit = git_resolve_ref(worktree_path, default_ref) or git_resolve_ref(
+            worktree_path,
+            f"origin/{default_ref}",
+        )
+        base_reachable = bool(base_commit and git_commit_exists(worktree_path, base_commit))
+        base_is_ancestor_of_default = (
+            bool(default_commit and base_reachable)
+            and git_is_ancestor(worktree_path, base_commit, default_commit)
+        )
+        payload = {
+            "schema_version": 1,
+            "candidate_id": winner["candidate_id"],
+            "branch": winner["branch"],
+            "base_commit": base_commit,
+            "default_branch": default_ref,
+            "default_commit": default_commit,
+            "base_reachable": base_reachable,
+            "base_is_ancestor_of_default": base_is_ancestor_of_default,
+            "stale_base": bool(default_commit and base_reachable and base_commit != default_commit),
+            "checked_at": _now_placeholder(),
+        }
+        state.artifacts["publishing_preflight"] = self.store.write_json(
+            state.run_id,
+            "artifacts/publishing-preflight.json",
+            payload,
+        )
+        self.store.write(state)
+        return payload
 
     def _cancelled_response(self, state) -> dict[str, Any] | None:
         try:

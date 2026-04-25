@@ -53,6 +53,7 @@ class RunStore:
         project_path: str | Path,
         *,
         audit_hash_events: bool = False,
+        hash_artifacts: bool = False,
         audit_sink_path: str | Path | None = None,
         keep_state_backup: bool = False,
     ):
@@ -60,6 +61,7 @@ class RunStore:
         self.runs_dir = self.project_path / ".gg" / "runs"
         self.runs_dir.mkdir(parents=True, exist_ok=True)
         self.audit_hash_events = audit_hash_events
+        self.hash_artifacts = hash_artifacts
         self.audit_sink_path = self._resolve_audit_sink(audit_sink_path)
         self.keep_state_backup = keep_state_backup
 
@@ -101,10 +103,13 @@ class RunStore:
         _validate_json_artifact(relative_path, data)
         path = self.path_for(run_id) / relative_path
         _atomic_write_text(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+        if self.hash_artifacts:
+            _write_artifact_hash(path)
         return str(path.relative_to(self.project_path))
 
     def read_json(self, relative_path: str) -> dict[str, Any]:
         path = self.project_path / relative_path
+        _verify_artifact_hash(path)
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
@@ -116,6 +121,8 @@ class RunStore:
     def write_text(self, run_id: str, relative_path: str, text: str) -> str:
         path = self.path_for(run_id) / relative_path
         _atomic_write_text(path, text)
+        if self.hash_artifacts:
+            _write_artifact_hash(path)
         return str(path.relative_to(self.project_path))
 
     def write(self, state: RunState) -> None:
@@ -166,7 +173,9 @@ class RunStore:
         except json.JSONDecodeError as exc:
             raise ValueError(f"{path}: invalid JSON: {exc.msg}") from exc
         try:
-            return RunState.from_dict(data)
+            state = RunState.from_dict(data)
+            state.cost = self._aggregate_cost(state.run_id)
+            return state
         except Exception as exc:
             raise ValueError(validation_error_message(str(path), exc)) from exc
 
@@ -392,6 +401,64 @@ class RunStore:
     def append_cost(self, run_id: str, payload: dict) -> None:
         append_jsonl(self.path_for(run_id) / "cost.jsonl", payload)
 
+    def _aggregate_cost(self, run_id: str) -> dict[str, Any]:
+        cost_path = self.path_for(run_id) / "cost.jsonl"
+        if not cost_path.exists():
+            return {
+                "total_usd": None,
+                "total_tokens": None,
+                "input_tokens": None,
+                "output_tokens": None,
+                "duration_seconds": None,
+                "events": 0,
+                "source": "cost_jsonl_absent",
+                "available": False,
+                "exact": False,
+            }
+        events = 0
+        duration_seconds = 0.0
+        total_usd: float | None = None
+        input_tokens: int | None = None
+        output_tokens: int | None = None
+        total_tokens: int | None = None
+        for line in cost_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            events += 1
+            duration_seconds += _float_or_zero(event.get("duration_seconds"))
+            duration_seconds += _float_or_zero(event.get("verification_duration_seconds"))
+            event_usd = event.get("total_usd")
+            if isinstance(event_usd, (int, float)):
+                total_usd = (total_usd or 0.0) + float(event_usd)
+            token_usage = event.get("token_usage")
+            if isinstance(token_usage, dict):
+                input_value = _int_or_none(token_usage.get("input_tokens"))
+                output_value = _int_or_none(token_usage.get("output_tokens"))
+                total_value = _int_or_none(token_usage.get("total_tokens"))
+                if input_value is not None:
+                    input_tokens = (input_tokens or 0) + input_value
+                if output_value is not None:
+                    output_tokens = (output_tokens or 0) + output_value
+                if total_value is not None:
+                    total_tokens = (total_tokens or 0) + total_value
+        if total_tokens is None and (input_tokens is not None or output_tokens is not None):
+            total_tokens = (input_tokens or 0) + (output_tokens or 0)
+        return {
+            "total_usd": total_usd,
+            "total_tokens": total_tokens,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "duration_seconds": round(duration_seconds, 3) if events else None,
+            "events": events,
+            "source": "cost_jsonl",
+            "available": True,
+            "exact": total_usd is not None or total_tokens is not None,
+        }
+
     def append_event(self, run_id: str, payload: dict) -> None:
         log_path = self.path_for(run_id) / "pipeline.jsonl"
         event = self._audit_payload(log_path, payload) if self.audit_hash_events else payload
@@ -569,6 +636,7 @@ class RunStore:
     def _write_run_summary(self, run_dir: Path, state: RunState) -> None:
         summary_path = run_dir / "artifacts" / "run-summary.json"
         summary_path.parent.mkdir(parents=True, exist_ok=True)
+        cost = self._aggregate_cost(state.run_id)
         payload = {
             "schema_version": 1,
             "run_id": state.run_id,
@@ -583,7 +651,7 @@ class RunStore:
             "stage_attempts": state.stage_attempts,
             "locks": state.locks,
             "operator": state.operator,
-            "cost": state.cost,
+            "cost": cost,
             "publishing_step": state.publishing_step,
             "cancel_requested": state.cancel_requested,
             "blocked_resume_state": state.blocked_resume_state.value if state.blocked_resume_state else None,
@@ -607,6 +675,8 @@ class RunStore:
         except Exception as exc:
             raise ValueError(validation_error_message("artifacts/run-summary.json", exc)) from exc
         _atomic_write_text(summary_path, json.dumps(mask_secrets(payload), indent=2, ensure_ascii=False) + "\n")
+        if self.hash_artifacts:
+            _write_artifact_hash(summary_path)
 
     def _resolve_audit_sink(self, audit_sink_path: str | Path | None) -> Path | None:
         if not audit_sink_path:
@@ -710,6 +780,30 @@ def _atomic_write_text(path: Path, text: str) -> None:
     _atomic_write_bytes(path, text.encode("utf-8"))
 
 
+def _write_artifact_hash(path: Path) -> None:
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    payload = {
+        "schema_version": 1,
+        "algorithm": "sha256",
+        "hash": digest,
+    }
+    _atomic_write_text(path.with_name(f"{path.name}.sha256"), json.dumps(payload, indent=2) + "\n")
+
+
+def _verify_artifact_hash(path: Path) -> None:
+    hash_path = path.with_name(f"{path.name}.sha256")
+    if not hash_path.exists():
+        return
+    try:
+        payload = json.loads(hash_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{hash_path}: invalid JSON: {exc.msg}") from exc
+    expected = str(payload.get("hash", ""))
+    actual = hashlib.sha256(path.read_bytes()).hexdigest()
+    if expected and expected != actual:
+        raise ValueError(f"artifact_checksum_failed: {path}")
+
+
 def _atomic_write_bytes(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = ""
@@ -776,6 +870,14 @@ def _count_logged_events(path: Path, event_name: str) -> int:
 
 def _has_logged_event(path: Path, event_name: str) -> bool:
     return any(event.get("event") == event_name for event in _iter_jsonl_events(path) or ())
+
+
+def _float_or_zero(value: Any) -> float:
+    return float(value) if isinstance(value, (int, float)) else 0.0
+
+
+def _int_or_none(value: Any) -> int | None:
+    return int(value) if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def _parse_utc(value: str) -> datetime:

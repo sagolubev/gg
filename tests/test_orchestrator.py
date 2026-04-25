@@ -862,6 +862,9 @@ def test_run_state_round_trips_phase_c_resume_fields():
         "output_tokens": None,
         "duration_seconds": None,
         "events": 1,
+        "source": None,
+        "available": False,
+        "exact": False,
     }
 
 
@@ -1371,6 +1374,10 @@ def test_pipeline_no_pr_completes_with_one_candidate(tmp_path):
 
     summary = json.loads((run_dir / "artifacts" / "run-summary.json").read_text(encoding="utf-8"))
     assert summary["state"] == "Completed"
+    assert summary["cost"]["source"] == "cost_jsonl"
+    assert summary["cost"]["available"] is True
+    assert summary["cost"]["exact"] is False
+    assert summary["cost"]["events"] == 1
     assert summary["artifacts"]["run_summary"].endswith("artifacts/run-summary.json")
     assert summary["candidate_states"]["candidate-1"]["status"] == "success"
     assert summary["logs"]["pipeline"].endswith("pipeline.jsonl")
@@ -4536,6 +4543,29 @@ audit:
         assert audit["previous_hash"] == previous_hash
         assert audit["hash"] == expected
         previous_hash = audit["hash"]
+
+
+def test_artifact_hashing_detects_tampered_persisted_bytes(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        "verify:\n  tests: ''\naudit:\n  hash_artifacts: true\n",
+        encoding="utf-8",
+    )
+    pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
+
+    result = pipeline.run_issue(42, no_pr=True)
+    state = pipeline.store.load(result["run_id"])
+    outcome_path = tmp_path / state.artifacts["run_outcome"]
+
+    assert outcome_path.with_name(f"{outcome_path.name}.sha256").exists()
+
+    outcome_path.write_text('{"schema_version": 1, "tampered": true}\n', encoding="utf-8")
+    try:
+        pipeline.store.read_json(state.artifacts["run_outcome"])
+    except ValueError as exc:
+        assert "artifact_checksum_failed" in str(exc)
+    else:
+        raise AssertionError("tampered artifact should fail checksum verification")
 
 
 def test_security_policy_can_block_dependency_file_changes(tmp_path):

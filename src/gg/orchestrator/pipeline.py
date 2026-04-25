@@ -77,6 +77,7 @@ class OrchestratorPipeline:
         self.store = RunStore(
             self.project_path,
             audit_hash_events=self.config.audit.hash_events,
+            hash_artifacts=self.config.audit.hash_artifacts,
             audit_sink_path=self.config.audit.external_sink or None,
             keep_state_backup=self.config.recovery.keep_state_backup,
         )

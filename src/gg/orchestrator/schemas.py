@@ -338,6 +338,9 @@ class CostAggregateModel(CompatibleArtifactModel):
     output_tokens: int | None = Field(default=None, ge=0)
     duration_seconds: float | None = Field(default=None, ge=0)
     events: int | None = Field(default=None, ge=0)
+    source: str | None = None
+    available: bool = False
+    exact: bool = False
 
 
 class RunStateModel(CompatibleArtifactModel):

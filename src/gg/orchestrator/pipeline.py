@@ -134,15 +134,11 @@ class OrchestratorPipeline:
                 state.transition(TaskState.CLAIMING, reason="issue selected")
                 self.store.write(state)
                 if not dry_run:
-                    if self.config.task_system.work_label:
-                        self.platform.add_labels(issue.number, [self.config.task_system.work_label])
-                    claim_marker = f"<!-- gg-run-id={state.run_id} stage=claim -->"
-                    if not self._stage_comment_exists(issue.number, claim_marker):
-                        self.platform.add_comment(
-                            issue.number,
-                            f"{claim_marker}\n"
-                            f"gg picked this issue for implementation. Run: `{state.run_id}`",
-                        )
+                    self.platform.claim_task(
+                        issue,
+                        run_id=state.run_id,
+                        work_label=self.config.task_system.work_label,
+                    )
                 state.transition(TaskState.QUEUED, reason="claim complete")
                 state.transition(TaskState.RUN_STARTED, reason="start pipeline")
                 state.transition(TaskState.TASK_ANALYSIS, reason="create task brief")
@@ -1158,13 +1154,7 @@ class OrchestratorPipeline:
                 pr_url=pr_url,
                 pr_number=_parse_pr_number(pr_url),
             )
-            result_marker = f"<!-- gg-run-id={state.run_id} stage=result -->"
-            if not _issue_has_comment_marker(issue, result_marker):
-                self.platform.add_comment(
-                    issue.number,
-                    f"{result_marker}\n"
-                    f"gg completed this run.\n\nPR: {pr_url}",
-                )
+            self.platform.publish_outcome(issue.number, run_id=state.run_id, pr_url=pr_url)
             state.publishing_step = "result_commented"
             self.store.write(state)
             cancelled = self._cancelled_response(state)
@@ -1513,50 +1503,52 @@ class OrchestratorPipeline:
         self.store.write(latest)
 
     def _mark_issue_blocked(self, issue_number: int, run_id: str, message: str) -> None:
-        self._best_effort_labels(
-            issue_number,
-            add=[self.config.task_system.blocked_label],
-            remove=[self.config.task_system.work_label],
-        )
-        self._best_effort_stage_comment(
-            issue_number,
-            run_id,
-            "blocked",
-            f"gg blocked this issue: {message}",
-        )
+        try:
+            self.platform.publish_blocked(
+                issue_number,
+                run_id=run_id,
+                message=f"gg blocked this issue: {message}",
+                work_label=self.config.task_system.work_label,
+                blocked_label=self.config.task_system.blocked_label,
+            )
+        except Exception:
+            return
 
     def _mark_issue_needs_input(self, issue_number: int, run_id: str, message: str) -> None:
-        self._best_effort_labels(
-            issue_number,
-            add=[self.config.task_system.blocked_label],
-            remove=[self.config.task_system.work_label],
-        )
-        self._best_effort_stage_comment(
-            issue_number,
-            run_id,
-            "needs-input",
-            f"gg needs local input to continue: {message}",
-        )
+        try:
+            self.platform.publish_blocked(
+                issue_number,
+                run_id=run_id,
+                message=f"gg needs local input to continue: {message}",
+                work_label=self.config.task_system.work_label,
+                blocked_label=self.config.task_system.blocked_label,
+                stage="needs-input",
+            )
+        except Exception:
+            return
 
     def _mark_issue_failed(self, issue_number: int, run_id: str, message: str) -> None:
-        self._best_effort_labels(
-            issue_number,
-            add=[],
-            remove=[self.config.task_system.work_label, self.config.task_system.blocked_label],
-        )
-        self._best_effort_stage_comment(
-            issue_number,
-            run_id,
-            "failed",
-            f"gg could not complete this issue: {message}",
-        )
+        try:
+            self.platform.publish_failed(
+                issue_number,
+                run_id=run_id,
+                message=f"gg could not complete this issue: {message}",
+                work_label=self.config.task_system.work_label,
+                blocked_label=self.config.task_system.blocked_label,
+            )
+        except Exception:
+            return
 
     def _mark_issue_done(self, issue_number: int) -> None:
-        self._best_effort_labels(
-            issue_number,
-            add=[self.config.task_system.done_label],
-            remove=[self.config.task_system.work_label, self.config.task_system.blocked_label],
-        )
+        try:
+            self.platform.publish_done(
+                issue_number,
+                work_label=self.config.task_system.work_label,
+                blocked_label=self.config.task_system.blocked_label,
+                done_label=self.config.task_system.done_label,
+            )
+        except Exception:
+            return
 
     def _best_effort_labels(self, issue_number: int, *, add: list[str], remove: list[str]) -> None:
         try:
@@ -1569,41 +1561,12 @@ class OrchestratorPipeline:
         except Exception:
             return
 
-    def _best_effort_stage_comment(self, issue_number: int, run_id: str, stage: str, message: str) -> None:
-        marker = f"<!-- gg-run-id={run_id} stage={stage} -->"
-        if self._stage_comment_exists(issue_number, marker):
-            return
-        try:
-            self.platform.add_comment(issue_number, f"{marker}\n{message}")
-        except Exception:
-            return
-
     def _planned_claim_operations(self, issue: Issue, run_id: str) -> list[dict[str, Any]]:
-        operations: list[dict[str, Any]] = []
-        if self.config.task_system.work_label:
-            operations.append(
-                {
-                    "operation": "add_labels",
-                    "issue_number": issue.number,
-                    "labels": [self.config.task_system.work_label],
-                }
-            )
-        operations.append(
-            {
-                "operation": "add_comment",
-                "issue_number": issue.number,
-                "marker": f"<!-- gg-run-id={run_id} stage=claim -->",
-                "body": f"gg picked this issue for implementation. Run: `{run_id}`",
-            }
+        return self.platform.planned_claim_operations(
+            issue,
+            run_id=run_id,
+            work_label=self.config.task_system.work_label,
         )
-        return operations
-
-    def _stage_comment_exists(self, issue_number: int, marker: str) -> bool:
-        try:
-            issue = self.platform.get_issue(issue_number)
-        except Exception:
-            return False
-        return _issue_has_comment_marker(issue, marker)
 
     def _block_on_rate_limit(self, state, issue_number: int, exc: RateLimitThrottleError) -> dict[str, Any]:
         artifact = self.store.write_json(
@@ -1844,10 +1807,6 @@ def _parse_pr_number(pr_url: str) -> int:
     if not match:
         return 0
     return int(next(group for group in match.groups() if group))
-
-
-def _issue_has_comment_marker(issue: Issue, marker: str) -> bool:
-    return any(marker in comment.body for comment in issue.comments)
 
 
 def _waiting_for_input(state) -> bool:

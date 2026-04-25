@@ -637,6 +637,17 @@ def test_platform_adapters_report_capabilities(tmp_path):
     assert gitlab["find_pr"] is True
 
 
+def test_platform_claim_task_uses_stage_marker_idempotency():
+    platform = FakePlatform()
+    run_id = "issue-42-test"
+    platform.issue.comments.append(IssueComment(body=f"{platform.stage_marker(run_id, 'claim')}\nalready claimed"))
+
+    platform.claim_task(platform.issue, run_id=run_id, work_label="gg:in-progress")
+
+    assert platform.labels == [(42, ["gg:in-progress"])]
+    assert platform.comments == []
+
+
 def create_ready_run(
     pipeline: OrchestratorPipeline,
     issue_number: int = 42,

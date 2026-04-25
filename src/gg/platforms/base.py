@@ -86,6 +86,113 @@ class GitPlatform(ABC):
     def validate_auth(self) -> None:
         """Validate tracker CLI authentication before mutating external state."""
 
+    def planned_claim_operations(self, issue: Issue, *, run_id: str, work_label: str) -> list[dict]:
+        """Return the external mutations claim_task would perform."""
+        operations: list[dict] = []
+        if work_label:
+            operations.append(
+                {
+                    "operation": "add_labels",
+                    "issue_number": issue.number,
+                    "labels": [work_label],
+                }
+            )
+        operations.append(
+            {
+                "operation": "add_comment",
+                "issue_number": issue.number,
+                "marker": self.stage_marker(run_id, "claim"),
+                "body": f"gg picked this issue for implementation. Run: `{run_id}`",
+            }
+        )
+        return operations
+
+    def claim_task(self, issue: Issue, *, run_id: str, work_label: str) -> None:
+        """Mark a tracker task as claimed for this orchestrator run."""
+        if work_label:
+            self.add_labels(issue.number, [work_label])
+        self.add_stage_comment_once(
+            issue.number,
+            run_id,
+            "claim",
+            f"gg picked this issue for implementation. Run: `{run_id}`",
+        )
+
+    def publish_blocked(
+        self,
+        issue_number: int,
+        *,
+        run_id: str,
+        message: str,
+        work_label: str,
+        blocked_label: str,
+        stage: str = "blocked",
+    ) -> None:
+        """Publish a blocked/needs-input state to the external tracker."""
+        self.apply_labels(issue_number, add=[blocked_label], remove=[work_label])
+        self.add_stage_comment_once(issue_number, run_id, stage, message)
+
+    def publish_failed(
+        self,
+        issue_number: int,
+        *,
+        run_id: str,
+        message: str,
+        work_label: str,
+        blocked_label: str,
+    ) -> None:
+        """Publish a terminal failure to the external tracker."""
+        self.apply_labels(issue_number, add=[], remove=[work_label, blocked_label])
+        self.add_stage_comment_once(issue_number, run_id, "failed", message)
+
+    def publish_done(
+        self,
+        issue_number: int,
+        *,
+        work_label: str,
+        blocked_label: str,
+        done_label: str,
+    ) -> None:
+        """Publish successful completion labels to the external tracker."""
+        self.apply_labels(issue_number, add=[done_label], remove=[work_label, blocked_label])
+
+    def publish_outcome(self, issue_number: int, *, run_id: str, pr_url: str) -> None:
+        """Publish the final result comment for an issue."""
+        self.add_stage_comment_once(
+            issue_number,
+            run_id,
+            "result",
+            f"gg completed this run.\n\nPR: {pr_url}",
+        )
+
+    def cleanup_claim(self, issue_number: int, *, work_label: str, blocked_label: str) -> None:
+        """Remove transient claim labels from a tracker task."""
+        self.apply_labels(issue_number, add=[], remove=[work_label, blocked_label])
+
+    def apply_labels(self, issue_number: int, *, add: list[str], remove: list[str]) -> None:
+        add_labels = [label for label in add if label]
+        remove_labels = [label for label in remove if label]
+        if add_labels:
+            self.add_labels(issue_number, add_labels)
+        if remove_labels:
+            self.remove_labels(issue_number, remove_labels)
+
+    def add_stage_comment_once(self, issue_number: int, run_id: str, stage: str, message: str) -> None:
+        marker = self.stage_marker(run_id, stage)
+        if self.issue_has_comment_marker(issue_number, marker):
+            return
+        self.add_comment(issue_number, f"{marker}\n{message}")
+
+    def issue_has_comment_marker(self, issue_number: int, marker: str) -> bool:
+        try:
+            issue = self.get_issue(issue_number)
+        except Exception:
+            return False
+        return any(marker in comment.body for comment in issue.comments)
+
+    def stage_marker(self, run_id: str, stage: str) -> str:
+        return f"<!-- gg-run-id={run_id} stage={stage} -->"
+
     @abstractmethod
     def add_comment(self, issue_number: int, body: str) -> None:
         """Add a comment to an issue."""

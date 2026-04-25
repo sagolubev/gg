@@ -47,7 +47,7 @@ class KnowledgeEngine:
     def record_research_done(
         self, *, issue_number: int, files_analyzed: list[str], summary: str = "",
     ) -> None:
-        ev = self._emit(
+        self._emit(
             EventType.RESEARCH_DONE,
             issue_number=issue_number,
             data={"files_analyzed": files_analyzed, "summary": summary},

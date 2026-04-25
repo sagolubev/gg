@@ -126,7 +126,7 @@ def run_deep_observations(
                 console.print(f"    [green]  -> {topic['slug']}.md[/green]")
                 count += 1
             else:
-                console.print(f"    [yellow]  -> empty response, skipped[/yellow]")
+                console.print("    [yellow]  -> empty response, skipped[/yellow]")
         except RuntimeError as e:
             console.print(f"    [yellow]  -> failed: {e}[/yellow]")
 

@@ -176,6 +176,7 @@ class RunStore:
         targets = [run.run_id for run in target_runs]
         if not dry_run:
             for run in target_runs:
+                self._archive_run(run)
                 self._remove_worktrees(run)
                 shutil.rmtree(self.path_for(run.run_id), ignore_errors=True)
         return targets
@@ -198,6 +199,7 @@ class RunStore:
         targets = [run.run_id for run in target_runs]
         if not dry_run:
             for run in target_runs:
+                self._archive_run(run)
                 self._remove_worktrees(run)
                 shutil.rmtree(self.path_for(run.run_id), ignore_errors=True)
         return targets
@@ -257,6 +259,54 @@ class RunStore:
             text=True,
             timeout=60,
         )
+
+    def _archive_run(self, run: RunState) -> None:
+        archive_dir = self.project_path / ".gg" / "runs-archive"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        archive_path = archive_dir / f"{run.run_id}.json"
+        outcome = self._read_outcome(run)
+        summary = {
+            "schema_version": 1,
+            "run_id": run.run_id,
+            "issue": run.issue,
+            "archived_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "source_path": str(self.path_for(run.run_id)),
+            "archive_path": str(archive_path),
+            "removed_worktrees": self._run_worktree_paths(run),
+            "retained_artifacts": {
+                "state": str(self.path_for(run.run_id) / "state.json"),
+                **({"run_outcome": run.artifacts["run_outcome"]} if "run_outcome" in run.artifacts else {}),
+            },
+            "outcome": outcome,
+        }
+        ArchiveSummaryModel.model_validate(summary)
+        tmp = archive_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        tmp.replace(archive_path)
+
+    def _read_outcome(self, run: RunState) -> dict[str, Any] | None:
+        outcome_path = run.artifacts.get("run_outcome")
+        if not outcome_path:
+            return None
+        try:
+            data = json.loads((self.project_path / outcome_path).read_text(encoding="utf-8"))
+            RunOutcomeModel.model_validate(data)
+            return data
+        except (OSError, json.JSONDecodeError, ValueError):
+            return None
+
+    def _run_worktree_paths(self, run: RunState) -> list[str]:
+        paths = [
+            candidate.worktree_path
+            for candidate in run.candidate_states.values()
+            if candidate.worktree_path
+        ]
+        if isinstance(run.baseline, dict) and run.baseline.get("worktree_path"):
+            paths.append(str(run.baseline["worktree_path"]))
+        integration_path = self._integration_worktree_path(run)
+        if integration_path is not None:
+            paths.append(str(integration_path))
+        return paths
 
     def _remove_worktree_path(self, path: Path) -> None:
         result = subprocess.run(

@@ -2305,6 +2305,12 @@ def test_clean_execute_removes_terminal_run_and_worktree(tmp_path):
     assert result["runs"] == [completed["run_id"]]
     assert not (tmp_path / ".gg" / "runs" / completed["run_id"]).exists()
     assert not worktree_path.exists()
+    archive_path = tmp_path / ".gg" / "runs-archive" / f"{completed['run_id']}.json"
+    archive = json.loads(archive_path.read_text(encoding="utf-8"))
+    assert archive["run_id"] == completed["run_id"]
+    assert archive["issue"]["number"] == 42
+    assert archive["outcome"]["status"] == "success"
+    assert str(worktree_path) in archive["removed_worktrees"]
 
 
 def test_clean_removes_orphan_worktrees(tmp_path):

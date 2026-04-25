@@ -16,6 +16,14 @@ from gg.utils.git_ops import get_remote_url, parse_remote_url
 
 
 @dataclass(frozen=True)
+class IssueComment:
+    body: str
+    author: str = ""
+    created_at: str = ""
+    url: str = ""
+
+
+@dataclass(frozen=True)
 class Issue:
     number: int
     title: str

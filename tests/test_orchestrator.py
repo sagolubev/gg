@@ -20,7 +20,8 @@ from gg.orchestrator.pipeline import OrchestratorPipeline
 from gg.orchestrator.rate_limit import RateLimitStore, RateLimitSnapshot, RateLimitThrottleError
 from gg.orchestrator.sandbox import SandboxPolicy, SandboxRunResult, SandboxRuntime
 from gg.orchestrator.state import CandidateState, InvalidTransitionError, RunState, TaskState
-from gg.platforms.base import GitPlatform, Issue
+from gg.orchestrator.store import RunStore
+from gg.platforms.base import GitPlatform, Issue, IssueComment
 from gg.platforms.github import GitHubPlatform
 from gg.platforms.gitlab import GitLabPlatform
 

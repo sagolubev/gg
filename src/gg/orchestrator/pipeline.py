@@ -77,7 +77,7 @@ class OrchestratorPipeline:
                 if dry_run:
                     return {"run_id": state.run_id, "state": state.state.value, "dry_run": True}
 
-            return self._execute_ready_state(state, issue, brief, no_pr=no_pr)
+                return self._execute_ready_state(state, issue, brief, no_pr=no_pr)
         except RateLimitThrottleError as exc:
             if state is None:
                 return self._throttled_response(exc)

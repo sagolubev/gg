@@ -579,12 +579,20 @@ class OrchestratorPipeline:
             self._mark_issue_blocked(issue.number, state.run_id, "Codex CLI is not available")
             return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
 
+        executor = CandidateExecutor(self.project_path, self.agent, self.config)
+        sandbox_error = executor.sandbox_preflight_error()
+        if sandbox_error is not None:
+            state.transition(TaskState.BLOCKED, reason="sandbox runtime unavailable")
+            state.last_error = {"code": "missing_sandbox_runtime", "message": sandbox_error}
+            self.store.write(state)
+            self._mark_issue_blocked(issue.number, state.run_id, sandbox_error)
+            return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
+
         baseline = self._run_baseline_verification(state)
 
         state.transition(TaskState.AGENT_RUNNING, reason="run candidates")
         self.store.write(state)
 
-        executor = CandidateExecutor(self.project_path, self.agent, self.config)
         evaluator = CandidateEvaluator()
         candidate_records: list[dict[str, Any]] = []
         selected: dict[str, Any] | None = None

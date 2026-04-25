@@ -538,6 +538,29 @@ class FakeSandbox:
         )
 
 
+class SandboxRequiredCodexAgent(CodexAgent):
+    def __init__(self):
+        self.analysis_calls = 0
+        self.candidate_generated = False
+
+    def is_available(self) -> bool:
+        return True
+
+    def generate(
+        self,
+        prompt: str,
+        *,
+        cwd: str | None = None,
+        timeout: int | None = None,
+        context: str | None = None,
+    ) -> str:
+        if context and "Task analysis only" in context:
+            self.analysis_calls += 1
+            return "{}"
+        self.candidate_generated = True
+        return "should not run"
+
+
 def init_repo(path: Path) -> None:
     subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
     subprocess.run(["git", "checkout", "-b", "main"], cwd=path, check=True, capture_output=True)
@@ -2468,6 +2491,27 @@ def test_pipeline_runtime_overrides_update_execution_knobs(tmp_path):
     assert pipeline.config.runtime.max_parallel_candidates == 2
     assert pipeline.config.runtime.repair_candidates == 1
     assert pipeline.config.runtime.candidate_timeout_seconds == 45
+
+
+def test_pipeline_blocks_missing_required_sandbox_before_baseline(monkeypatch, tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        "verify:\n  tests: ''\nruntime:\n  require_sandbox_runtime: true\n  allow_unsafe_direct_exec: false\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("gg.orchestrator.sandbox.shutil.which", lambda _: None)
+    agent = SandboxRequiredCodexAgent()
+    platform = FakePlatform()
+
+    result = OrchestratorPipeline(tmp_path, platform=platform, agent=agent).run_issue(42, no_pr=True)
+
+    assert result["state"] == "Blocked"
+    assert result["error"]["code"] == "missing_sandbox_runtime"
+    assert agent.analysis_calls == 1
+    assert agent.candidate_generated is False
+    state = OrchestratorPipeline(tmp_path, platform=platform, agent=FakeAgent()).store.load(result["run_id"])
+    assert "baseline_verification" not in state.artifacts
+    assert not (tmp_path.parent / ".gg-worktrees" / tmp_path.name).exists()
 
 
 def test_cli_issue_help_documents_runtime_overrides():

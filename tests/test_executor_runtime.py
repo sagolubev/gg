@@ -50,11 +50,15 @@ def test_required_missing_sandbox_runtime_fails_before_agent_generate(tmp_path):
         sandbox=MissingSandbox(),
     )
 
-    result = executor.run(run_id="run-fail-closed", issue_number=42, brief=task_brief())
+    try:
+        executor.run(run_id="run-fail-closed", issue_number=42, brief=task_brief())
+    except RuntimeError as exc:
+        assert "sandbox-runtime is required but unavailable" in str(exc)
+    else:
+        raise AssertionError("missing required sandbox should fail before worktree creation")
 
-    assert result.status == "failed"
-    assert "sandbox-runtime is required but unavailable" in (result.error or "")
     assert agent.calls == 0
+    assert not (tmp_path.parent / ".gg-worktrees" / tmp_path.name).exists()
 
 
 def test_allow_unsafe_direct_exec_falls_back_to_agent_generate(tmp_path):

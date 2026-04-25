@@ -184,8 +184,26 @@ class CandidateExecutor:
             metrics=metrics or {},
         )
 
+    def sandbox_preflight_error(self) -> str | None:
+        if not self._requires_sandbox_preflight():
+            return None
+        if self.sandbox.is_available():
+            return None
+        return "sandbox-runtime is required but unavailable"
+
+    def _requires_sandbox_preflight(self) -> bool:
+        return (
+            self.config.runtime.use_sandbox_runtime
+            and self.config.runtime.require_sandbox_runtime
+            and not self.config.runtime.allow_unsafe_direct_exec
+            and (isinstance(self.agent, CodexAgent) or self._sandbox_explicit)
+        )
+
     def run(self, *, run_id: str, issue_number: int, brief: TaskBrief, candidate_id: str = "candidate-1",
             strategy: str = "conservative") -> CandidateResult:
+        sandbox_error = self.sandbox_preflight_error()
+        if sandbox_error is not None:
+            raise RuntimeError(sandbox_error)
         base_commit = current_commit(self.project_path)
         branch_suffix = hashlib.sha256(run_id.encode("utf-8")).hexdigest()[:8]
         branch = f"gg/issue-{issue_number}-{safe_branch_slug(brief.issue['title'])}-{candidate_id}-{branch_suffix}"
@@ -264,24 +282,10 @@ class CandidateExecutor:
         ).run(worktree)[0]
 
     def _generate(self, prompt: str, worktree: Path) -> str:
-        if (
-            self.config.runtime.use_sandbox_runtime
-            and isinstance(self.agent, CodexAgent)
-        ):
+        if self.config.runtime.use_sandbox_runtime and isinstance(self.agent, CodexAgent):
             if self.sandbox.is_available():
                 return self._generate_in_sandbox(prompt, worktree)
-            if (
-                self.config.runtime.require_sandbox_runtime
-                and not self.config.runtime.allow_unsafe_direct_exec
-            ):
-                raise RuntimeError("sandbox-runtime is required but unavailable")
-        if (
-            self.config.runtime.use_sandbox_runtime
-            and self._sandbox_explicit
-            and self.config.runtime.require_sandbox_runtime
-            and not self.config.runtime.allow_unsafe_direct_exec
-            and not self.sandbox.is_available()
-        ):
+        if self.sandbox_preflight_error() is not None:
             raise RuntimeError("sandbox-runtime is required but unavailable")
         return self.agent.generate(
             prompt,

@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import click
 
 from gg import __version__
@@ -176,22 +178,203 @@ def constitution(path, debug):
 
 
 @cli.command()
-def run():
+@click.option("--path", type=click.Path(exists=True), default=".", help="Project path.")
+@click.option("--dry-run", is_flag=True, help="Show the next eligible issue without side effects.")
+@click.option("--no-pr", is_flag=True, help="Run locally without creating a pull request.")
+@click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
+def run(path, dry_run, no_pr, as_json):
     """Supervisor loop: pick issues and orchestrate agents."""
-    click.echo("Not implemented yet.")
+    import json
+
+    from rich.console import Console
+
+    from gg.orchestrator.pipeline import OrchestratorPipeline
+
+    result = OrchestratorPipeline(path).run_next(dry_run=dry_run, no_pr=no_pr)
+    if as_json:
+        click.echo(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    console = Console()
+    console.print(f"[bold]{result.get('state')}[/bold] {result.get('message', '')}")
+    if result.get("issue"):
+        issue_data = result["issue"]
+        console.print(f"Next issue: #{issue_data['number']} {issue_data['title']}")
+    if result.get("run_id"):
+        console.print(f"Run: {result['run_id']}")
+    if result.get("pr_url"):
+        console.print(f"PR: {result['pr_url']}")
 
 
 @cli.command()
 @click.argument("issue_number", type=int)
-def issue(issue_number):
+@click.option("--path", type=click.Path(exists=True), default=".", help="Project path.")
+@click.option("--dry-run", is_flag=True, help="Analyze only; do not call agent or mutate GitHub.")
+@click.option("--no-pr", is_flag=True, help="Run locally without creating a pull request.")
+@click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
+def issue(issue_number, path, dry_run, no_pr, as_json):
     """Process a single GitHub issue."""
-    click.echo(f"Not implemented yet: issue #{issue_number}")
+    import json
+
+    from rich.console import Console
+
+    from gg.orchestrator.pipeline import OrchestratorPipeline
+
+    result = OrchestratorPipeline(path).run_issue(issue_number, dry_run=dry_run, no_pr=no_pr)
+    if as_json:
+        click.echo(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    console = Console()
+    console.print(f"[bold]{result.get('state')}[/bold] run={result.get('run_id')}")
+    if result.get("pr_url"):
+        console.print(f"PR: {result['pr_url']}")
+    if result.get("error"):
+        console.print(f"[red]{result['error']['code']}:[/red] {result['error']['message']}")
 
 
 @cli.command()
-def status():
+@click.argument("run_id", required=False)
+@click.option("--path", type=click.Path(exists=True), default=".", help="Project path.")
+@click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
+def status(run_id, path, as_json):
     """Show status of active tasks."""
-    click.echo("Not implemented yet.")
+    import json
+
+    from rich.console import Console
+    from rich.table import Table
+
+    from gg.orchestrator.pipeline import OrchestratorPipeline
+
+    pipeline = OrchestratorPipeline(path)
+    rows = pipeline.status()
+    if run_id:
+        rows = [row for row in rows if row["run_id"] == run_id]
+    if as_json:
+        click.echo(json.dumps(rows, indent=2, ensure_ascii=False))
+        return
+
+    console = Console()
+    if not rows:
+        console.print("[yellow]No runs found.[/yellow]")
+        return
+    table = Table(title="gg runs")
+    table.add_column("Run")
+    table.add_column("Issue")
+    table.add_column("State")
+    table.add_column("Updated")
+    table.add_column("PR")
+    for row in rows:
+        issue_data = row.get("issue", {})
+        table.add_row(
+            row["run_id"],
+            f"#{issue_data.get('number', '')}",
+            row["state"],
+            row["updated_at"],
+            row.get("pr_url") or "",
+        )
+    console.print(table)
+
+
+@cli.command()
+@click.option("--path", type=click.Path(exists=True), default=".", help="Project path.")
+@click.option("--dry-run/--execute", default=True, help="Preview cleanup unless --execute is used.")
+@click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
+def clean(path, dry_run, as_json):
+    """Prune terminal run metadata."""
+    import json
+
+    from rich.console import Console
+
+    from gg.orchestrator.pipeline import OrchestratorPipeline
+
+    result = OrchestratorPipeline(path).clean(dry_run=dry_run)
+    if as_json:
+        click.echo(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    console = Console()
+    mode = "would remove" if dry_run else "removed"
+    console.print(f"{mode} {result['count']} terminal runs")
+    for run_id in result["runs"]:
+        console.print(f"  {run_id}")
+
+
+@cli.command()
+@click.argument("run_id")
+@click.option("--path", type=click.Path(exists=True), default=".", help="Project path.")
+@click.option("--reason", default="operator requested cancellation", help="Cancellation reason.")
+@click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
+def cancel(run_id, path, reason, as_json):
+    """Cancel a non-terminal run."""
+    import json
+
+    from rich.console import Console
+
+    from gg.orchestrator.pipeline import OrchestratorPipeline
+
+    result = OrchestratorPipeline(path).cancel(run_id, reason=reason)
+    if as_json:
+        click.echo(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    Console().print(f"{result['state']} run={result['run_id']}")
+
+
+@cli.command()
+@click.argument("run_id")
+@click.option("--path", type=click.Path(exists=True), default=".", help="Project path.")
+@click.option("--no-pr", is_flag=True, help="Resume locally without creating a pull request.")
+@click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
+def resume(run_id, path, no_pr, as_json):
+    """Resume a run from durable state."""
+    import json
+
+    from rich.console import Console
+
+    from gg.orchestrator.pipeline import OrchestratorPipeline
+
+    result = OrchestratorPipeline(path).resume(run_id, no_pr=no_pr)
+    if as_json:
+        click.echo(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    Console().print(f"{result['state']} run={result['run_id']}")
+
+
+@cli.command()
+@click.argument("run_id")
+@click.option("--path", type=click.Path(exists=True), default=".", help="Project path.")
+@click.option("--no-pr", is_flag=True, help="Retry locally without creating a pull request.")
+@click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
+def retry(run_id, path, no_pr, as_json):
+    """Retry a recoverable run from durable state."""
+    import json
+
+    from rich.console import Console
+
+    from gg.orchestrator.pipeline import OrchestratorPipeline
+
+    result = OrchestratorPipeline(path).retry(run_id, no_pr=no_pr)
+    if as_json:
+        click.echo(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    Console().print(f"{result['state']} run={result['run_id']}")
+
+
+@cli.command()
+@click.argument("run_id")
+@click.option("--message", required=True, help="Answer or clarification for a blocked run.")
+@click.option("--path", type=click.Path(exists=True), default=".", help="Project path.")
+@click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
+def provide(run_id, message, path, as_json):
+    """Provide local input for a Blocked or NeedsInput run."""
+    import json
+
+    from rich.console import Console
+
+    from gg.orchestrator.pipeline import OrchestratorPipeline
+
+    result = OrchestratorPipeline(path).provide(run_id, message=message)
+    if as_json:
+        click.echo(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    Console().print(f"{result['state']} run={result['run_id']} accepted={result['accepted']}")
 
 
 @cli.command()

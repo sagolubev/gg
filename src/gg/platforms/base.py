@@ -30,9 +30,19 @@ class GitPlatform(ABC):
     def create_pr(self, *, title: str, body: str, head: str, base: str) -> str:
         """Create a pull/merge request. Returns URL."""
 
+    def find_pr(self, *, head: str) -> str | None:
+        """Find an existing open pull/merge request by head branch when supported."""
+        return None
+
     @abstractmethod
     def add_comment(self, issue_number: int, body: str) -> None:
         """Add a comment to an issue."""
+
+    def add_labels(self, issue_number: int, labels: list[str]) -> None:
+        """Add labels to an issue when the platform supports it."""
+
+    def remove_labels(self, issue_number: int, labels: list[str]) -> None:
+        """Remove labels from an issue when the platform supports it."""
 
     @abstractmethod
     def cli_name(self) -> str:

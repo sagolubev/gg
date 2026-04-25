@@ -67,8 +67,27 @@ class GitHubPlatform(GitPlatform):
         ])
         return raw
 
+    def find_pr(self, *, head: str) -> str | None:
+        raw = self._run([
+            "pr", "list",
+            "--state", "open",
+            "--head", head,
+            "--limit", "1",
+            "--json", "url",
+        ])
+        items = json.loads(raw) if raw else []
+        return items[0]["url"] if items else None
+
     def add_comment(self, issue_number: int, body: str) -> None:
         self._run(["issue", "comment", str(issue_number), "--body", body])
+
+    def add_labels(self, issue_number: int, labels: list[str]) -> None:
+        if labels:
+            self._run(["issue", "edit", str(issue_number), "--add-label", ",".join(labels)])
+
+    def remove_labels(self, issue_number: int, labels: list[str]) -> None:
+        if labels:
+            self._run(["issue", "edit", str(issue_number), "--remove-label", ",".join(labels)])
 
     def cli_name(self) -> str:
         return "gh"

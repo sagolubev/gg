@@ -65,8 +65,25 @@ class GitLabPlatform(GitPlatform):
         ])
         return raw
 
+    def find_pr(self, *, head: str) -> str | None:
+        raw = self._run([
+            "mr", "list",
+            "--source-branch", head,
+            "--output", "json",
+        ])
+        items = json.loads(raw) if raw else []
+        return items[0].get("web_url") if items else None
+
     def add_comment(self, issue_number: int, body: str) -> None:
         self._run(["issue", "note", str(issue_number), "--message", body])
+
+    def add_labels(self, issue_number: int, labels: list[str]) -> None:
+        for label in labels:
+            self._run(["issue", "update", str(issue_number), "--label", label])
+
+    def remove_labels(self, issue_number: int, labels: list[str]) -> None:
+        for label in labels:
+            self._run(["issue", "update", str(issue_number), "--unlabel", label])
 
     def cli_name(self) -> str:
         return "glab"

@@ -195,6 +195,7 @@ def run_init(
 
     # 10. Write config
     _write_config(project_path, platform, console)
+    _write_params(project_path, console)
 
     # 11. Summary
     _print_final(project_path, console)
@@ -395,6 +396,63 @@ def _write_config(project_path: Path, platform: str, console: Console) -> None:
         yaml.dump(config, default_flow_style=False, allow_unicode=True),
         encoding="utf-8",
     )
+
+
+def _write_params(project_path: Path, console: Console) -> None:
+    params_path = project_path / ".gg" / "params.yaml"
+    if params_path.exists():
+        console.print("  [dim].gg/params.yaml already exists[/dim]")
+        return
+
+    main_branch = get_main_branch(project_path)
+    params = {
+        "schema_version": 1,
+        "project": {
+            "default_branch": main_branch,
+        },
+        "task_system": {
+            "work_label": "gg:in-progress",
+            "done_label": "gg:done",
+            "blocked_label": "gg:blocked",
+        },
+        "selection": {
+            "include_labels": ["ai-ready"],
+            "exclude_labels": ["gg:in-progress", "gg:blocked", "gg:done"],
+        },
+        "verify": {
+            "tests": _default_verify_command(project_path),
+            "lint": "",
+            "typecheck": "",
+            "allow_known_baseline_failures": False,
+        },
+        "runtime": {
+            "candidates": 1,
+            "max_parallel_candidates": 1,
+            "max_attempts": 1,
+            "repair_candidates": 1,
+            "use_sandbox_runtime": True,
+            "require_sandbox_runtime": False,
+            "candidate_timeout_seconds": 1800,
+            "command_timeout_seconds": 600,
+        },
+        "git": {
+            "author_name": "gg-orchestrator",
+            "author_email": "gg-orchestrator@users.noreply.local",
+        },
+    }
+    params_path.write_text(
+        yaml.dump(params, default_flow_style=False, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+    console.print("  [green]  -> .gg/params.yaml[/green]")
+
+
+def _default_verify_command(project_path: Path) -> str:
+    if (project_path / "pyproject.toml").exists():
+        return "pytest"
+    if (project_path / "package.json").exists():
+        return "npm test"
+    return ""
 
 
 def _print_final(project_path: Path, console: Console) -> None:

@@ -14,6 +14,7 @@ venv/
 .ruff_cache/
 *.so
 .gg/
+.omx/
 openspec/
 AGENTS.md
 CLAUDE.md

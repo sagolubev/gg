@@ -1427,6 +1427,9 @@ def test_pipeline_repairs_after_failed_candidate(tmp_path):
     state = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent()).store.load(result["run_id"])
     assert state.candidate_states["candidate-1"].status == "failed"
     assert state.candidate_states["repair-2-1"].status == "success"
+    assert state.stage_attempts["analysis"] == 1
+    assert state.stage_attempts["execution"] == 2
+    assert state.stage_attempts["evaluation"] == 2
     assert "Repair context:" in agent.prompts[1]
     assert "Parent candidate: candidate-1" in agent.prompts[1]
     repair_result = json.loads(
@@ -1742,6 +1745,65 @@ def test_resume_interrupted_agent_running_marks_stale_candidate(tmp_path):
     assert resumed_state.candidate_states["candidate-1"].status == "failed"
     assert resumed_state.candidate_states["candidate-1"].error == "interrupted before completion"
     assert resumed_state.candidate_states["candidate-1-retry-2"].status == "success"
+
+
+def test_retry_from_ready_state_is_resume_without_execution_attempt_increment(tmp_path):
+    init_repo(tmp_path)
+    pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
+    ready = create_ready_run(pipeline)
+
+    result = pipeline.retry(ready["run_id"], no_pr=True)
+
+    assert result["state"] == "Completed"
+    assert result["retried"] is False
+    assert result["retry_equivalent_to_resume"] is True
+    state = pipeline.store.load(ready["run_id"])
+    assert state.attempt == 1
+    assert state.stage_attempts["execution"] == 1
+
+
+def test_retry_from_agent_running_creates_new_execution_attempt(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        "verify:\n  tests: ''\nruntime:\n  max_attempts: 2\n  repair_candidates: 1\n",
+        encoding="utf-8",
+    )
+    pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
+    ready = create_ready_run(pipeline)
+    state = pipeline.store.load(ready["run_id"])
+    state.transition(TaskState.AGENT_SELECTION, reason="test")
+    state.transition(TaskState.AGENT_RUNNING, reason="test")
+    state.candidate_states["candidate-1"] = CandidateState(status="running")
+    pipeline.store.write(state)
+
+    result = pipeline.retry(ready["run_id"], no_pr=True)
+
+    assert result["state"] == "Completed"
+    assert result["retried"] is True
+    assert result["winner"] == "repair-2-1"
+    retried_state = pipeline.store.load(ready["run_id"])
+    assert retried_state.attempt == 2
+    assert retried_state.candidate_states["candidate-1"].status == "failed"
+    assert retried_state.candidate_states["candidate-1"].error == "manual retry requested"
+    assert retried_state.candidate_states["repair-2-1"].status == "success"
+    assert retried_state.stage_attempts["execution"] == 1
+
+
+def test_retry_from_agent_running_respects_attempt_budget(tmp_path):
+    init_repo(tmp_path)
+    pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
+    ready = create_ready_run(pipeline)
+    state = pipeline.store.load(ready["run_id"])
+    state.transition(TaskState.AGENT_SELECTION, reason="test")
+    state.transition(TaskState.AGENT_RUNNING, reason="test")
+    state.candidate_states["candidate-1"] = CandidateState(status="running")
+    pipeline.store.write(state)
+
+    result = pipeline.retry(ready["run_id"], no_pr=True)
+
+    assert result["state"] == "AgentRunning"
+    assert result["retried"] is False
+    assert "budget is exhausted" in result["message"]
 
 
 def test_keyboard_interrupt_marks_run_recoverable(tmp_path):

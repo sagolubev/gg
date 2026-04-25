@@ -392,20 +392,38 @@ class OrchestratorPipeline:
                 "retried": False,
                 "message": "Terminal runs are immutable; start a new run for a fresh attempt.",
             }
+        if state.state in {TaskState.AGENT_RUNNING, TaskState.RESULT_EVALUATION}:
+            if state.attempt >= state.max_attempts:
+                return {
+                    "run_id": run_id,
+                    "state": state.state.value,
+                    "retried": False,
+                    "message": "Execution attempt budget is exhausted; resume can continue recovery without creating a new attempt.",
+                }
+            self._mark_running_candidates_failed(state, reason="manual retry requested")
+            state.attempt += 1
+            state.recover_to(TaskState.READY_FOR_EXECUTION, reason=f"retry from {state.state.value}")
+            self.store.write(state)
+            return {**self.resume(run_id, no_pr=no_pr), "retried": True}
         if state.state in {
             TaskState.READY_FOR_EXECUTION,
             TaskState.AGENT_SELECTION,
-            TaskState.AGENT_RUNNING,
-            TaskState.RESULT_EVALUATION,
             TaskState.BLOCKED,
             TaskState.NEEDS_INPUT,
+            TaskState.TASK_ANALYSIS,
+            TaskState.CLAIMING,
+            TaskState.RUN_STARTED,
         }:
-            return {**self.resume(run_id, no_pr=no_pr), "retried": True}
+            return {
+                **self.resume(run_id, no_pr=no_pr),
+                "retried": False,
+                "retry_equivalent_to_resume": True,
+            }
         return {
             "run_id": run_id,
             "state": state.state.value,
             "retried": False,
-            "message": "Retry is equivalent to resume only after task analysis has produced a task brief.",
+            "message": "Retry is only available for recoverable runs.",
         }
 
     def clean(self, *, dry_run: bool = True) -> dict[str, Any]:
@@ -440,6 +458,13 @@ class OrchestratorPipeline:
             "cas_objects": cas_objects,
             "count": len(targets) + len(stale_targets),
         }
+
+    def _mark_running_candidates_failed(self, state, *, reason: str) -> None:
+        for candidate in state.candidate_states.values():
+            if candidate.status == "running":
+                candidate.status = "failed"
+                candidate.finished_at = _now_placeholder()
+                candidate.error = reason
 
     def cancel(self, run_id: str, *, reason: str = "operator requested cancellation") -> dict[str, Any]:
         state = self.store.load(run_id)
@@ -664,6 +689,8 @@ class OrchestratorPipeline:
         repair_context: dict[str, Any] | None = None
 
         while state.attempt <= state.max_attempts and selected is None:
+            _increment_stage_attempt(state, "execution")
+            self.store.write(state)
             candidate_count = (
                 self.config.runtime.candidates if state.attempt == 1 else self.config.runtime.repair_candidates
             )
@@ -725,6 +752,7 @@ class OrchestratorPipeline:
             if cancelled:
                 return cancelled
             state.transition(TaskState.RESULT_EVALUATION, reason="candidate set quiescent")
+            _increment_stage_attempt(state, "evaluation")
             evaluation = evaluator.evaluate(
                 candidate_records,
                 attempt=state.attempt,
@@ -1964,6 +1992,8 @@ class OrchestratorPipeline:
         state.artifacts["analysis_agent_response"] = path
 
     def _refresh_task_analysis(self, state, issue: Issue) -> TaskBrief:
+        _increment_stage_attempt(state, "analysis")
+        self.store.write(state)
         analysis_agent = self._task_analysis_agent()
         analyzer = TaskAnalyzer(
             str(self.project_path),
@@ -2024,6 +2054,12 @@ def _waiting_for_input(state) -> bool:
 def _candidate_strategies(count: int) -> list[str]:
     strategies = ["conservative", "test-first", "architecture-aware"]
     return [strategies[index % len(strategies)] for index in range(max(1, count))]
+
+
+def _increment_stage_attempt(state, stage: str) -> None:
+    attempts = dict(state.stage_attempts)
+    attempts[stage] = int(attempts.get(stage, 0)) + 1
+    state.stage_attempts = attempts
 
 
 def _unique_candidate_id(state, base: str) -> str:

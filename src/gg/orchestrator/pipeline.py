@@ -736,7 +736,7 @@ class OrchestratorPipeline:
             self._mark_issue_blocked(issue.number, state.run_id, message)
             return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
 
-        baseline = self._run_baseline_verification(state)
+        baseline = self._run_baseline_verification(state) if self.config.verify.baseline_check else []
 
         state.transition(TaskState.AGENT_RUNNING, reason="run candidates")
         self.store.write(state)
@@ -2081,12 +2081,23 @@ class OrchestratorPipeline:
     def _verification_commands(self) -> list[VerificationCommand]:
         commands: list[VerificationCommand] = []
         configured_categories: set[str] = set()
-        for id_, category, command in (
-            ("tests", "test", self.config.verify.tests),
-            ("lint", "lint", self.config.verify.lint),
-            ("typecheck", "typecheck", self.config.verify.typecheck),
-            ("security", "security", self.config.verify.security),
-        ):
+        configured = (
+            ("tests", "test", self.config.verify.tests, True, ""),
+            ("lint", "lint", self.config.verify.lint, True, ""),
+            ("typecheck", "typecheck", self.config.verify.typecheck, True, ""),
+            ("security", "security", self.config.verify.security, True, ""),
+            ("coverage", "coverage", self.config.verify.coverage, not self.config.verify.advisory_checks, ""),
+            ("format", "format", self.config.verify.format_check, not self.config.verify.advisory_checks, ""),
+            (
+                "dependency-audit",
+                "dependency-audit",
+                self.config.verify.dependency_audit,
+                not self.config.verify.advisory_checks,
+                "",
+            ),
+            ("secret-scan", "security", self.config.verify.secret_scan, True, "secret-scan"),
+        )
+        for id_, category, command, required, parser in configured:
             if command.strip():
                 configured_categories.add(category)
                 commands.append(
@@ -2094,8 +2105,8 @@ class OrchestratorPipeline:
                         id=id_,
                         category=category,
                         command=command,
-                        required=True,
-                        parser=_default_verification_parser(category, command),
+                        required=required,
+                        parser=parser or _default_verification_parser(category, command),
                     )
                 )
         if self.config.verify.discovery_enabled:

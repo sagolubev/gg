@@ -91,7 +91,17 @@ class VerifyConfig:
     def check_commands(self) -> list[str]:
         return [
             cmd
-            for cmd in (self.tests, self.lint, self.typecheck, self.security, *self.custom)
+            for cmd in (
+                self.tests,
+                self.lint,
+                self.typecheck,
+                self.security,
+                self.coverage,
+                self.format_check,
+                self.dependency_audit,
+                self.secret_scan,
+                *self.custom,
+            )
             if cmd.strip()
         ]
 

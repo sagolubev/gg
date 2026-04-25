@@ -3617,6 +3617,74 @@ def test_pipeline_assigns_default_verification_parsers(tmp_path):
     ]
 
 
+def test_pipeline_wires_extended_verification_fields(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        """verify:
+  tests: ''
+  lint: ''
+  typecheck: ''
+  security: ''
+  discovery_enabled: false
+  coverage: coverage run -m pytest
+  format_check: ruff format --check .
+  dependency_audit: pip-audit
+  secret_scan: detect-secrets scan
+""",
+        encoding="utf-8",
+    )
+
+    commands = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())._verification_commands()
+
+    assert [(command.id, command.category, command.required, command.parser) for command in commands] == [
+        ("coverage", "coverage", False, ""),
+        ("format", "format", False, ""),
+        ("dependency-audit", "dependency-audit", False, ""),
+        ("secret-scan", "security", True, "secret-scan"),
+    ]
+
+
+def test_pipeline_can_make_extended_verification_fields_required(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        """verify:
+  tests: ''
+  lint: ''
+  typecheck: ''
+  security: ''
+  discovery_enabled: false
+  advisory_checks: false
+  coverage: coverage run -m pytest
+  format_check: ruff format --check .
+  dependency_audit: pip-audit
+""",
+        encoding="utf-8",
+    )
+
+    commands = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())._verification_commands()
+
+    assert [(command.id, command.required) for command in commands] == [
+        ("coverage", True),
+        ("format", True),
+        ("dependency-audit", True),
+    ]
+
+
+def test_baseline_check_can_be_disabled(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        "verify:\n  tests: ''\n  baseline_check: false\n",
+        encoding="utf-8",
+    )
+
+    result = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent()).run_issue(42, no_pr=True)
+
+    state = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent()).store.load(result["run_id"])
+    assert result["state"] == "Completed"
+    assert "baseline_verification" not in state.artifacts
+    assert state.baseline == {}
+
+
 def test_pipeline_discovers_package_verification_commands_as_advisory(tmp_path):
     init_repo(tmp_path)
     (tmp_path / "package.json").write_text(

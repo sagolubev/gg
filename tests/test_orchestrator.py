@@ -17,6 +17,7 @@ from gg.orchestrator.context import ContextSnapshotStore
 from gg.orchestrator.executor import CandidateExecutor
 from gg.orchestrator.lock import FileLock
 from gg.orchestrator.pipeline import OrchestratorPipeline
+from gg.orchestrator.plugins import create_agent_backend, register_agent_backend, register_platform
 from gg.orchestrator.rate_limit import RateLimitStore, RateLimitSnapshot, RateLimitThrottleError
 from gg.orchestrator.sandbox import SandboxPolicy, SandboxRunResult, SandboxRuntime
 from gg.orchestrator.state import CandidateState, InvalidTransitionError, RunState, TaskState
@@ -983,7 +984,9 @@ def test_init_params_generation(tmp_path):
     config = load_config(tmp_path)
     assert params_path.exists()
     assert config.task_system.work_label == "gg:in-progress"
+    assert config.task_system.platform == "auto"
     assert config.selection.include_labels == ("ai-ready",)
+    assert config.runtime.agent_backend == "codex"
     assert config.runtime.candidates == 1
     assert config.runtime.sandbox_policy.deny_read == ["~/.ssh", ".env"]
     assert config.verify.tests == "pytest"
@@ -1015,6 +1018,28 @@ def test_load_config_reads_sandbox_policy(tmp_path):
     assert config.runtime.sandbox_policy.deny_read == ["secrets.txt"]
     assert config.runtime.sandbox_policy.allow_write == ["tmp"]
     assert config.runtime.sandbox_policy.deny_write == ["dist"]
+
+
+def test_pipeline_uses_registered_platform_and_agent_backend(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        """task_system:
+  platform: fake-platform
+verify:
+  tests: ''
+runtime:
+  agent_backend: fake-agent
+""",
+        encoding="utf-8",
+    )
+    register_platform("fake-platform", lambda project_path: FakePlatform())
+    register_agent_backend("fake-agent", FakeAgent)
+
+    result = OrchestratorPipeline(tmp_path).run_issue(42, no_pr=True)
+
+    assert result["state"] == "Completed"
+    assert result["winner"] == "candidate-1"
+    assert isinstance(create_agent_backend("fake-agent"), FakeAgent)
 
 
 def test_sandbox_policy_settings_shape():

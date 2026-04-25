@@ -411,6 +411,7 @@ def _write_params(project_path: Path, console: Console) -> None:
             "default_branch": main_branch,
         },
         "task_system": {
+            "platform": "auto",
             "work_label": "gg:in-progress",
             "done_label": "gg:done",
             "blocked_label": "gg:blocked",
@@ -426,6 +427,7 @@ def _write_params(project_path: Path, console: Console) -> None:
             "allow_known_baseline_failures": False,
         },
         "runtime": {
+            "agent_backend": "codex",
             "candidates": 1,
             "max_parallel_candidates": 1,
             "max_attempts": 1,

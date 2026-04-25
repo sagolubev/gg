@@ -12,6 +12,7 @@ from gg.utils.git_ops import get_main_branch
 
 @dataclass(frozen=True)
 class TaskSystemConfig:
+    platform: str = "auto"
     work_label: str = "gg:in-progress"
     done_label: str = "gg:done"
     blocked_label: str = "gg:blocked"
@@ -25,6 +26,7 @@ class SelectionConfig:
 
 @dataclass(frozen=True)
 class RuntimeConfig:
+    agent_backend: str = "codex"
     candidates: int = 1
     max_parallel_candidates: int = 1
     max_attempts: int = 1
@@ -94,6 +96,7 @@ def load_config(project_path: str | Path) -> GGConfig:
             author_email=git.get("author_email", "gg-orchestrator@users.noreply.local"),
         ),
         task_system=TaskSystemConfig(
+            platform=str(task_system.get("platform", raw.get("platform", "auto"))),
             work_label=task_system.get("work_label", "gg:in-progress"),
             done_label=task_system.get("done_label", "gg:done"),
             blocked_label=task_system.get("blocked_label", "gg:blocked"),
@@ -109,6 +112,7 @@ def load_config(project_path: str | Path) -> GGConfig:
             allow_known_baseline_failures=bool(verify.get("allow_known_baseline_failures", False)),
         ),
         runtime=RuntimeConfig(
+            agent_backend=str(runtime.get("agent_backend", raw.get("agent_backend", "codex"))),
             candidates=max(1, int(runtime.get("candidates", 1))),
             max_parallel_candidates=max(1, int(runtime.get("max_parallel_candidates", 1))),
             max_attempts=max(1, int(runtime.get("max_attempts", 1))),

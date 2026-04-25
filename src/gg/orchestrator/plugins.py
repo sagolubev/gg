@@ -1,0 +1,67 @@
+from __future__ import annotations
+
+from collections.abc import Callable
+from pathlib import Path
+
+from gg.agents.base import AgentBackend
+from gg.agents.codex import CodexAgent
+from gg.platforms.base import GitPlatform, detect_platform
+from gg.platforms.github import GitHubPlatform
+from gg.platforms.gitlab import GitLabPlatform
+
+PlatformFactory = Callable[[str | Path], GitPlatform]
+AgentFactory = Callable[[], AgentBackend]
+
+
+_PLATFORM_FACTORIES: dict[str, PlatformFactory] = {
+    "github": lambda project_path: GitHubPlatform(str(project_path)),
+    "gitlab": lambda project_path: GitLabPlatform(str(project_path)),
+}
+
+_AGENT_FACTORIES: dict[str, AgentFactory] = {
+    "codex": CodexAgent,
+}
+
+
+def register_platform(name: str, factory: PlatformFactory) -> None:
+    normalized = _normalize_name(name)
+    if normalized == "auto":
+        raise ValueError("'auto' is reserved for platform auto-detection")
+    _PLATFORM_FACTORIES[normalized] = factory
+
+
+def register_agent_backend(name: str, factory: AgentFactory) -> None:
+    _AGENT_FACTORIES[_normalize_name(name)] = factory
+
+
+def available_platforms() -> tuple[str, ...]:
+    return tuple(sorted(_PLATFORM_FACTORIES))
+
+
+def available_agent_backends() -> tuple[str, ...]:
+    return tuple(sorted(_AGENT_FACTORIES))
+
+
+def create_platform(name: str, project_path: str | Path) -> GitPlatform:
+    selected = _normalize_name(name)
+    if selected == "auto":
+        detected = detect_platform(project_path)
+        selected = detected if detected in _PLATFORM_FACTORIES else "github"
+    try:
+        return _PLATFORM_FACTORIES[selected](project_path)
+    except KeyError as exc:
+        supported = ", ".join(("auto", *available_platforms()))
+        raise ValueError(f"Unsupported task platform '{name}'. Supported: {supported}") from exc
+
+
+def create_agent_backend(name: str) -> AgentBackend:
+    selected = _normalize_name(name)
+    try:
+        return _AGENT_FACTORIES[selected]()
+    except KeyError as exc:
+        supported = ", ".join(available_agent_backends())
+        raise ValueError(f"Unsupported agent backend '{name}'. Supported: {supported}") from exc
+
+
+def _normalize_name(name: str) -> str:
+    return name.strip().lower().replace("_", "-")

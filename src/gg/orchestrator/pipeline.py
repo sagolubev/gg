@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any
 
 from gg.agents.base import AgentBackend
-from gg.agents.codex import CodexAgent
 from gg.knowledge.engine import KnowledgeEngine
 from gg.orchestrator.config import GGConfig, load_config
 from gg.orchestrator.context import ContextSnapshotStore
@@ -17,15 +16,14 @@ from gg.orchestrator.executor import CandidateExecutor
 from gg.orchestrator.git import changed_files as git_changed_files
 from gg.orchestrator.git import commit_all, diff as git_diff, push_branch
 from gg.orchestrator.lock import LockManager
+from gg.orchestrator.plugins import create_agent_backend, create_platform
 from gg.orchestrator.rate_limit import RateLimitThrottleError
 from gg.orchestrator.state import CandidateState, TaskState
 from gg.orchestrator.state import TERMINAL_STATES
 from gg.orchestrator.store import RunStore
 from gg.orchestrator.task_analysis import TaskAnalyzer, TaskBrief
 from gg.orchestrator.verification import VerificationRunner
-from gg.platforms.base import GitPlatform, Issue, detect_platform
-from gg.platforms.github import GitHubPlatform
-from gg.platforms.gitlab import GitLabPlatform
+from gg.platforms.base import GitPlatform, Issue
 from gg.utils.git_ops import find_repo_root
 
 
@@ -42,8 +40,8 @@ class OrchestratorPipeline:
         self.config: GGConfig = load_config(self.project_path)
         self.store = RunStore(self.project_path)
         self.locks = LockManager(self.project_path)
-        self.platform = platform or self._platform()
-        self.agent = agent or CodexAgent()
+        self.platform = platform or create_platform(self.config.task_system.platform, self.project_path)
+        self.agent = agent or create_agent_backend(self.config.runtime.agent_backend)
         self.knowledge = KnowledgeEngine(self.project_path)
 
     def run_issue(self, issue_number: int, *, dry_run: bool = False, no_pr: bool = False) -> dict[str, Any]:
@@ -816,12 +814,6 @@ class OrchestratorPipeline:
             "reset_at": exc.snapshot.reset_at,
             "remaining": exc.snapshot.remaining,
         }
-
-    def _platform(self) -> GitPlatform:
-        platform = detect_platform(self.project_path)
-        if platform == "gitlab":
-            return GitLabPlatform(str(self.project_path))
-        return GitHubPlatform(str(self.project_path))
 
     def _eligible_issues(self, issues: list[Issue]) -> list[Issue]:
         include = set(self.config.selection.include_labels)

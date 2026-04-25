@@ -1128,8 +1128,8 @@ def test_pipeline_no_pr_completes_with_one_candidate(tmp_path):
     assert verification["checks"][0]["id"] == "tests"
     assert verification["checks"][0]["category"] == "test"
     assert verification["required_passed"] is True
+    assert (run_dir / "artifacts" / "candidate-selection.json").exists()
     assert (run_dir / "artifacts" / "evaluation.json").exists()
-    assert (run_dir / "artifacts" / "execution-evaluation.json").exists()
     assert (run_dir / "artifacts" / "run-outcome.json").exists()
     assert (run_dir / "artifacts" / "run-summary.json").exists()
     assert (run_dir / "pipeline.jsonl").exists()
@@ -1295,14 +1295,12 @@ def test_pipeline_evaluator_can_choose_later_more_focused_candidate(tmp_path):
     assert result["state"] == "Completed"
     assert result["winner"] == "candidate-2"
     run_dir = next((tmp_path / ".gg" / "runs").glob("*"))
+    selection = json.loads((run_dir / "artifacts" / "candidate-selection.json").read_text(encoding="utf-8"))
     evaluation = json.loads((run_dir / "artifacts" / "evaluation.json").read_text(encoding="utf-8"))
-    execution_evaluation = json.loads(
-        (run_dir / "artifacts" / "execution-evaluation.json").read_text(encoding="utf-8")
-    )
-    assert evaluation["winner"] == "candidate-2"
-    assert execution_evaluation["selected_candidate_id"] == "candidate-2"
-    assert execution_evaluation["traffic_light"] == "green"
-    assert evaluation["candidates"][1]["score"] > evaluation["candidates"][0]["score"]
+    assert selection["winner"] == "candidate-2"
+    assert evaluation["selected_candidate_id"] == "candidate-2"
+    assert evaluation["traffic_light"] == "green"
+    assert selection["candidates"][1]["score"] > selection["candidates"][0]["score"]
 
 
 def test_candidate_evaluator_rejects_policy_violations_even_when_successful():
@@ -1635,6 +1633,29 @@ def test_pipeline_uses_analysis_timeout_for_task_analysis_agent(tmp_path):
 
     assert result["state"] == "ReadyForExecution"
     assert agent.timeouts == [123]
+
+
+def test_pipeline_uses_analysis_context_budget(monkeypatch, tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        "verify:\n  tests: ''\nanalysis:\n  max_context_tokens: 10\n",
+        encoding="utf-8",
+    )
+
+    class LargeContextKnowledge:
+        def __init__(self, project_path):
+            self.project_path = project_path
+
+        def context_for_issue(self, title, body):
+            return "x" * 1000
+
+    monkeypatch.setattr("gg.orchestrator.task_analysis.KnowledgeEngine", LargeContextKnowledge)
+    agent = ContextLimitAnalysisAgent(limit=1000)
+
+    result = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=agent).run_issue(42, dry_run=True)
+
+    assert result["state"] == "ReadyForExecution"
+    assert len(agent.prompts[0].split("Project context:\n", 1)[1]) == 40
 
 
 def test_task_analyzer_falls_back_when_agent_json_is_malformed(tmp_path):
@@ -2272,14 +2293,14 @@ def test_resume_publishing_rejects_invalid_evaluation_artifact(tmp_path):
     state.recover_to(TaskState.OUTCOME_PUBLISHING, reason="test invalid evaluation")
     evaluation_path = tmp_path / ".gg" / "runs" / state.run_id / "artifacts" / "evaluation.json"
     evaluation_path.parent.mkdir(parents=True, exist_ok=True)
-    evaluation_path.write_text('{"schema_version": 1, "winner": 42, "candidates": []}\n', encoding="utf-8")
+    evaluation_path.write_text('{"schema_version": 1, "selected_candidate_id": 42, "candidates": []}\n', encoding="utf-8")
     state.artifacts["evaluation"] = str(evaluation_path.relative_to(tmp_path))
     pipeline.store.write(state)
 
     try:
         pipeline.resume(ready["run_id"])
     except ValueError as exc:
-        assert "artifacts/evaluation.json.winner" in str(exc)
+        assert "artifacts/evaluation.json.selected_candidate_id" in str(exc)
     else:
         raise AssertionError("invalid evaluation artifact should fail schema validation on resume")
 
@@ -2911,6 +2932,23 @@ def test_pipeline_blocks_missing_required_sandbox_before_baseline(monkeypatch, t
     assert not (tmp_path.parent / ".gg-worktrees" / tmp_path.name).exists()
 
 
+def test_agent_handoff_is_persisted_before_candidate_setup(monkeypatch, tmp_path):
+    init_repo(tmp_path)
+    observed: list[bool] = []
+    original_run_setup = CandidateExecutor._run_setup
+
+    def assert_handoff_before_setup(self, worktree):
+        observed.append(bool(list((tmp_path / ".gg" / "runs").glob("*/candidates/candidate-1/agent-handoff.json"))))
+        return original_run_setup(self, worktree)
+
+    monkeypatch.setattr(CandidateExecutor, "_run_setup", assert_handoff_before_setup)
+
+    result = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent()).run_issue(42, no_pr=True)
+
+    assert result["state"] == "Completed"
+    assert observed == [True]
+
+
 def test_cli_issue_help_documents_runtime_overrides():
     result = CliRunner().invoke(cli, ["issue", "--help"])
 
@@ -2965,6 +3003,7 @@ def test_init_params_generation(tmp_path):
     assert config.verify.block_on_security_high is True
     assert config.log.mask_secrets is True
     assert config.cost.mode == "duration-only"
+    assert config.analysis.max_context_tokens == 60000
     assert config.evaluation.max_context_tokens == 60000
     assert config.ci.forbid_interactive_prompts is True
     assert config.recovery.keep_state_backup is True
@@ -3016,6 +3055,7 @@ log:
     assert merged["runtime"]["port_range"] == [41000, 45000]
     assert merged["log"]["mask_secrets"] is True
     assert merged["cost"]["mode"] == "duration-only"
+    assert merged["analysis"]["max_context_tokens"] == 60000
     assert merged["evaluation"]["max_context_tokens"] == 60000
     assert merged["ci"]["forbid_interactive_prompts"] is True
     assert merged["recovery"]["keep_state_backup"] is True
@@ -3053,6 +3093,16 @@ cost:
   mode: token-estimate
   max_usd_per_run: 3.5
   max_tokens_per_run: 10000
+analysis:
+  max_context_tokens: 555
+  max_issue_body_chars: 666
+  max_summary_chars: 77
+  max_project_context_chars: 888
+  max_comments: 4
+  max_comment_body_chars: 99
+  max_inputs: 3
+  max_input_message_chars: 111
+  max_agent_response_chars: 222
 evaluation:
   max_context_tokens: 111
   max_diff_lines_per_candidate: 222
@@ -3092,6 +3142,15 @@ recovery:
     assert config.cost.mode == "token-estimate"
     assert config.cost.max_usd_per_run == 3.5
     assert config.cost.max_tokens_per_run == 10000
+    assert config.analysis.max_context_tokens == 555
+    assert config.analysis.max_issue_body_chars == 666
+    assert config.analysis.max_summary_chars == 77
+    assert config.analysis.max_project_context_chars == 888
+    assert config.analysis.max_comments == 4
+    assert config.analysis.max_comment_body_chars == 99
+    assert config.analysis.max_inputs == 3
+    assert config.analysis.max_input_message_chars == 111
+    assert config.analysis.max_agent_response_chars == 222
     assert config.evaluation.max_context_tokens == 111
     assert config.evaluation.max_diff_lines_per_candidate == 222
     assert config.evaluation.max_log_chars_per_check == 333

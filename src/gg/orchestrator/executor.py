@@ -23,6 +23,7 @@ from gg.orchestrator.verification import CheckResult, VerificationRunner
 
 NEEDS_INPUT_PREFIX = "NEEDS_INPUT:"
 CandidateStatusCallback = Callable[[dict[str, Any]], None]
+AgentHandoffCallback = Callable[["AgentHandoff"], str | None]
 
 HOST_ENV_ALLOWLIST = frozenset(
     {
@@ -212,6 +213,10 @@ class CandidateExecutor:
         strategy: str = "conservative",
         repair_context: dict[str, Any] | None = None,
         on_status: CandidateStatusCallback | None = None,
+        on_handoff: AgentHandoffCallback | None = None,
+        attempt: int = 1,
+        task_brief_path: str = "",
+        context_snapshot_path: str = "",
     ) -> CandidateResult:
         sandbox_error = self.sandbox_preflight_error()
         if sandbox_error is not None:
@@ -227,6 +232,21 @@ class CandidateExecutor:
         )
         if on_status is not None:
             on_status({"worktree_path": str(worktree), "branch": branch})
+        if on_handoff is not None:
+            on_handoff(
+                self.build_agent_handoff(
+                    run_id=run_id,
+                    candidate_id=candidate_id,
+                    issue=brief.issue,
+                    worktree_path=worktree,
+                    base_commit=base_commit,
+                    instructions=f"strategy={strategy}\n{_repair_context_summary(repair_context)}".strip(),
+                    attempt=attempt,
+                    task_brief_path=task_brief_path,
+                    context_snapshot_path=context_snapshot_path,
+                    artifacts={},
+                )
+            )
         prompt = self._prompt(brief, strategy=strategy, repair_context=repair_context)
         started = time.monotonic()
         runtime: dict[str, Any] = {}
@@ -484,6 +504,14 @@ def _repair_context_section(repair_context: dict[str, Any] | None) -> str:
     if failed_commands:
         lines.append(f"- Failed verification commands: {', '.join(map(str, failed_commands))[:1000]}")
     return "\n".join(lines) + "\n\n"
+
+
+def _repair_context_summary(repair_context: dict[str, Any] | None) -> str:
+    if not repair_context:
+        return ""
+    parent = repair_context.get("parent_candidate_id") or "unknown"
+    feedback = str(repair_context.get("feedback") or "").strip()
+    return f"repair parent={parent}; feedback={feedback[:500]}"
 
 
 def _utc_now() -> str:

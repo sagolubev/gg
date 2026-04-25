@@ -616,9 +616,9 @@ def _validate_json_artifact(relative_path: str, data: dict[str, Any]) -> None:
         schema = RawIssueArtifactModel
     elif re.match(r"artifacts/analysis-agent-response-v\d+\.json$", relative_path):
         schema = AnalysisAgentResponseModel
-    elif relative_path == "artifacts/evaluation.json":
+    elif relative_path == "artifacts/candidate-selection.json":
         schema = EvaluationArtifactModel
-    elif relative_path == "artifacts/execution-evaluation.json" or relative_path.endswith("/execution-evaluation.json"):
+    elif relative_path == "artifacts/evaluation.json" or relative_path.endswith("/execution-evaluation.json"):
         schema = ExecutionEvaluationModel
     elif relative_path == "artifacts/run-outcome.json" or relative_path.endswith("/run-outcome.json"):
         schema = RunOutcomeModel

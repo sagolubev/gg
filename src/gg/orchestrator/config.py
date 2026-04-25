@@ -127,6 +127,31 @@ class CostConfig:
 
 
 @dataclass(frozen=True)
+class AnalysisConfig:
+    max_context_tokens: int = 60000
+    max_issue_body_chars: int = 12000
+    max_summary_chars: int = 1200
+    max_project_context_chars: int = 12000
+    max_comments: int = 10
+    max_comment_body_chars: int = 2000
+    max_inputs: int = 10
+    max_input_message_chars: int = 2000
+    max_agent_response_chars: int = 12000
+
+    def to_limits(self) -> dict[str, int]:
+        return {
+            "max_issue_body_chars": self.max_issue_body_chars,
+            "max_summary_chars": self.max_summary_chars,
+            "max_project_context_chars": self.max_project_context_chars,
+            "max_comments": self.max_comments,
+            "max_comment_body_chars": self.max_comment_body_chars,
+            "max_inputs": self.max_inputs,
+            "max_input_message_chars": self.max_input_message_chars,
+            "max_agent_response_chars": self.max_agent_response_chars,
+        }
+
+
+@dataclass(frozen=True)
 class EvaluationConfig:
     max_context_tokens: int = 60000
     max_diff_lines_per_candidate: int = 2000
@@ -161,6 +186,7 @@ class GGConfig:
     cleanup: CleanupConfig = field(default_factory=CleanupConfig)
     log: LogConfig = field(default_factory=LogConfig)
     cost: CostConfig = field(default_factory=CostConfig)
+    analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
     ci: CIConfig = field(default_factory=CIConfig)
     recovery: RecoveryConfig = field(default_factory=RecoveryConfig)
@@ -261,6 +287,17 @@ def default_params(project_path: str | Path) -> dict[str, Any]:
             "max_usd_per_run": None,
             "max_tokens_per_run": None,
         },
+        "analysis": {
+            "max_context_tokens": 60000,
+            "max_issue_body_chars": 12000,
+            "max_summary_chars": 1200,
+            "max_project_context_chars": 12000,
+            "max_comments": 10,
+            "max_comment_body_chars": 2000,
+            "max_inputs": 10,
+            "max_input_message_chars": 2000,
+            "max_agent_response_chars": 12000,
+        },
         "evaluation": {
             "max_context_tokens": 60000,
             "max_diff_lines_per_candidate": 2000,
@@ -301,6 +338,7 @@ def load_config(project_path: str | Path) -> GGConfig:
     cleanup = _mapping(raw.get("cleanup"))
     log = _mapping(raw.get("log"))
     cost = _mapping(raw.get("cost"))
+    analysis = _mapping(raw.get("analysis"))
     evaluation = _mapping(raw.get("evaluation"))
     ci = _mapping(raw.get("ci"))
     recovery = _mapping(raw.get("recovery"))
@@ -414,6 +452,17 @@ def load_config(project_path: str | Path) -> GGConfig:
                     "max_usd_per_run": cost.get("max_usd_per_run"),
                     "max_tokens_per_run": cost.get("max_tokens_per_run"),
                 },
+                "analysis": {
+                    "max_context_tokens": analysis.get("max_context_tokens", 60000),
+                    "max_issue_body_chars": analysis.get("max_issue_body_chars", 12000),
+                    "max_summary_chars": analysis.get("max_summary_chars", 1200),
+                    "max_project_context_chars": analysis.get("max_project_context_chars", 12000),
+                    "max_comments": analysis.get("max_comments", 10),
+                    "max_comment_body_chars": analysis.get("max_comment_body_chars", 2000),
+                    "max_inputs": analysis.get("max_inputs", 10),
+                    "max_input_message_chars": analysis.get("max_input_message_chars", 2000),
+                    "max_agent_response_chars": analysis.get("max_agent_response_chars", 12000),
+                },
                 "evaluation": {
                     "max_context_tokens": evaluation.get("max_context_tokens", 60000),
                     "max_diff_lines_per_candidate": evaluation.get(
@@ -525,6 +574,17 @@ def load_config(project_path: str | Path) -> GGConfig:
             max_usd_per_run=model.cost.max_usd_per_run,
             max_tokens_per_run=model.cost.max_tokens_per_run,
         ),
+        analysis=AnalysisConfig(
+            max_context_tokens=model.analysis.max_context_tokens,
+            max_issue_body_chars=model.analysis.max_issue_body_chars,
+            max_summary_chars=model.analysis.max_summary_chars,
+            max_project_context_chars=model.analysis.max_project_context_chars,
+            max_comments=model.analysis.max_comments,
+            max_comment_body_chars=model.analysis.max_comment_body_chars,
+            max_inputs=model.analysis.max_inputs,
+            max_input_message_chars=model.analysis.max_input_message_chars,
+            max_agent_response_chars=model.analysis.max_agent_response_chars,
+        ),
         evaluation=EvaluationConfig(
             max_context_tokens=model.evaluation.max_context_tokens,
             max_diff_lines_per_candidate=model.evaluation.max_diff_lines_per_candidate,
@@ -603,6 +663,17 @@ def _reject_unknown_config_keys(raw: dict[str, Any], location: str) -> None:
         "cleanup": {"blocked_timeout_days"},
         "log": {"max_size_mb", "max_command_log_chars", "mask_secrets"},
         "cost": {"enabled", "mode", "max_usd_per_run", "max_tokens_per_run"},
+        "analysis": {
+            "max_context_tokens",
+            "max_issue_body_chars",
+            "max_summary_chars",
+            "max_project_context_chars",
+            "max_comments",
+            "max_comment_body_chars",
+            "max_inputs",
+            "max_input_message_chars",
+            "max_agent_response_chars",
+        },
         "evaluation": {
             "max_context_tokens",
             "max_diff_lines_per_candidate",

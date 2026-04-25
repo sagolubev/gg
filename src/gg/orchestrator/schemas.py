@@ -169,6 +169,18 @@ class CostConfigModel(StrictArtifactModel):
     max_tokens_per_run: int | None = Field(default=None, ge=0)
 
 
+class AnalysisConfigModel(StrictArtifactModel):
+    max_context_tokens: int = Field(default=60000, ge=1)
+    max_issue_body_chars: int = Field(default=12000, ge=1)
+    max_summary_chars: int = Field(default=1200, ge=1)
+    max_project_context_chars: int = Field(default=12000, ge=1)
+    max_comments: int = Field(default=10, ge=0)
+    max_comment_body_chars: int = Field(default=2000, ge=1)
+    max_inputs: int = Field(default=10, ge=0)
+    max_input_message_chars: int = Field(default=2000, ge=1)
+    max_agent_response_chars: int = Field(default=12000, ge=1)
+
+
 class EvaluationConfigModel(StrictArtifactModel):
     max_context_tokens: int = Field(default=60000, ge=1)
     max_diff_lines_per_candidate: int = Field(default=2000, ge=1)
@@ -200,6 +212,7 @@ class GGConfigModel(StrictArtifactModel):
     cleanup: CleanupConfigModel = Field(default_factory=CleanupConfigModel)
     log: LogConfigModel = Field(default_factory=LogConfigModel)
     cost: CostConfigModel = Field(default_factory=CostConfigModel)
+    analysis: AnalysisConfigModel = Field(default_factory=AnalysisConfigModel)
     evaluation: EvaluationConfigModel = Field(default_factory=EvaluationConfigModel)
     ci: CIConfigModel = Field(default_factory=CIConfigModel)
     recovery: RecoveryConfigModel = Field(default_factory=RecoveryConfigModel)

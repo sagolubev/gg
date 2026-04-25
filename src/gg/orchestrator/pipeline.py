@@ -46,7 +46,6 @@ from gg.orchestrator.store import RunStore
 from gg.orchestrator.task_analysis import (
     MAX_COMMENTS,
     MAX_COMMENT_BODY_CHARS,
-    MAX_AGENT_RESPONSE_CHARS,
     MAX_INPUTS,
     MAX_INPUT_MESSAGE_CHARS,
     MAX_ISSUE_BODY_CHARS,
@@ -217,8 +216,9 @@ class OrchestratorPipeline:
                     str(self.project_path),
                     agent=analysis_agent,
                     timeout=self.config.runtime.analysis_timeout_seconds,
-                    max_context_tokens=self.config.evaluation.max_context_tokens,
+                    max_context_tokens=self.config.analysis.max_context_tokens,
                     model_context_tokens=_agent_context_window_tokens(analysis_agent),
+                    limits=self.config.analysis.to_limits(),
                 )
                 brief = analyzer.analyze(issue, inputs=[])
                 self._write_task_analysis_artifacts(shadow_store, state, issue, brief)
@@ -733,13 +733,17 @@ class OrchestratorPipeline:
                 evaluated_at=_now_placeholder(),
             )
             selected = evaluation.winner
-            evaluation_path = self._write_evaluation(state, evaluation.artifact)
+            state.artifacts["candidate_selection"] = self._write_candidate_selection(
+                state,
+                evaluation.artifact,
+            )
+            if evaluation.execution_evaluation is None:
+                state.fail(code="missing_evaluation", message="candidate evaluator did not produce execution evaluation")
+                self.store.write(state)
+                return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
+            evaluation_path = self._write_evaluation(state, evaluation.execution_evaluation)
             state.artifacts["evaluation"] = evaluation_path
-            if evaluation.execution_evaluation is not None:
-                state.artifacts["execution_evaluation"] = self._write_execution_evaluation(
-                    state,
-                    evaluation.execution_evaluation,
-                )
+            state.artifacts["execution_evaluation"] = evaluation_path
             self.store.write(state)
             needs_input = next(
                 (record for record in attempt_records if record["effective_status"] == "needs_input"),
@@ -910,6 +914,18 @@ class OrchestratorPipeline:
         strategy: str,
         repair_context: dict[str, Any] | None,
     ) -> dict[str, Any]:
+        candidate_dir = f"candidates/{candidate_id}"
+        handoff_artifact: dict[str, str] = {}
+
+        def persist_handoff(handoff) -> str:
+            path = self.store.write_json(
+                state.run_id,
+                f"{candidate_dir}/agent-handoff.json",
+                handoff.to_dict(),
+            )
+            handoff_artifact["path"] = path
+            return path
+
         candidate = executor.run(
             run_id=state.run_id,
             issue_number=issue.number,
@@ -917,29 +933,35 @@ class OrchestratorPipeline:
             candidate_id=candidate_id,
             strategy=strategy,
             repair_context=repair_context,
+            attempt=state.attempt,
+            task_brief_path=state.artifacts.get("task_brief", ""),
+            context_snapshot_path=state.artifacts.get("context_snapshot", ""),
             on_status=lambda payload: self._update_candidate_runtime_state(
                 state.run_id,
                 candidate_id,
                 payload,
             ),
+            on_handoff=persist_handoff,
         )
         verification_started = time.monotonic()
-        candidate_dir = f"candidates/{candidate.candidate_id}"
-        handoff_path = self.store.write_json(
-            state.run_id,
-            f"{candidate_dir}/agent-handoff.json",
-            executor.build_agent_handoff(
-                run_id=state.run_id,
-                candidate_id=candidate.candidate_id,
-                issue=brief.issue,
-                worktree_path=candidate.worktree_path,
-                base_commit=candidate.base_commit,
-                instructions=f"strategy={strategy}\n{_repair_context_summary(repair_context)}".strip(),
-                attempt=state.attempt,
-                task_brief_path=state.artifacts.get("task_brief", ""),
-                context_snapshot_path=state.artifacts.get("context_snapshot", ""),
-            ).to_dict(),
-        )
+        handoff_path = handoff_artifact.get("path")
+        if not handoff_path:
+            candidate_dir = f"candidates/{candidate.candidate_id}"
+            handoff_path = self.store.write_json(
+                state.run_id,
+                f"{candidate_dir}/agent-handoff.json",
+                executor.build_agent_handoff(
+                    run_id=state.run_id,
+                    candidate_id=candidate.candidate_id,
+                    issue=brief.issue,
+                    worktree_path=candidate.worktree_path,
+                    base_commit=candidate.base_commit,
+                    instructions=f"strategy={strategy}\n{_repair_context_summary(repair_context)}".strip(),
+                    attempt=state.attempt,
+                    task_brief_path=state.artifacts.get("task_brief", ""),
+                    context_snapshot_path=state.artifacts.get("context_snapshot", ""),
+                ).to_dict(),
+            )
         if candidate.status == "setup_failed":
             verification = [CheckResult(command="", status="skipped", exit_code=None, attempts=0)]
         else:
@@ -1301,7 +1323,7 @@ class OrchestratorPipeline:
             self.store.write(state)
             return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
         evaluation = self.store.read_json(evaluation_path)
-        winner_id = evaluation.get("winner")
+        winner_id = evaluation.get("selected_candidate_id") or evaluation.get("winner")
         candidate = state.candidate_states.get(winner_id)
         if not winner_id or candidate is None or not candidate.result_path:
             state.fail(code="missing_winner", message="cannot resume publishing without selected candidate")
@@ -1844,11 +1866,11 @@ class OrchestratorPipeline:
             f"Verification artifact: `{verification_path}`\n"
         )
 
+    def _write_candidate_selection(self, state, artifact: dict[str, Any]) -> str:
+        return self.store.write_json(state.run_id, "artifacts/candidate-selection.json", artifact)
+
     def _write_evaluation(self, state, artifact: dict[str, Any]) -> str:
         return self.store.write_json(state.run_id, "artifacts/evaluation.json", artifact)
-
-    def _write_execution_evaluation(self, state, artifact: dict[str, Any]) -> str:
-        return self.store.write_json(state.run_id, "artifacts/execution-evaluation.json", artifact)
 
     def _write_run_outcome(self, state, selected_candidate_metadata: dict[str, Any]) -> str:
         return self.store.write_json(
@@ -1902,7 +1924,7 @@ class OrchestratorPipeline:
         raw_issue_path = store.write_json(
             state.run_id,
             f"artifacts/raw-issue-v{version}.json",
-            _raw_issue_artifact(issue, brief),
+            _raw_issue_artifact(issue, brief, self.config.analysis),
         )
         brief_path = store.write_json(
             state.run_id,
@@ -1934,7 +1956,7 @@ class OrchestratorPipeline:
                 "response": str(response),
                 "truncated": analyzer.last_agent_response_truncated,
                 "limits": {
-                    "max_agent_response_chars": MAX_AGENT_RESPONSE_CHARS,
+                    "max_agent_response_chars": self.config.analysis.max_agent_response_chars,
                 },
                 "created_at": _now_placeholder(),
             },
@@ -1947,8 +1969,9 @@ class OrchestratorPipeline:
             str(self.project_path),
             agent=analysis_agent,
             timeout=self.config.runtime.analysis_timeout_seconds,
-            max_context_tokens=self.config.evaluation.max_context_tokens,
+            max_context_tokens=self.config.analysis.max_context_tokens,
             model_context_tokens=_agent_context_window_tokens(analysis_agent),
+            limits=self.config.analysis.to_limits(),
         )
         brief = analyzer.analyze(issue, inputs=self._load_inputs(state.run_id))
         self._write_task_analysis_artifacts(self.store, state, issue, brief)
@@ -2051,10 +2074,15 @@ def _next_artifact_version(artifacts_dir: Path, prefix: str) -> int:
     return (max(versions) + 1) if versions else 1
 
 
-def _raw_issue_artifact(issue: Issue, brief: TaskBrief) -> dict[str, Any]:
+def _raw_issue_artifact(issue: Issue, brief: TaskBrief, analysis_config=None) -> dict[str, Any]:
     body = str(brief.issue.get("body", ""))
     comments = list(brief.issue.get("comments", []))
     inputs = list(brief.issue.get("inputs", []))
+    max_issue_body_chars = getattr(analysis_config, "max_issue_body_chars", MAX_ISSUE_BODY_CHARS)
+    max_comments = getattr(analysis_config, "max_comments", MAX_COMMENTS)
+    max_comment_body_chars = getattr(analysis_config, "max_comment_body_chars", MAX_COMMENT_BODY_CHARS)
+    max_inputs = getattr(analysis_config, "max_inputs", MAX_INPUTS)
+    max_input_message_chars = getattr(analysis_config, "max_input_message_chars", MAX_INPUT_MESSAGE_CHARS)
     return {
         "schema_version": 1,
         "issue": {
@@ -2067,17 +2095,17 @@ def _raw_issue_artifact(issue: Issue, brief: TaskBrief) -> dict[str, Any]:
         "comments": comments,
         "inputs": inputs,
         "limits": {
-            "max_issue_body_chars": MAX_ISSUE_BODY_CHARS,
-            "max_comments": MAX_COMMENTS,
-            "max_comment_body_chars": MAX_COMMENT_BODY_CHARS,
-            "max_inputs": MAX_INPUTS,
-            "max_input_message_chars": MAX_INPUT_MESSAGE_CHARS,
+            "max_issue_body_chars": max_issue_body_chars,
+            "max_comments": max_comments,
+            "max_comment_body_chars": max_comment_body_chars,
+            "max_inputs": max_inputs,
+            "max_input_message_chars": max_input_message_chars,
         },
         "truncated": {
-            "issue_body": len(issue.body or "") > MAX_ISSUE_BODY_CHARS,
-            "comments": len(issue.comments) > MAX_COMMENTS
-            or any(len(comment.body or "") > MAX_COMMENT_BODY_CHARS for comment in issue.comments),
-            "inputs": len(inputs) >= MAX_INPUTS,
+            "issue_body": len(issue.body or "") > max_issue_body_chars,
+            "comments": len(issue.comments) > max_comments
+            or any(len(comment.body or "") > max_comment_body_chars for comment in issue.comments),
+            "inputs": len(inputs) >= max_inputs,
         },
     }
 

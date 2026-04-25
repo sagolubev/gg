@@ -22,22 +22,36 @@ MAX_AGENT_RESPONSE_CHARS = 12000
 CHARS_PER_CONTEXT_TOKEN = 4
 
 
-def _serialize_comments(comments: list[IssueComment]) -> list[dict[str, str]]:
+def _serialize_comments(
+    comments: list[IssueComment],
+    *,
+    max_comments: int = MAX_COMMENTS,
+    max_comment_body_chars: int = MAX_COMMENT_BODY_CHARS,
+) -> list[dict[str, str]]:
+    if max_comments <= 0:
+        return []
     return [
         {
             "author": comment.author,
             "created_at": comment.created_at,
             "url": comment.url,
-            "body": comment.body[:MAX_COMMENT_BODY_CHARS],
+            "body": comment.body[:max_comment_body_chars],
         }
-        for comment in comments[-MAX_COMMENTS:]
+        for comment in comments[-max_comments:]
         if comment.body.strip()
     ]
 
 
-def _serialize_inputs(inputs: list[dict]) -> list[dict[str, str | int]]:
+def _serialize_inputs(
+    inputs: list[dict],
+    *,
+    max_inputs: int = MAX_INPUTS,
+    max_input_message_chars: int = MAX_INPUT_MESSAGE_CHARS,
+) -> list[dict[str, str | int]]:
+    if max_inputs <= 0:
+        return []
     serialized: list[dict[str, str | int]] = []
-    for item in inputs[-MAX_INPUTS:]:
+    for item in inputs[-max_inputs:]:
         message = str(item.get("message", "")).strip()
         if not message:
             continue
@@ -47,7 +61,7 @@ def _serialize_inputs(inputs: list[dict]) -> list[dict[str, str | int]]:
                 "sequence_number": int(item.get("sequence_number", 0)),
                 "answered_state": str(item.get("answered_state", "")),
                 "created_at": str(item.get("created_at", "")),
-                "message": message[:MAX_INPUT_MESSAGE_CHARS],
+                "message": message[:max_input_message_chars],
             }
         )
     return serialized
@@ -129,19 +143,29 @@ class TaskAnalyzer:
         timeout: int = 600,
         max_context_tokens: int = 60000,
         model_context_tokens: int | None = None,
+        limits: dict[str, int] | None = None,
     ):
         self.project_path = project_path
         self.agent = agent
         self.timeout = timeout
         self.max_context_tokens = max(1, max_context_tokens)
         self.model_context_tokens = model_context_tokens if model_context_tokens and model_context_tokens > 0 else None
+        self.limits = limits or {}
         self.last_agent_response: str = ""
         self.last_agent_error: str = ""
         self.last_agent_response_truncated = False
 
     def analyze(self, issue: Issue, *, inputs: list[dict] | None = None) -> TaskBrief:
-        serialized_comments = _serialize_comments(issue.comments)
-        serialized_inputs = _serialize_inputs(inputs or [])
+        serialized_comments = _serialize_comments(
+            issue.comments,
+            max_comments=self._limit("max_comments", MAX_COMMENTS),
+            max_comment_body_chars=self._limit("max_comment_body_chars", MAX_COMMENT_BODY_CHARS),
+        )
+        serialized_inputs = _serialize_inputs(
+            inputs or [],
+            max_inputs=self._limit("max_inputs", MAX_INPUTS),
+            max_input_message_chars=self._limit("max_input_message_chars", MAX_INPUT_MESSAGE_CHARS),
+        )
         issue_text_parts = [
             issue.body.strip(),
             _comments_section(serialized_comments),
@@ -157,7 +181,7 @@ class TaskAnalyzer:
         issue_payload = {
             "number": issue.number,
             "title": issue.title,
-            "body": body[:MAX_ISSUE_BODY_CHARS],
+            "body": body[: self._limit("max_issue_body_chars", MAX_ISSUE_BODY_CHARS)],
             "labels": issue.labels,
             "url": issue.url,
             "comments": serialized_comments,
@@ -181,7 +205,11 @@ class TaskAnalyzer:
                 verification_hints=list(analysis.verification_hints),
                 context_budget={**context_budget, **dict(analysis.context_budget)},
             )
-        summary = combined_issue_text[:MAX_SUMMARY_CHARS] if combined_issue_text else issue.title
+        summary = (
+            combined_issue_text[: self._limit("max_summary_chars", MAX_SUMMARY_CHARS)]
+            if combined_issue_text
+            else issue.title
+        )
         return TaskBrief(
             schema_version=1,
             issue=issue_payload,
@@ -198,7 +226,10 @@ class TaskAnalyzer:
     def _try_agent_analysis(self, issue_payload: dict[str, Any], context: str) -> AnalysisResultModel | None:
         if self.agent is None or not self.agent.is_available():
             return None
-        prompt = build_analysis_prompt(issue_payload=issue_payload, project_context=context[:MAX_PROJECT_CONTEXT_CHARS])
+        prompt = build_analysis_prompt(
+            issue_payload=issue_payload,
+            project_context=context[: self._limit("max_project_context_chars", MAX_PROJECT_CONTEXT_CHARS)],
+        )
         self.last_agent_response = ""
         self.last_agent_error = ""
         self.last_agent_response_truncated = False
@@ -209,8 +240,9 @@ class TaskAnalyzer:
                 timeout=self.timeout,
                 context="Task analysis only. Return exactly one JSON object and do not edit files.",
             )
-            self.last_agent_response_truncated = len(raw) > MAX_AGENT_RESPONSE_CHARS
-            self.last_agent_response = raw[:MAX_AGENT_RESPONSE_CHARS]
+            max_response_chars = self._limit("max_agent_response_chars", MAX_AGENT_RESPONSE_CHARS)
+            self.last_agent_response_truncated = len(raw) > max_response_chars
+            self.last_agent_response = raw[:max_response_chars]
             payload = extract_single_json_object(raw)
             return AnalysisResultModel.model_validate(payload)
         except Exception as exc:
@@ -221,7 +253,10 @@ class TaskAnalyzer:
         effective_tokens = self.max_context_tokens
         if self.model_context_tokens is not None:
             effective_tokens = min(effective_tokens, self.model_context_tokens)
-        project_context_chars = min(MAX_PROJECT_CONTEXT_CHARS, effective_tokens * CHARS_PER_CONTEXT_TOKEN)
+        project_context_chars = min(
+            self._limit("max_project_context_chars", MAX_PROJECT_CONTEXT_CHARS),
+            effective_tokens * CHARS_PER_CONTEXT_TOKEN,
+        )
         estimated_tokens = _estimate_tokens(context[:project_context_chars])
         return {
             "max_context_tokens": self.max_context_tokens,
@@ -232,6 +267,10 @@ class TaskAnalyzer:
             "project_context_truncated": len(context) > project_context_chars,
             "truncated": len(context) > project_context_chars,
         }
+
+    def _limit(self, name: str, default: int) -> int:
+        value = self.limits.get(name, default)
+        return value if isinstance(value, int) and value >= 0 else default
 
 
 def _estimate_tokens(text: str) -> int:

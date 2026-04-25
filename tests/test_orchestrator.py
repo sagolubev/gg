@@ -1262,6 +1262,13 @@ def test_pipeline_baseline_failures_can_be_allowed_when_identical(tmp_path):
     assert ".gg-worktrees" in state.baseline["worktree_path"]
     assert Path(state.baseline["worktree_path"]) != tmp_path
     assert Path(state.baseline["worktree_path"]).exists()
+    verification = json.loads(
+        (
+            tmp_path
+            / state.candidate_states["candidate-1"].result_path
+        ).parent.joinpath("verification.json").read_text(encoding="utf-8")
+    )
+    assert verification["checks"][0]["baseline_status"] == "known_failure"
 
 
 def test_pipeline_fails_when_verification_mutates_worktree(tmp_path):

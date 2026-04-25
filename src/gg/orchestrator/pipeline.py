@@ -811,11 +811,14 @@ class OrchestratorPipeline:
         if candidate.status == "setup_failed":
             verification = [CheckResult(command="", status="skipped", exit_code=None, attempts=0)]
         else:
-            verification = VerificationRunner(
-                self._verification_commands(),
-                timeout=self.config.runtime.command_timeout_seconds,
-                retry_count=self.config.verify.test_retry_count,
-            ).run(candidate.worktree_path)
+            verification = _with_baseline_status(
+                VerificationRunner(
+                    self._verification_commands(),
+                    timeout=self.config.runtime.command_timeout_seconds,
+                    retry_count=self.config.verify.test_retry_count,
+                ).run(candidate.worktree_path),
+                baseline,
+            )
         final_files = git_changed_files(candidate.worktree_path)
         final_patch = git_diff(candidate.worktree_path) if final_files else ""
         verification_mutated_worktree = (
@@ -950,11 +953,14 @@ class OrchestratorPipeline:
                 "failed_commands": _failed_commands(setup),
             },
         )
-        verification = VerificationRunner(
-            self._verification_commands(),
-            timeout=self.config.runtime.command_timeout_seconds,
-            retry_count=self.config.verify.test_retry_count,
-        ).run(worktree)
+        verification = _with_baseline_status(
+            VerificationRunner(
+                self._verification_commands(),
+                timeout=self.config.runtime.command_timeout_seconds,
+                retry_count=self.config.verify.test_retry_count,
+            ).run(worktree),
+            self._load_baseline_verification(state),
+        )
         failed_commands = _failed_commands(verification)
         verification_summary = verification_gate_summary(verification)
         verification_path = self.store.write_json(
@@ -1303,11 +1309,14 @@ class OrchestratorPipeline:
                 return {"error": message}
             state.publishing_step = "patch_applied"
             self.store.write(state)
-        verification = VerificationRunner(
-            self._verification_commands(),
-            timeout=self.config.runtime.command_timeout_seconds,
-            retry_count=self.config.verify.test_retry_count,
-        ).run(worktree)
+        verification = _with_baseline_status(
+            VerificationRunner(
+                self._verification_commands(),
+                timeout=self.config.runtime.command_timeout_seconds,
+                retry_count=self.config.verify.test_retry_count,
+            ).run(worktree),
+            self._load_baseline_verification(state),
+        )
         verification_summary = verification_gate_summary(verification)
         verification_path = self.store.write_json(
             state.run_id,
@@ -1870,6 +1879,26 @@ def _verification_passed(checks, baseline, *, allow_known_baseline_failures: boo
         if baseline_failures.get(check.command) != _check_fingerprint(check):
             return False
     return True
+
+
+def _with_baseline_status(checks, baseline) -> list[CheckResult]:
+    baseline_failures = {
+        check.command: _check_fingerprint(check)
+        for check in baseline
+        if check.status not in {"passed", "skipped", "flaky"}
+    }
+    annotated: list[CheckResult] = []
+    for check in checks:
+        if check.status in {"passed", "skipped", "flaky"}:
+            baseline_status = "passed"
+        elif check.command not in baseline_failures:
+            baseline_status = "new_failure"
+        elif baseline_failures[check.command] == _check_fingerprint(check):
+            baseline_status = "known_failure"
+        else:
+            baseline_status = "changed_failure"
+        annotated.append(replace(check, baseline_status=baseline_status))
+    return annotated
 
 
 def _check_fingerprint(check) -> tuple:

@@ -21,6 +21,13 @@ from gg.orchestrator.pipeline import OrchestratorPipeline
 from gg.orchestrator.plugins import create_agent_backend, register_agent_backend, register_platform
 from gg.orchestrator.rate_limit import RateLimitStore, RateLimitSnapshot, RateLimitThrottleError
 from gg.orchestrator.sandbox import SandboxPolicy, SandboxRunResult, SandboxRuntime
+from gg.orchestrator.schemas import (
+    CandidateResultModel,
+    GGConfigModel,
+    InputArtifactModel,
+    RunStateModel,
+    validation_error_message,
+)
 from gg.orchestrator.state import CandidateState, InvalidTransitionError, RunState, TaskState
 from gg.orchestrator.store import RunStore
 from gg.platforms.base import GitPlatform, Issue, IssueComment
@@ -406,6 +413,108 @@ def read_jsonl(path: Path) -> list[dict]:
     if not path.exists():
         return []
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def test_artifact_schemas_reject_invalid_nested_values():
+    try:
+        RunStateModel.model_validate(
+            {
+                "schema_version": 1,
+                "run_id": "run-1",
+                "issue": {"number": 1},
+                "state": "AgentRunning",
+                "created_at": "2026-04-25T12:00:00Z",
+                "updated_at": "2026-04-25T12:00:00Z",
+                "candidate_states": {
+                    "candidate-1": {
+                        "status": "still-working",
+                    }
+                },
+            }
+        )
+    except Exception as exc:
+        message = validation_error_message("state.json", exc)
+    else:
+        raise AssertionError("invalid nested candidate status should fail")
+
+    assert "state.json.candidate_states.candidate-1.status" in message
+    assert "unknown candidate status" in message
+
+
+def test_artifact_schemas_tolerate_additive_resume_fields():
+    state = RunStateModel.model_validate(
+        {
+            "schema_version": 1,
+            "run_id": "run-1",
+            "issue": {"number": 1},
+            "state": "ExternalTaskReady",
+            "created_at": "2026-04-25T12:00:00Z",
+            "updated_at": "2026-04-25T12:00:00Z",
+            "future_field": "ignored",
+            "candidate_states": {
+                "candidate-1": {
+                    "status": "success",
+                    "future_candidate_field": "ignored",
+                }
+            },
+        }
+    )
+
+    assert state.run_id == "run-1"
+    assert state.candidate_states["candidate-1"].status == "success"
+
+
+def test_config_schema_reports_nested_field_paths():
+    try:
+        GGConfigModel.model_validate(
+            {
+                "git": {"default_branch": "main"},
+                "runtime": {"candidates": 0},
+            }
+        )
+    except Exception as exc:
+        message = validation_error_message(".gg/params.yaml", exc)
+    else:
+        raise AssertionError("invalid runtime candidates should fail")
+
+    assert ".gg/params.yaml.runtime.candidates" in message
+
+
+def test_candidate_and_input_artifact_schemas_are_explicit():
+    candidate = CandidateResultModel.model_validate(
+        {
+            "schema_version": 1,
+            "candidate_id": "candidate-1",
+            "status": "success",
+            "branch": "gg/test",
+            "worktree_path": "/tmp/worktree",
+            "base_commit": "abc123",
+            "summary": "done",
+            "changed_files": ["greeting.txt"],
+            "duration_seconds": 1.2,
+            "policy_violations": [],
+        }
+    )
+    assert candidate.status == "success"
+
+    try:
+        InputArtifactModel.model_validate(
+            {
+                "schema_version": 1,
+                "source": "cli",
+                "sequence_number": 1,
+                "content_hash": "abc",
+                "message": "hello",
+                "created_at": "2026-04-25 12:00:00",
+                "answered_state": "NeedsInput",
+            }
+        )
+    except Exception as exc:
+        message = validation_error_message("input-v1-0001.json", exc)
+    else:
+        raise AssertionError("non-UTC timestamp should fail")
+
+    assert "input-v1-0001.json.created_at" in message
 
 
 def test_run_state_rejects_illegal_transition():

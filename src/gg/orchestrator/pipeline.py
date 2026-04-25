@@ -1195,17 +1195,28 @@ class OrchestratorPipeline:
                 pr_url=pr_url,
                 pr_number=_parse_pr_number(pr_url),
             )
-            self.platform.publish_outcome(issue.number, run_id=state.run_id, pr_url=pr_url)
+
+        state.transition(TaskState.COMPLETED, reason="walking skeleton complete")
+        state.publishing_step = "completed"
+        winner["result_path"] = state.candidate_states.get(winner["candidate_id"], CandidateState(status="")).result_path or ""
+        state.artifacts["run_outcome"] = self._write_run_outcome(state, winner)
+        self.store.write(state)
+        if not no_pr:
+            self.platform.publish_outcome(
+                issue.number,
+                run_id=state.run_id,
+                pr_url=state.pr_url or "",
+                selected_candidate_id=winner["candidate_id"],
+                branch=winner["branch"],
+                evaluation_path=state.artifacts.get("evaluation", ""),
+                run_outcome_path=state.artifacts.get("run_outcome", ""),
+                verification_path=winner.get("verification_path", ""),
+            )
             state.publishing_step = "result_commented"
             self.store.write(state)
             cancelled = self._cancelled_response(state)
             if cancelled:
                 return cancelled
-
-        state.transition(TaskState.COMPLETED, reason="walking skeleton complete")
-        state.publishing_step = "completed"
-        state.artifacts["run_outcome"] = self._write_run_outcome(state, winner)
-        self.store.write(state)
         self._cleanup_integration_worktree(state)
         self._mark_issue_done(issue.number)
         return {

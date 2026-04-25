@@ -624,7 +624,11 @@ def _validate_json_artifact(relative_path: str, data: dict[str, Any]) -> None:
         schema = PublishingIntegrationModel
     elif relative_path == "artifacts/patch-conflict.json":
         schema = PatchConflictModel
-    elif relative_path == "artifacts/baseline-verification.json" or relative_path.endswith("/verification.json"):
+    elif relative_path in {
+        "artifacts/baseline-setup.json",
+        "artifacts/baseline-verification.json",
+        "artifacts/integration-verification.json",
+    } or relative_path.endswith("/verification.json"):
         schema = VerificationArtifactModel
     elif relative_path.startswith("inputs/input-v1-") and relative_path.endswith(".json"):
         schema = InputArtifactModel

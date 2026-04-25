@@ -156,13 +156,39 @@ class GitPlatform(ABC):
         """Publish successful completion labels to the external tracker."""
         self.apply_labels(issue_number, add=[done_label], remove=[work_label, blocked_label])
 
-    def publish_outcome(self, issue_number: int, *, run_id: str, pr_url: str) -> None:
+    def publish_outcome(
+        self,
+        issue_number: int,
+        *,
+        run_id: str,
+        pr_url: str,
+        selected_candidate_id: str = "",
+        branch: str = "",
+        evaluation_path: str = "",
+        run_outcome_path: str = "",
+        verification_path: str = "",
+    ) -> None:
         """Publish the final result comment for an issue."""
+        details = [
+            "gg completed this run.",
+            "",
+            f"PR: {pr_url}",
+        ]
+        if selected_candidate_id:
+            details.append(f"Selected candidate: `{selected_candidate_id}`")
+        if branch:
+            details.append(f"Branch: `{branch}`")
+        if verification_path:
+            details.append(f"Verification: `{verification_path}`")
+        if evaluation_path:
+            details.append(f"Evaluation: `{evaluation_path}`")
+        if run_outcome_path:
+            details.append(f"Run outcome: `{run_outcome_path}`")
         self.add_stage_comment_once(
             issue_number,
             run_id,
             "result",
-            f"gg completed this run.\n\nPR: {pr_url}",
+            "\n".join(details),
         )
 
     def cleanup_claim(self, issue_number: int, *, work_label: str, blocked_label: str) -> None:

@@ -966,6 +966,22 @@ def test_run_store_state_backup_is_opt_in_and_recovers_corrupt_primary(tmp_path)
     assert recovered.operator == {"name": "cli"}
 
 
+def test_run_store_validates_top_level_verification_artifacts(tmp_path):
+    init_repo(tmp_path)
+    store = RunStore(tmp_path)
+    state = store.create(Issue(number=1, title="Validate artifacts", body="", labels=["ai-ready"]), dry_run=True)
+
+    for artifact_path in ("artifacts/baseline-setup.json", "artifacts/integration-verification.json"):
+        try:
+            store.write_json(state.run_id, artifact_path, {"schema_version": 1, "checks": [{"status": "bogus"}]})
+        except ValueError as exc:
+            message = str(exc)
+        else:
+            raise AssertionError(f"{artifact_path} should fail schema validation")
+        assert artifact_path in message
+        assert "checks.0.status" in message
+
+
 def test_candidate_and_input_artifact_schemas_are_explicit():
     candidate = CandidateResultModel.model_validate(
         {
@@ -1780,6 +1796,19 @@ def test_publish_uses_integration_worktree_for_pr(monkeypatch, tmp_path):
     assert platform.prs[0]["head"] == integration["integration_branch"]
     assert pushed == [(integration["worktree_path"], integration["integration_branch"])]
     assert not Path(integration["worktree_path"]).exists()
+    state = OrchestratorPipeline(tmp_path, platform=platform, agent=FakeAgent()).store.load(result["run_id"])
+    result_comments = [body for _, body in platform.comments if f"gg-run-id={state.run_id} stage=result" in body]
+    assert len(result_comments) == 1
+    result_comment = result_comments[0]
+    assert f"Selected candidate: `{result['winner']}`" in result_comment
+    assert f"Branch: `{integration['integration_branch']}`" in result_comment
+    assert f"Verification: `{state.artifacts['integration_verification']}`" in result_comment
+    assert f"Evaluation: `{state.artifacts['evaluation']}`" in result_comment
+    assert f"Run outcome: `{state.artifacts['run_outcome']}`" in result_comment
+    outcome = json.loads((tmp_path / state.artifacts["run_outcome"]).read_text(encoding="utf-8"))
+    assert outcome["artifacts"]["selected_candidate_result"].endswith(
+        "candidates/candidate-1/candidate-result.json"
+    )
 
 
 def test_publish_records_patch_conflict_before_pr(monkeypatch, tmp_path):

@@ -174,6 +174,85 @@ class KnowledgeEngine:
         )
         self._compiler.incremental_update([ev])
 
+    def record_state_transition(
+        self, *, run_id: str, from_state: str, to_state: str, reason: str = "", attempt: int = 1,
+    ) -> None:
+        self._emit(
+            EventType.STATE_TRANSITION,
+            data={"run_id": run_id, "from_state": from_state, "to_state": to_state,
+                  "reason": reason, "attempt": attempt},
+            source="orchestrator",
+        )
+
+    def record_run_started(self, *, run_id: str, issue_number: int) -> None:
+        self._emit(
+            EventType.RUN_STARTED,
+            issue_number=issue_number,
+            data={"run_id": run_id},
+            source="orchestrator",
+        )
+
+    def record_run_completed(self, *, run_id: str, issue_number: int, pr_url: str = "") -> None:
+        self._emit(
+            EventType.RUN_COMPLETED,
+            issue_number=issue_number,
+            data={"run_id": run_id, "pr_url": pr_url},
+            source="orchestrator",
+        )
+
+    def record_run_failed(self, *, run_id: str, issue_number: int, error: str = "") -> None:
+        self._emit(
+            EventType.RUN_FAILED,
+            issue_number=issue_number,
+            data={"run_id": run_id, "error": error},
+            source="orchestrator",
+        )
+
+    def record_run_cancelled(self, *, run_id: str, issue_number: int, reason: str = "") -> None:
+        self._emit(
+            EventType.RUN_CANCELLED,
+            issue_number=issue_number,
+            data={"run_id": run_id, "reason": reason},
+            source="orchestrator",
+        )
+
+    def record_candidate_started(self, *, run_id: str, candidate_id: str, strategy: str = "") -> None:
+        self._emit(
+            EventType.CANDIDATE_STARTED,
+            data={"run_id": run_id, "candidate_id": candidate_id, "strategy": strategy},
+            source="orchestrator",
+        )
+
+    def record_candidate_finished(self, *, run_id: str, candidate_id: str, status: str) -> None:
+        self._emit(
+            EventType.CANDIDATE_FINISHED,
+            data={"run_id": run_id, "candidate_id": candidate_id, "status": status},
+            source="orchestrator",
+        )
+
+    def record_evaluation_done(self, *, run_id: str, verdict: str, winner: str = "") -> None:
+        self._emit(
+            EventType.EVALUATION_DONE,
+            data={"run_id": run_id, "verdict": verdict, "winner": winner},
+            source="orchestrator",
+        )
+
+    def record_publishing_started(self, *, run_id: str, issue_number: int) -> None:
+        self._emit(
+            EventType.PUBLISHING_STARTED,
+            issue_number=issue_number,
+            data={"run_id": run_id},
+            source="orchestrator",
+        )
+
+    def record_publishing_done(self, *, run_id: str, issue_number: int, pr_url: str = "") -> None:
+        self._emit(
+            EventType.PUBLISHING_DONE,
+            issue_number=issue_number,
+            data={"run_id": run_id, "pr_url": pr_url},
+            source="orchestrator",
+        )
+
     def record_fact(
         self, *, key: str, value: str, confidence: float = 1.0, tags: list[str] | None = None,
     ) -> None:

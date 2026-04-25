@@ -32,6 +32,16 @@ class EventType(str, Enum):
     ENTITY_DISCOVERED = "entity_discovered"
     FACT_LEARNED = "fact_learned"
     KNOWLEDGE_REBUILT = "knowledge_rebuilt"
+    STATE_TRANSITION = "state_transition"
+    RUN_STARTED = "run_started"
+    RUN_COMPLETED = "run_completed"
+    RUN_FAILED = "run_failed"
+    RUN_CANCELLED = "run_cancelled"
+    CANDIDATE_STARTED = "candidate_started"
+    CANDIDATE_FINISHED = "candidate_finished"
+    EVALUATION_DONE = "evaluation_done"
+    PUBLISHING_STARTED = "publishing_started"
+    PUBLISHING_DONE = "publishing_done"
 
 
 @dataclass(frozen=True)

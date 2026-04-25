@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import signal
 import subprocess
 import threading
 import time
@@ -2564,6 +2565,34 @@ def test_cancel_non_terminal_run(tmp_path):
     state = pipeline.store.load(ready["run_id"])
     assert state.last_error["message"] == "test cancel"
     assert (tmp_path / ".gg" / "runs" / ready["run_id"] / "errors.jsonl").exists()
+
+
+def test_cancel_running_run_terminates_known_candidate_processes(monkeypatch, tmp_path):
+    init_repo(tmp_path)
+    killed: list[int] = []
+
+    def fake_killpg(pid, sig):
+        assert sig == signal.SIGTERM
+        killed.append(pid)
+
+    monkeypatch.setattr("gg.orchestrator.pipeline.os.killpg", fake_killpg)
+    pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
+    ready = create_ready_run(pipeline)
+    state = pipeline.store.load(ready["run_id"])
+    state.transition(TaskState.AGENT_SELECTION, reason="test select")
+    state.transition(TaskState.AGENT_RUNNING, reason="test running")
+    state.candidate_states["candidate-1"] = CandidateState(
+        status="running",
+        sandbox_pid=43210,
+        agent_pid=54321,
+    )
+    pipeline.store.write(state)
+
+    result = pipeline.cancel(ready["run_id"], reason="stop process")
+
+    assert result["cancel_requested"] is True
+    assert result["terminated_pids"] == [43210, 54321]
+    assert killed == [43210, 54321]
 
 
 def test_run_next_selects_highest_priority_ai_ready_issue(tmp_path):

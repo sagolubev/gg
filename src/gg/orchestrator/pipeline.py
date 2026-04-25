@@ -3,7 +3,9 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 import hashlib
+import os
 import re
+import signal
 import tempfile
 import threading
 import time
@@ -437,11 +439,18 @@ class OrchestratorPipeline:
         if state.state in TERMINAL_STATES:
             return {"run_id": run_id, "state": state.state.value, "cancelled": False}
         if state.has_running_candidates():
+            terminated_pids = self._terminate_running_candidate_processes(state)
             state.cancel_requested = True
             state.last_error = {"code": "cancel_requested", "message": reason, "at": _now_placeholder()}
             with self.locks.run(run_id):
                 self.store.write(state)
-            return {"run_id": run_id, "state": state.state.value, "cancelled": False, "cancel_requested": True}
+            return {
+                "run_id": run_id,
+                "state": state.state.value,
+                "cancelled": False,
+                "cancel_requested": True,
+                "terminated_pids": terminated_pids,
+            }
         if state.state is TaskState.OUTCOME_PUBLISHING and state.publishing_step not in {None, "started"}:
             state.cancel_requested = True
             state.last_error = {"code": "cancel_requested", "message": reason, "at": _now_placeholder()}
@@ -1484,6 +1493,18 @@ class OrchestratorPipeline:
         if worktree_path:
             git_remove_worktree(self.project_path, worktree_path)
 
+    def _terminate_running_candidate_processes(self, state) -> list[int]:
+        terminated: list[int] = []
+        for candidate in state.candidate_states.values():
+            if candidate.status != "running":
+                continue
+            for pid in (candidate.sandbox_pid, candidate.agent_pid):
+                if not pid or pid in terminated:
+                    continue
+                if _terminate_process_group(pid):
+                    terminated.append(pid)
+        return terminated
+
     def _cancelled_response(self, state) -> dict[str, Any] | None:
         try:
             latest = self.store.load(state.run_id)
@@ -1960,6 +1981,22 @@ def _agent_context_window_tokens(agent: AgentBackend | None) -> int | None:
     if callable(value):
         value = value()
     return value if isinstance(value, int) and value > 0 else None
+
+
+def _terminate_process_group(pid: int) -> bool:
+    try:
+        os.killpg(pid, signal.SIGTERM)
+        return True
+    except ProcessLookupError:
+        return False
+    except OSError:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            return True
+        except ProcessLookupError:
+            return False
+        except OSError:
+            return False
 
 
 def _verification_passed(checks, baseline, *, allow_known_baseline_failures: bool) -> bool:

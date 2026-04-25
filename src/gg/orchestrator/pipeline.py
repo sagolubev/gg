@@ -641,6 +641,7 @@ class OrchestratorPipeline:
         brief: TaskBrief,
         *,
         no_pr: bool,
+        initial_repair_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         state.transition(TaskState.AGENT_SELECTION, reason="select codex backend")
         if not self.agent.is_available():
@@ -686,7 +687,7 @@ class OrchestratorPipeline:
         evaluator = CandidateEvaluator()
         candidate_records: list[dict[str, Any]] = []
         selected: dict[str, Any] | None = None
-        repair_context: dict[str, Any] | None = None
+        repair_context: dict[str, Any] | None = initial_repair_context
 
         while state.attempt <= state.max_attempts and selected is None:
             _increment_stage_attempt(state, "execution")
@@ -1245,6 +1246,18 @@ class OrchestratorPipeline:
                     return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
                 target = self._prepare_integration_target(state, winner, preflight)
                 if target.get("error"):
+                    repaired = self._repair_after_publish_failure(
+                        state,
+                        issue,
+                        winner,
+                        preflight=preflight,
+                        code=str(target.get("code") or "patch_conflict"),
+                        message=str(target["error"]),
+                        verification_path=str(target.get("verification_path") or ""),
+                        no_pr=no_pr,
+                    )
+                    if repaired is not None:
+                        return repaired
                     state.fail(code="patch_conflict", message=target["error"])
                     self.store.write(state)
                     return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
@@ -1459,11 +1472,12 @@ class OrchestratorPipeline:
             issue_number = int(state.issue.get("number", 0))
             run_hash = hashlib.sha256(state.run_id.encode("utf-8")).hexdigest()[:8]
             title_slug = safe_branch_slug(str(state.issue.get("title", "task")))[:32]
-            integration_branch = f"gg/issue-{issue_number}-{title_slug}-publish-{run_hash}"
+            candidate_slug = safe_branch_slug(str(winner["candidate_id"]))[:24]
+            integration_branch = f"gg/issue-{issue_number}-{title_slug}-publish-{candidate_slug}-{run_hash}"
             base_ref = preflight.get("default_commit") or preflight["base_commit"]
             worktree = WorktreeManager(self.project_path).create(
                 run_id=state.run_id,
-                candidate_id="integration",
+                candidate_id=f"integration-{candidate_slug}",
                 branch=integration_branch,
                 base_ref=base_ref,
             )
@@ -1551,6 +1565,76 @@ class OrchestratorPipeline:
             "branch": integration_branch,
             "verification_path": verification_path,
         }
+
+    def _repair_after_publish_failure(
+        self,
+        state,
+        issue: Issue,
+        winner: dict[str, Any],
+        *,
+        preflight: dict[str, Any],
+        code: str,
+        message: str,
+        verification_path: str,
+        no_pr: bool,
+    ) -> dict[str, Any] | None:
+        if state.attempt >= state.max_attempts:
+            return None
+        if state.publishing_step in {"committed", "branch_pushed", "pr_created", "result_commented", "completed"}:
+            return None
+        brief_path = state.artifacts.get("task_brief")
+        if not brief_path:
+            return None
+        try:
+            brief = TaskBrief.from_dict(self.store.read_json(brief_path))
+        except (OSError, ValueError):
+            return None
+        failed_commands: list[str] = []
+        if verification_path:
+            try:
+                verification = self.store.read_json(verification_path)
+            except (OSError, ValueError):
+                verification = {}
+            failed_commands = [str(command) for command in verification.get("failed_commands", [])]
+        repair_context = {
+            "parent_candidate_id": winner["candidate_id"],
+            "parent_result_path": (
+                state.candidate_states.get(winner["candidate_id"], CandidateState(status="")).result_path or ""
+            ),
+            "feedback": (
+                f"Publishing failed before external side effects. "
+                f"code={code}; message={message}; "
+                f"stale_base={preflight.get('stale_base')}; "
+                f"default_commit={preflight.get('default_commit')}; base_commit={preflight.get('base_commit')}"
+            ),
+            "failed_commands": failed_commands,
+            "publishing_failure": {
+                "code": code,
+                "message": message,
+                "preflight": dict(preflight),
+                "preflight_path": state.artifacts.get("publishing_preflight", ""),
+                "patch_conflict_path": state.artifacts.get("patch_conflict", ""),
+                "verification_path": verification_path,
+            },
+        }
+        next_attempt = state.attempt + 1
+        state.artifacts["publishing_repair_context"] = self.store.write_json(
+            state.run_id,
+            f"artifacts/publishing-repair-context-attempt-{next_attempt}.json",
+            {"schema_version": 1, **repair_context, "created_at": _now_placeholder()},
+        )
+        self._cleanup_integration_worktree(state)
+        state.attempt = next_attempt
+        state.publishing_step = None
+        state.recover_to(TaskState.READY_FOR_EXECUTION, reason=f"repair after publishing failure: {code}")
+        self.store.write(state)
+        return self._execute_ready_state(
+            state,
+            issue,
+            brief,
+            no_pr=no_pr,
+            initial_repair_context=repair_context,
+        )
 
     def _lfs_paths_requiring_git_lfs(self, worktree: Path, patch_text: str) -> list[str]:
         patch_files = git_patch_changed_files(patch_text)

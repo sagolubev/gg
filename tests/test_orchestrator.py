@@ -2006,6 +2006,76 @@ def test_publish_records_patch_conflict_before_pr(monkeypatch, tmp_path):
     assert platform.prs == []
 
 
+def test_publish_patch_conflict_repairs_before_terminal_failure(monkeypatch, tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        "verify:\n  tests: ''\nruntime:\n  max_attempts: 2\n  repair_candidates: 1\n",
+        encoding="utf-8",
+    )
+    base_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True).strip()
+    (tmp_path / "README.md").write_text("# repo\nmain moved\n", encoding="utf-8")
+    commit_repo(tmp_path, "move main")
+    calls = {"apply": 0}
+
+    def fail_then_apply(worktree, patch_text):
+        calls["apply"] += 1
+        if calls["apply"] == 1:
+            return False, "simulated stale-base patch conflict"
+        return git_module.apply_patch(worktree, patch_text)
+
+    monkeypatch.setattr("gg.orchestrator.pipeline.git_apply_patch", fail_then_apply)
+    monkeypatch.setattr("gg.orchestrator.pipeline.push_branch", lambda *_args, **_kwargs: None)
+    platform = FakePlatform()
+    pipeline = OrchestratorPipeline(tmp_path, platform=platform, agent=FakeAgent())
+    ready = create_ready_run(pipeline)
+    state = pipeline.store.load(ready["run_id"])
+    state.max_attempts = 2
+    state.recover_to(TaskState.OUTCOME_PUBLISHING, reason="test publish repair")
+    state.publishing_step = "started"
+    state.candidate_states["candidate-1"] = CandidateState(status="success")
+    pipeline.store.write(state)
+    patch_path = pipeline.store.write_text(
+        state.run_id,
+        "candidates/candidate-1/patch.diff",
+        """diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1 +1,2 @@
+ # repo
++candidate update
+""",
+    )
+
+    result = pipeline._publish_winner(
+        state,
+        platform.issue,
+        {
+            "candidate_id": "candidate-1",
+            "worktree_path": str(tmp_path),
+            "branch": "gg/source",
+            "base_commit": base_commit,
+            "patch_path": patch_path,
+            "summary": "done",
+            "verification_path": "verify.json",
+        },
+        no_pr=False,
+    )
+
+    final_state = pipeline.store.load(ready["run_id"])
+    assert result["state"] == "Completed"
+    assert result["winner"] == "repair-2-1"
+    assert calls["apply"] == 2
+    assert final_state.candidate_states["repair-2-1"].status == "success"
+    assert "publishing_repair_context" in final_state.artifacts
+    repair_result = json.loads(
+        (tmp_path / final_state.candidate_states["repair-2-1"].result_path).read_text(encoding="utf-8")
+    )
+    assert repair_result["repair_context"]["parent_candidate_id"] == "candidate-1"
+    assert "simulated stale-base patch conflict" in repair_result["repair_context"]["feedback"]
+    repair_context = json.loads((tmp_path / final_state.artifacts["publishing_repair_context"]).read_text(encoding="utf-8"))
+    assert repair_context["publishing_failure"]["preflight"]["stale_base"] is True
+
+
 def test_git_apply_patch_uses_index_check(monkeypatch, tmp_path):
     calls: list[list[str]] = []
 

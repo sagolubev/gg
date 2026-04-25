@@ -26,6 +26,7 @@ from gg.orchestrator.schemas import (
     PatchConflictModel,
     PublishingIntegrationModel,
     PublishingPreflightModel,
+    PublishingRepairContextModel,
     RateLimitArtifactModel,
     RawIssueArtifactModel,
     ResourcePreflightModel,
@@ -636,6 +637,8 @@ def _validate_json_artifact(relative_path: str, data: dict[str, Any]) -> None:
         schema = PublishingIntegrationModel
     elif relative_path == "artifacts/patch-conflict.json":
         schema = PatchConflictModel
+    elif re.match(r"artifacts/publishing-repair-context-attempt-\d+\.json$", relative_path):
+        schema = PublishingRepairContextModel
     elif relative_path in {
         "artifacts/baseline-setup.json",
         "artifacts/baseline-verification.json",

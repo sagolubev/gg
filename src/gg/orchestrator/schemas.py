@@ -792,6 +792,21 @@ class PatchConflictModel(CompatibleArtifactModel):
         return _validate_required_timestamp(value)
 
 
+class PublishingRepairContextModel(CompatibleArtifactModel):
+    schema_version: Literal[1] = 1
+    parent_candidate_id: str
+    parent_result_path: str = ""
+    feedback: str
+    failed_commands: list[str] = Field(default_factory=list)
+    publishing_failure: dict[str, Any]
+    created_at: str
+
+    @field_validator("created_at")
+    @classmethod
+    def _timestamp(cls, value: str) -> str:
+        return _validate_required_timestamp(value)
+
+
 class ContextSnapshotModel(CompatibleArtifactModel):
     schema_version: Literal[1] = 1
     created_at: str

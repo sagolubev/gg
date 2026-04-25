@@ -1002,6 +1002,31 @@ def test_run_store_validates_top_level_verification_artifacts(tmp_path):
         assert "checks.0.status" in message
 
 
+def test_run_store_validates_publishing_repair_context(tmp_path):
+    init_repo(tmp_path)
+    store = RunStore(tmp_path)
+    state = store.create(Issue(number=1, title="Validate publishing repair", body="", labels=["ai-ready"]), dry_run=True)
+
+    try:
+        store.write_json(
+            state.run_id,
+            "artifacts/publishing-repair-context-attempt-2.json",
+            {
+                "schema_version": 1,
+                "parent_candidate_id": "candidate-1",
+                "feedback": "repair me",
+                "publishing_failure": {"code": "patch_conflict"},
+                "created_at": "not-a-timestamp",
+            },
+        )
+    except ValueError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("invalid publishing repair context should fail schema validation")
+
+    assert "artifacts/publishing-repair-context-attempt-2.json.created_at" in message
+
+
 def test_candidate_and_input_artifact_schemas_are_explicit():
     candidate = CandidateResultModel.model_validate(
         {

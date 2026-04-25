@@ -182,8 +182,24 @@ def constitution(path, debug):
 @click.option("--dry-run", is_flag=True, help="Show the next eligible issue without side effects.")
 @click.option("--no-pr", is_flag=True, help="Run locally without creating a pull request.")
 @click.option("--batch", "batch_size", default=1, show_default=True, help="Process up to N eligible issues.")
+@click.option("--max-attempts", type=int, default=None, help="Override execution/evaluation attempt limit.")
+@click.option("--candidates", type=int, default=None, help="Override initial candidate fanout.")
+@click.option("--max-parallel-candidates", type=int, default=None, help="Override parallel candidate limit.")
+@click.option("--repair-fanout", type=int, default=None, help="Override repair candidate fanout.")
+@click.option("--timeout", type=int, default=None, help="Override candidate timeout in seconds.")
 @click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
-def run(path, dry_run, no_pr, batch_size, as_json):
+def run(
+    path,
+    dry_run,
+    no_pr,
+    batch_size,
+    max_attempts,
+    candidates,
+    max_parallel_candidates,
+    repair_fanout,
+    timeout,
+    as_json,
+):
     """Supervisor loop: pick issues and orchestrate agents."""
     import json
 
@@ -191,7 +207,13 @@ def run(path, dry_run, no_pr, batch_size, as_json):
 
     from gg.orchestrator.pipeline import OrchestratorPipeline
 
-    pipeline = OrchestratorPipeline(path)
+    pipeline = OrchestratorPipeline(path).configure_runtime(
+        max_attempts=max_attempts,
+        candidates=candidates,
+        max_parallel_candidates=max_parallel_candidates,
+        repair_fanout=repair_fanout,
+        timeout=timeout,
+    )
     result = (
         pipeline.run_batch(batch_size=batch_size, dry_run=dry_run, no_pr=no_pr)
         if batch_size > 1
@@ -222,8 +244,24 @@ def run(path, dry_run, no_pr, batch_size, as_json):
 @click.option("--path", type=click.Path(exists=True), default=".", help="Project path.")
 @click.option("--dry-run", is_flag=True, help="Analyze only; do not call agent or mutate GitHub.")
 @click.option("--no-pr", is_flag=True, help="Run locally without creating a pull request.")
+@click.option("--max-attempts", type=int, default=None, help="Override execution/evaluation attempt limit.")
+@click.option("--candidates", type=int, default=None, help="Override initial candidate fanout.")
+@click.option("--max-parallel-candidates", type=int, default=None, help="Override parallel candidate limit.")
+@click.option("--repair-fanout", type=int, default=None, help="Override repair candidate fanout.")
+@click.option("--timeout", type=int, default=None, help="Override candidate timeout in seconds.")
 @click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
-def issue(issue_number, path, dry_run, no_pr, as_json):
+def issue(
+    issue_number,
+    path,
+    dry_run,
+    no_pr,
+    max_attempts,
+    candidates,
+    max_parallel_candidates,
+    repair_fanout,
+    timeout,
+    as_json,
+):
     """Process a single GitHub issue."""
     import json
 
@@ -231,7 +269,13 @@ def issue(issue_number, path, dry_run, no_pr, as_json):
 
     from gg.orchestrator.pipeline import OrchestratorPipeline
 
-    result = OrchestratorPipeline(path).run_issue(issue_number, dry_run=dry_run, no_pr=no_pr)
+    result = OrchestratorPipeline(path).configure_runtime(
+        max_attempts=max_attempts,
+        candidates=candidates,
+        max_parallel_candidates=max_parallel_candidates,
+        repair_fanout=repair_fanout,
+        timeout=timeout,
+    ).run_issue(issue_number, dry_run=dry_run, no_pr=no_pr)
     if as_json:
         click.echo(json.dumps(result, indent=2, ensure_ascii=False))
         return

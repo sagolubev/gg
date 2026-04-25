@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 import hashlib
 import re
 import tempfile
@@ -69,6 +70,30 @@ class OrchestratorPipeline:
         self.platform = platform or create_platform(self.config.task_system.platform, self.project_path)
         self.agent = agent or create_agent_backend(self.config.runtime.agent_backend)
         self.knowledge = KnowledgeEngine(self.project_path)
+
+    def configure_runtime(
+        self,
+        *,
+        max_attempts: int | None = None,
+        candidates: int | None = None,
+        max_parallel_candidates: int | None = None,
+        repair_fanout: int | None = None,
+        timeout: int | None = None,
+    ) -> "OrchestratorPipeline":
+        updates: dict[str, int] = {}
+        if max_attempts is not None:
+            updates["max_attempts"] = max(1, max_attempts)
+        if candidates is not None:
+            updates["candidates"] = max(1, candidates)
+        if max_parallel_candidates is not None:
+            updates["max_parallel_candidates"] = max(1, max_parallel_candidates)
+        if repair_fanout is not None:
+            updates["repair_candidates"] = max(1, repair_fanout)
+        if timeout is not None:
+            updates["candidate_timeout_seconds"] = max(1, timeout)
+        if updates:
+            self.config = replace(self.config, runtime=replace(self.config.runtime, **updates))
+        return self
 
     def run_issue(
         self,

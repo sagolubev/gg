@@ -2413,6 +2413,34 @@ def test_run_batch_skips_issue_with_existing_local_success(tmp_path):
     assert len(pipeline.store.list_runs()) == 1
 
 
+def test_pipeline_runtime_overrides_update_execution_knobs(tmp_path):
+    init_repo(tmp_path)
+    pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent()).configure_runtime(
+        max_attempts=2,
+        candidates=3,
+        max_parallel_candidates=2,
+        repair_fanout=1,
+        timeout=45,
+    )
+
+    assert pipeline.config.runtime.max_attempts == 2
+    assert pipeline.config.runtime.candidates == 3
+    assert pipeline.config.runtime.max_parallel_candidates == 2
+    assert pipeline.config.runtime.repair_candidates == 1
+    assert pipeline.config.runtime.candidate_timeout_seconds == 45
+
+
+def test_cli_issue_help_documents_runtime_overrides():
+    result = CliRunner().invoke(cli, ["issue", "--help"])
+
+    assert result.exit_code == 0
+    assert "--max-attempts" in result.output
+    assert "--candidates" in result.output
+    assert "--max-parallel-candidates" in result.output
+    assert "--repair-fanout" in result.output
+    assert "--timeout" in result.output
+
+
 def test_init_params_generation(tmp_path):
     init_repo(tmp_path)
     (tmp_path / "pyproject.toml").write_text("[project]\nname = 'sample'\n", encoding="utf-8")

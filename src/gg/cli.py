@@ -187,6 +187,7 @@ def constitution(path, debug):
 @click.option("--max-parallel-candidates", type=int, default=None, help="Override parallel candidate limit.")
 @click.option("--repair-fanout", type=int, default=None, help="Override repair candidate fanout.")
 @click.option("--timeout", type=int, default=None, help="Override candidate timeout in seconds.")
+@click.option("--base", default=None, help="Override target default branch for publishing.")
 @click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
 def run(
     path,
@@ -198,6 +199,7 @@ def run(
     max_parallel_candidates,
     repair_fanout,
     timeout,
+    base,
     as_json,
 ):
     """Supervisor loop: pick issues and orchestrate agents."""
@@ -213,6 +215,7 @@ def run(
         max_parallel_candidates=max_parallel_candidates,
         repair_fanout=repair_fanout,
         timeout=timeout,
+        base=base,
     )
     result = (
         pipeline.run_batch(batch_size=batch_size, dry_run=dry_run, no_pr=no_pr)
@@ -249,6 +252,7 @@ def run(
 @click.option("--max-parallel-candidates", type=int, default=None, help="Override parallel candidate limit.")
 @click.option("--repair-fanout", type=int, default=None, help="Override repair candidate fanout.")
 @click.option("--timeout", type=int, default=None, help="Override candidate timeout in seconds.")
+@click.option("--base", default=None, help="Override target default branch for publishing.")
 @click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
 def issue(
     issue_number,
@@ -260,6 +264,7 @@ def issue(
     max_parallel_candidates,
     repair_fanout,
     timeout,
+    base,
     as_json,
 ):
     """Process a single GitHub issue."""
@@ -275,6 +280,7 @@ def issue(
         max_parallel_candidates=max_parallel_candidates,
         repair_fanout=repair_fanout,
         timeout=timeout,
+        base=base,
     ).run_issue(issue_number, dry_run=dry_run, no_pr=no_pr)
     if as_json:
         click.echo(json.dumps(result, indent=2, ensure_ascii=False))

@@ -94,6 +94,7 @@ class OrchestratorPipeline:
         max_parallel_candidates: int | None = None,
         repair_fanout: int | None = None,
         timeout: int | None = None,
+        base: str | None = None,
     ) -> "OrchestratorPipeline":
         updates: dict[str, int] = {}
         if max_attempts is not None:
@@ -108,6 +109,8 @@ class OrchestratorPipeline:
             updates["candidate_timeout_seconds"] = max(1, timeout)
         if updates:
             self.config = replace(self.config, runtime=replace(self.config.runtime, **updates))
+        if base is not None and base.strip():
+            self.config = replace(self.config, git=replace(self.config.git, default_branch=base.strip()))
         return self
 
     def run_issue(

@@ -2879,6 +2879,7 @@ def test_pipeline_runtime_overrides_update_execution_knobs(tmp_path):
         max_parallel_candidates=2,
         repair_fanout=1,
         timeout=45,
+        base="release",
     )
 
     assert pipeline.config.runtime.max_attempts == 2
@@ -2886,6 +2887,7 @@ def test_pipeline_runtime_overrides_update_execution_knobs(tmp_path):
     assert pipeline.config.runtime.max_parallel_candidates == 2
     assert pipeline.config.runtime.repair_candidates == 1
     assert pipeline.config.runtime.candidate_timeout_seconds == 45
+    assert pipeline.config.git.default_branch == "release"
 
 
 def test_pipeline_blocks_missing_required_sandbox_before_baseline(monkeypatch, tmp_path):
@@ -2918,6 +2920,7 @@ def test_cli_issue_help_documents_runtime_overrides():
     assert "--max-parallel-candidates" in result.output
     assert "--repair-fanout" in result.output
     assert "--timeout" in result.output
+    assert "--base" in result.output
 
 
 def test_init_params_generation(tmp_path):

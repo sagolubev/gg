@@ -190,7 +190,7 @@ class AnalysisConfigModel(StrictArtifactModel):
     max_issue_body_chars: int = Field(default=12000, ge=1)
     max_summary_chars: int = Field(default=1200, ge=1)
     max_project_context_chars: int = Field(default=12000, ge=1)
-    max_comments: int = Field(default=10, ge=0)
+    max_comments: int = Field(default=20, ge=0)
     max_comment_body_chars: int = Field(default=2000, ge=1)
     max_inputs: int = Field(default=10, ge=0)
     max_input_message_chars: int = Field(default=2000, ge=1)
@@ -295,6 +295,7 @@ class CandidateStateModel(CompatibleArtifactModel):
     error: str | None = None
     agent_pid: int | None = Field(default=None, ge=1)
     sandbox_pid: int | None = Field(default=None, ge=1)
+    port: int | None = Field(default=None, ge=1, le=65535)
 
     @field_validator("status")
     @classmethod
@@ -534,6 +535,7 @@ class AgentHandoffModel(CompatibleArtifactModel):
     task_brief_path: str = ""
     context_snapshot_path: str = ""
     instructions: str = ""
+    port: int | None = Field(default=None, ge=1, le=65535)
     artifacts: dict[str, str] = Field(default_factory=dict)
     handoff_id: str = ""
     target_agent: dict[str, Any] = Field(default_factory=dict)

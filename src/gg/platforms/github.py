@@ -4,7 +4,7 @@ import json
 
 from gg.platforms.base import GitPlatform, Issue, IssueComment, PlatformCapabilities
 
-MAX_COMMENTS = 10
+MAX_COMMENTS = 20
 MAX_COMMENT_CHARS = 4000
 
 
@@ -113,12 +113,16 @@ class GitHubPlatform(GitPlatform):
     def validate_auth(self) -> None:
         output = self._run(["auth", "status"], bucket=self._bucket("auth"))
         token_scopes: set[str] = set()
+        saw_scopes = False
         for line in output.splitlines():
             line = line.strip().lower()
             if "token scopes:" in line or "oauth scopes:" in line:
+                saw_scopes = True
                 scopes_part = line.split(":", 1)[1] if ":" in line else ""
                 token_scopes = {s.strip().strip("'\"") for s in scopes_part.split(",") if s.strip()}
                 break
+        if not saw_scopes:
+            raise RuntimeError("GitHub token scopes could not be determined from gh auth status output")
         if token_scopes and not token_scopes.issuperset(self.REQUIRED_SCOPES):
             missing = self.REQUIRED_SCOPES - token_scopes
             raise RuntimeError(

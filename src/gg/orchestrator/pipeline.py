@@ -169,6 +169,9 @@ class OrchestratorPipeline:
                 brief = self._refresh_task_analysis(state, issue)
                 if brief.blocked:
                     return self._block_on_task_analysis(state, issue, brief, dry_run=dry_run)
+                budget_error = self._enforce_context_budget(state, brief)
+                if budget_error:
+                    return self._handle_context_too_large(state, budget_error)
                 state.transition(TaskState.READY_FOR_EXECUTION, reason="task brief ready")
                 self.store.write(state)
 
@@ -386,6 +389,9 @@ class OrchestratorPipeline:
                     brief = self._refresh_task_analysis(state, issue)
                     if brief.blocked:
                         return self._block_on_task_analysis(state, issue, brief, dry_run=False)
+                    budget_error = self._enforce_context_budget(state, brief)
+                    if budget_error:
+                        return self._handle_context_too_large(state, budget_error)
                 if state.state is TaskState.OUTCOME_PUBLISHING:
                     return self._resume_publishing(state, issue, no_pr=no_pr)
                 for candidate in state.candidate_states.values():
@@ -485,12 +491,31 @@ class OrchestratorPipeline:
                 candidate.finished_at = _now_placeholder()
                 candidate.error = reason
 
-    def cancel(self, run_id: str, *, reason: str = "operator requested cancellation") -> dict[str, Any]:
+    def _abandon_run_worktrees(self, state) -> list[str]:
+        removed: list[str] = []
+        for candidate in state.candidate_states.values():
+            if not candidate.worktree_path:
+                continue
+            path = Path(candidate.worktree_path)
+            if not path.exists():
+                continue
+            git_remove_worktree(self.project_path, path)
+            removed.append(str(path))
+        return removed
+
+    def cancel(
+        self,
+        run_id: str,
+        *,
+        reason: str = "operator requested cancellation",
+        abandon_worktrees: bool = False,
+    ) -> dict[str, Any]:
         state = self.store.load(run_id)
         if state.state in TERMINAL_STATES:
             return {"run_id": run_id, "state": state.state.value, "cancelled": False}
         if state.has_running_candidates():
             terminated_pids = self._terminate_running_candidate_processes(state)
+            abandoned = self._abandon_run_worktrees(state) if abandon_worktrees else []
             state.cancel_requested = True
             state.last_error = {"code": "cancel_requested", "message": reason, "at": _now_placeholder()}
             with self.locks.run(run_id):
@@ -501,6 +526,7 @@ class OrchestratorPipeline:
                 "cancelled": False,
                 "cancel_requested": True,
                 "terminated_pids": terminated_pids,
+                "abandoned_worktrees": abandoned,
             }
         if state.state is TaskState.OUTCOME_PUBLISHING and state.publishing_step not in {None, "started"}:
             state.cancel_requested = True
@@ -697,6 +723,18 @@ class OrchestratorPipeline:
             self.store.write(state)
             self._mark_issue_blocked(issue.number, state.run_id, message)
             return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
+        if not self._check_disk_usage(self.project_path):
+            message = (
+                "insufficient disk for candidate workspace: "
+                f"less than {self.config.runtime.resource.max_disk_mb}MB available"
+            )
+            state.transition(TaskState.BLOCKED, reason="insufficient disk for candidate workspace")
+            state.blocked_resume_state = TaskState.AGENT_SELECTION
+            state.blocked_until = None
+            state.last_error = {"code": "insufficient_disk", "message": message, "at": _now_placeholder()}
+            self.store.write(state)
+            self._mark_issue_blocked(issue.number, state.run_id, message)
+            return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
 
         baseline = self._run_baseline_verification(state)
 
@@ -719,7 +757,7 @@ class OrchestratorPipeline:
             strategies = _candidate_strategies(candidate_count)
             if state.attempt > 1:
                 strategies = [f"repair:{strategy}" for strategy in strategies]
-            planned_candidates: list[tuple[int, str, str, dict[str, Any] | None]] = []
+            planned_candidates: list[tuple[int, str, str, dict[str, Any] | None, int]] = []
             for index, strategy in enumerate(strategies, start=1):
                 cancelled = self._cancelled_response(state)
                 if cancelled:
@@ -728,9 +766,14 @@ class OrchestratorPipeline:
                     f"candidate-{index}" if state.attempt == 1 else f"repair-{state.attempt}-{index}"
                 )
                 candidate_id = _unique_candidate_id(state, base_candidate_id)
-                state.candidate_states[candidate_id] = CandidateState(status="running", started_at=_now_placeholder())
+                port = self._allocate_port(candidate_id)
+                state.candidate_states[candidate_id] = CandidateState(
+                    status="running",
+                    started_at=_now_placeholder(),
+                    port=port,
+                )
                 self.store.write(state)
-                planned_candidates.append((index, candidate_id, strategy, repair_context))
+                planned_candidates.append((index, candidate_id, strategy, repair_context, port))
             attempt_records = self._run_candidate_batch(
                 state=state,
                 issue=issue,
@@ -754,6 +797,7 @@ class OrchestratorPipeline:
                     agent_pid=candidate.agent_pid or (latest_candidate_state.agent_pid if latest_candidate_state else None),
                     sandbox_pid=candidate.sandbox_pid
                     or (latest_candidate_state.sandbox_pid if latest_candidate_state else None),
+                    port=latest_candidate_state.port if latest_candidate_state else None,
                 )
                 self.knowledge.record_implementation_done(
                     issue_number=issue.number,
@@ -864,12 +908,12 @@ class OrchestratorPipeline:
         brief: TaskBrief,
         executor: CandidateExecutor,
         baseline,
-        planned_candidates: list[tuple[int, str, str, dict[str, Any] | None]],
+        planned_candidates: list[tuple[int, str, str, dict[str, Any] | None, int]],
     ) -> list[dict[str, Any]]:
         workers = min(len(planned_candidates), self.config.runtime.max_parallel_candidates)
         if workers <= 1:
             results = []
-            for index, candidate_id, strategy, repair_context in planned_candidates:
+            for index, candidate_id, strategy, repair_context, port in planned_candidates:
                 if self._shutdown_requested:
                     break
                 results.append(self._run_candidate_attempt(
@@ -882,11 +926,12 @@ class OrchestratorPipeline:
                     candidate_id=candidate_id,
                     strategy=strategy,
                     repair_context=repair_context,
+                    port=port,
                 ))
             return results
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = []
-            for index, candidate_id, strategy, repair_context in planned_candidates:
+            for index, candidate_id, strategy, repair_context, port in planned_candidates:
                 if self._shutdown_requested:
                     break
                 futures.append(pool.submit(
@@ -900,6 +945,7 @@ class OrchestratorPipeline:
                     candidate_id=candidate_id,
                     strategy=strategy,
                     repair_context=repair_context,
+                    port=port,
                 ))
             results = [future.result() for future in futures]
         return sorted(results, key=lambda item: item["index"])
@@ -940,7 +986,7 @@ class OrchestratorPipeline:
         candidate_id: str,
         payload: dict[str, Any],
     ) -> None:
-        allowed = {"worktree_path", "branch", "agent_pid", "sandbox_pid"}
+        allowed = {"worktree_path", "branch", "agent_pid", "sandbox_pid", "port"}
         updates = {key: value for key, value in payload.items() if key in allowed and value}
         if not updates:
             return
@@ -964,6 +1010,7 @@ class OrchestratorPipeline:
         candidate_id: str,
         strategy: str,
         repair_context: dict[str, Any] | None,
+        port: int | None = None,
     ) -> dict[str, Any]:
         candidate_dir = f"candidates/{candidate_id}"
         handoff_artifact: dict[str, str] = {}
@@ -987,6 +1034,7 @@ class OrchestratorPipeline:
             attempt=state.attempt,
             task_brief_path=state.artifacts.get("task_brief", ""),
             context_snapshot_path=state.artifacts.get("context_snapshot", ""),
+            port=port,
             on_status=lambda payload: self._update_candidate_runtime_state(
                 state.run_id,
                 candidate_id,
@@ -1011,6 +1059,7 @@ class OrchestratorPipeline:
                     attempt=state.attempt,
                     task_brief_path=state.artifacts.get("task_brief", ""),
                     context_snapshot_path=state.artifacts.get("context_snapshot", ""),
+                    port=port,
                 ).to_dict(),
             )
         if candidate.status == "setup_failed":
@@ -1322,56 +1371,70 @@ class OrchestratorPipeline:
             cancelled = self._cancelled_response(state)
             if cancelled:
                 return cancelled
-            pr_url = state.pr_url or self.platform.find_pr(head=winner["branch"])
-            if pr_url is None:
-                pr_url = self.platform.create_pr(
-                    title=f"Implement #{issue.number}: {issue.title}",
-                    body=self._pr_body(issue, state.run_id, winner["summary"], winner["verification_path"]),
-                    head=winner["branch"],
-                    base=self.config.git.default_branch,
+            if state.publishing_step in {"branch_pushed", "committed"}:
+                pr_url = state.pr_url or self.platform.find_pr(head=winner["branch"])
+                if pr_url is None:
+                    pr_url = self.platform.create_pr(
+                        title=f"Implement #{issue.number}: {issue.title}",
+                        body=self._pr_body(issue, state.run_id, winner["summary"], winner["verification_path"]),
+                        head=winner["branch"],
+                        base=self.config.git.default_branch,
+                    )
+                latest = self.store.load(state.run_id)
+                if latest.cancel_requested or latest.state is TaskState.CANCELLED:
+                    latest.pr_url = pr_url
+                    if latest.state is not TaskState.CANCELLED:
+                        latest.transition(TaskState.CANCELLED, reason="cancel requested during publishing")
+                    self.store.write(latest)
+                    return {"run_id": state.run_id, "state": latest.state.value, "cancelled": True}
+                state.pr_url = pr_url
+                state.publishing_step = "pr_created"
+                self.store.write(state)
+                cancelled = self._cancelled_response(state)
+                if cancelled:
+                    return cancelled
+                self.knowledge.record_pr_created(
+                    issue_number=issue.number,
+                    pr_url=pr_url,
+                    pr_number=_parse_pr_number(pr_url),
                 )
-            latest = self.store.load(state.run_id)
-            if latest.cancel_requested or latest.state is TaskState.CANCELLED:
-                latest.pr_url = pr_url
-                if latest.state is not TaskState.CANCELLED:
-                    latest.transition(TaskState.CANCELLED, reason="cancel requested during publishing")
-                self.store.write(latest)
-                return {"run_id": state.run_id, "state": latest.state.value, "cancelled": True}
-            state.pr_url = pr_url
-            state.publishing_step = "pr_created"
-            self.store.write(state)
-            cancelled = self._cancelled_response(state)
-            if cancelled:
-                return cancelled
-            self.knowledge.record_pr_created(
-                issue_number=issue.number,
-                pr_url=pr_url,
-                pr_number=_parse_pr_number(pr_url),
-            )
 
-        state.transition(TaskState.COMPLETED, reason="walking skeleton complete")
-        state.publishing_step = "completed"
         winner["result_path"] = state.candidate_states.get(winner["candidate_id"], CandidateState(status="")).result_path or ""
         state.artifacts["run_outcome"] = self._write_run_outcome(state, winner)
         self.store.write(state)
-        if not no_pr:
-            self.platform.publish_outcome(
-                issue.number,
-                run_id=state.run_id,
-                pr_url=state.pr_url or "",
-                selected_candidate_id=winner["candidate_id"],
-                branch=winner["branch"],
-                evaluation_path=state.artifacts.get("evaluation", ""),
-                run_outcome_path=state.artifacts.get("run_outcome", ""),
-                verification_path=winner.get("verification_path", ""),
-            )
+        if not no_pr and state.publishing_step != "result_commented":
+            try:
+                self.platform.publish_outcome(
+                    issue.number,
+                    run_id=state.run_id,
+                    pr_url=state.pr_url or "",
+                    selected_candidate_id=winner["candidate_id"],
+                    branch=winner["branch"],
+                    evaluation_path=state.artifacts.get("evaluation", ""),
+                    run_outcome_path=state.artifacts.get("run_outcome", ""),
+                    verification_path=winner.get("verification_path", ""),
+                )
+            except Exception as exc:
+                state.fail(code="publish_outcome_failed", message=str(exc))
+                self.store.write(state)
+                return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
             state.publishing_step = "result_commented"
             self.store.write(state)
             cancelled = self._cancelled_response(state)
             if cancelled:
                 return cancelled
         self._cleanup_integration_worktree(state)
-        self._mark_issue_done(issue.number)
+        done_error = self._mark_issue_done(issue.number)
+        if done_error:
+            state.fail(code="publish_done_failed", message=done_error)
+            self.store.write(state)
+            return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
+        state.publishing_step = "done_marked"
+        self.store.write(state)
+        state.transition(TaskState.COMPLETED, reason="all publish side effects complete")
+        state.publishing_step = "completed"
+        state.artifacts["run_outcome"] = self._write_run_outcome(state, winner)
+        self.store.write(state)
         return {
             "run_id": state.run_id,
             "state": state.state.value,
@@ -1812,6 +1875,7 @@ class OrchestratorPipeline:
             latest = self.store.load(state.run_id)
         except FileNotFoundError:
             return
+        self._terminate_running_candidate_processes(latest)
         for candidate in latest.candidate_states.values():
             if candidate.status == "running":
                 candidate.status = "failed"
@@ -1863,7 +1927,7 @@ class OrchestratorPipeline:
         except Exception:
             return
 
-    def _mark_issue_done(self, issue_number: int) -> None:
+    def _mark_issue_done(self, issue_number: int) -> str | None:
         try:
             self.platform.publish_done(
                 issue_number,
@@ -1871,8 +1935,9 @@ class OrchestratorPipeline:
                 blocked_label=self.config.task_system.blocked_label,
                 done_label=self.config.task_system.done_label,
             )
-        except Exception:
-            return
+        except Exception as exc:
+            return str(exc)
+        return None
 
     def _best_effort_labels(self, issue_number: int, *, add: list[str], remove: list[str]) -> None:
         try:
@@ -2148,15 +2213,37 @@ class OrchestratorPipeline:
         analysis = self.config.analysis
         if len(brief.candidate_files) > analysis.max_candidate_files:
             return "context_too_large"
+        budget = brief.context_budget or {}
+        effective_tokens = budget.get("effective_context_tokens") or analysis.max_context_tokens
+        estimated_tokens = budget.get("estimated_tokens")
+        if isinstance(estimated_tokens, int) and isinstance(effective_tokens, int):
+            if estimated_tokens > effective_tokens:
+                return "context_too_large"
+        for relative_path in brief.candidate_files:
+            path = (self.project_path / relative_path).resolve()
+            try:
+                path.relative_to(self.project_path)
+            except ValueError:
+                return "context_too_large"
+            if not path.is_file():
+                continue
+            try:
+                if len(path.read_text(encoding="utf-8", errors="ignore")) > analysis.max_file_chars:
+                    return "context_too_large"
+            except OSError:
+                continue
         return None
 
     def _handle_context_too_large(self, state, code: str) -> dict[str, Any]:
         policy = self.config.analysis.context_too_large_policy
         if policy == "blocked":
-            state.transition(
-                TaskState.BLOCKED,
-                reason=f"context too large (policy={policy})",
-            )
+            if state.state is TaskState.TASK_ANALYSIS:
+                state.transition(
+                    TaskState.BLOCKED,
+                    reason=f"context too large (policy={policy})",
+                )
+            else:
+                state.recover_to(TaskState.BLOCKED, reason=f"context too large (policy={policy})")
             state.last_error = {"code": code, "message": "Context budget exceeded", "at": _now_placeholder()}
             self.store.write(state)
             return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
@@ -2206,7 +2293,7 @@ class OrchestratorPipeline:
             return False
 
     def _reconcile_state_events(self, state) -> list[dict[str, Any]]:
-        """Compare state.transitions against pipeline.jsonl STATE_TRANSITION events."""
+        """Compare state.transitions against pipeline.jsonl state_transition events."""
         mismatches: list[dict[str, Any]] = []
         run_dir = self.store.path_for(state.run_id)
         pipeline_log = run_dir / "pipeline.jsonl"
@@ -2221,7 +2308,7 @@ class OrchestratorPipeline:
                     entry = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if entry.get("event") == "STATE_TRANSITION":
+                if entry.get("event") == "state_transition":
                     log_transitions.append(entry)
             state_transitions = [
                 {

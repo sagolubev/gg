@@ -148,7 +148,7 @@ class AnalysisConfig:
     max_issue_body_chars: int = 12000
     max_summary_chars: int = 1200
     max_project_context_chars: int = 12000
-    max_comments: int = 10
+    max_comments: int = 20
     max_comment_body_chars: int = 2000
     max_inputs: int = 10
     max_input_message_chars: int = 2000
@@ -279,6 +279,12 @@ def default_params(project_path: str | Path) -> dict[str, Any]:
             "test_retry_count": 0,
             "allow_known_baseline_failures": False,
             "block_on_security_high": True,
+            "coverage": "",
+            "format_check": "",
+            "dependency_audit": "",
+            "secret_scan": "",
+            "baseline_check": True,
+            "advisory_checks": True,
         },
         "runtime": {
             "agent_backend": "codex",
@@ -307,6 +313,9 @@ def default_params(project_path: str | Path) -> dict[str, Any]:
                 "allowed_hosts": [],
             },
             "port_range": [41000, 45000],
+            "lock_stale_seconds": 3600,
+            "queue_lock_stale_seconds": 300,
+            "vendored_deps": False,
             "sandbox_policy": {
                 "allowed_domains": [],
                 "denied_domains": [],
@@ -317,7 +326,9 @@ def default_params(project_path: str | Path) -> dict[str, Any]:
         },
         "audit": {
             "hash_events": False,
+            "hash_artifacts": False,
             "external_sink": "",
+            "sign_events": False,
         },
         "security": {
             "allow_lfs_changes": False,
@@ -326,6 +337,8 @@ def default_params(project_path: str | Path) -> dict[str, Any]:
         },
         "cleanup": {
             "blocked_timeout_days": 14,
+            "keep_last": 20,
+            "ttl_days": 14,
         },
         "log": {
             "max_size_mb": 50,
@@ -343,11 +356,15 @@ def default_params(project_path: str | Path) -> dict[str, Any]:
             "max_issue_body_chars": 12000,
             "max_summary_chars": 1200,
             "max_project_context_chars": 12000,
-            "max_comments": 10,
+            "max_comments": 20,
             "max_comment_body_chars": 2000,
             "max_inputs": 10,
             "max_input_message_chars": 2000,
             "max_agent_response_chars": 12000,
+            "max_candidate_files": 20,
+            "max_file_chars": 40000,
+            "context_too_large_policy": "fail",
+            "include_attachments": "links-only",
         },
         "evaluation": {
             "max_context_tokens": 60000,
@@ -550,8 +567,11 @@ def load_config(project_path: str | Path) -> GGConfig:
                     "max_issue_body_chars": analysis.get("max_issue_body_chars", 12000),
                     "max_summary_chars": analysis.get("max_summary_chars", 1200),
                     "max_project_context_chars": analysis.get("max_project_context_chars", 12000),
-                    "max_comments": analysis.get("max_comments", 10),
-                    "max_comment_body_chars": analysis.get("max_comment_body_chars", 2000),
+                    "max_comments": analysis.get("max_comments", 20),
+                    "max_comment_body_chars": analysis.get(
+                        "max_comment_body_chars",
+                        analysis.get("max_comment_chars", 2000),
+                    ),
                     "max_inputs": analysis.get("max_inputs", 10),
                     "max_input_message_chars": analysis.get("max_input_message_chars", 2000),
                     "max_agent_response_chars": analysis.get("max_agent_response_chars", 12000),
@@ -841,6 +861,7 @@ def _reject_unknown_config_keys(raw: dict[str, Any], location: str) -> None:
             "max_summary_chars",
             "max_project_context_chars",
             "max_comments",
+            "max_comment_chars",
             "max_comment_body_chars",
             "max_inputs",
             "max_input_message_chars",

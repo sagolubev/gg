@@ -51,6 +51,7 @@ class AgentHandoff:
     task_brief_path: str = ""
     context_snapshot_path: str = ""
     instructions: str = ""
+    port: int | None = None
     artifacts: dict[str, str] | None = None
 
     def to_model(self) -> AgentHandoffModel:
@@ -143,6 +144,7 @@ class CandidateExecutor:
         attempt: int = 1,
         task_brief_path: str = "",
         context_snapshot_path: str = "",
+        port: int | None = None,
         artifacts: dict[str, str] | None = None,
         created_at: str | None = None,
     ) -> AgentHandoff:
@@ -158,6 +160,7 @@ class CandidateExecutor:
             task_brief_path=task_brief_path,
             context_snapshot_path=context_snapshot_path,
             instructions=instructions,
+            port=port,
             artifacts=artifacts or {},
         )
 
@@ -217,6 +220,7 @@ class CandidateExecutor:
         attempt: int = 1,
         task_brief_path: str = "",
         context_snapshot_path: str = "",
+        port: int | None = None,
     ) -> CandidateResult:
         sandbox_error = self.sandbox_preflight_error()
         if sandbox_error is not None:
@@ -244,6 +248,7 @@ class CandidateExecutor:
                     attempt=attempt,
                     task_brief_path=task_brief_path,
                     context_snapshot_path=context_snapshot_path,
+                    port=port,
                     artifacts={},
                 )
             )
@@ -252,7 +257,7 @@ class CandidateExecutor:
         runtime: dict[str, Any] = {}
         runtime_callback = _merge_status_callbacks(runtime, on_status)
         try:
-            setup = self._run_setup(worktree)
+            setup = self._run_setup(worktree, port=port)
             if setup.status not in {"passed", "skipped", "flaky"}:
                 return CandidateResult(
                     schema_version=1,
@@ -270,7 +275,7 @@ class CandidateExecutor:
                     agent_pid=runtime.get("agent_pid"),
                     sandbox_pid=runtime.get("sandbox_pid"),
                 )
-            summary = self._generate(prompt, worktree, on_status=runtime_callback)
+            summary = self._generate(prompt, worktree, port=port, on_status=runtime_callback)
             needs_input = _extract_needs_input(summary)
             files = changed_files(worktree)
             patch = diff(worktree) if files else ""
@@ -317,14 +322,14 @@ class CandidateExecutor:
                 sandbox_pid=runtime.get("sandbox_pid"),
             )
 
-    def _run_setup(self, worktree: Path) -> CheckResult:
+    def _run_setup(self, worktree: Path, *, port: int | None = None) -> CheckResult:
         command = self.config.verify.setup.strip()
         if not command:
             return CheckResult(command="", status="skipped", exit_code=None, attempts=0)
         return VerificationRunner(
             [command],
             timeout=self.config.runtime.setup_timeout_seconds,
-            env=self._candidate_env(worktree),
+            env=self._candidate_env(worktree, port=port),
         ).run(worktree)[0]
 
     def _generate(
@@ -332,11 +337,12 @@ class CandidateExecutor:
         prompt: str,
         worktree: Path,
         *,
+        port: int | None = None,
         on_status: CandidateStatusCallback | None = None,
     ) -> str:
         if self.config.runtime.use_sandbox_runtime and isinstance(self.agent, CodexAgent):
             if self.sandbox.is_available():
-                return self._generate_in_sandbox(prompt, worktree, on_status=on_status)
+                return self._generate_in_sandbox(prompt, worktree, port=port, on_status=on_status)
         if self.sandbox_preflight_error() is not None:
             raise RuntimeError("sandbox-runtime is required but unavailable")
         return self.agent.generate(
@@ -350,6 +356,7 @@ class CandidateExecutor:
         prompt: str,
         worktree: Path,
         *,
+        port: int | None = None,
         on_status: CandidateStatusCallback | None = None,
     ) -> str:
         out_path = Path(tempfile.mktemp(prefix="gg-candidate-", suffix=".md", dir=str(worktree)))
@@ -358,7 +365,7 @@ class CandidateExecutor:
             cwd=worktree,
             timeout=self.config.runtime.candidate_timeout_seconds,
             policy=self._sandbox_policy(),
-            env=self._candidate_env(worktree),
+            env=self._candidate_env(worktree, port=port),
             on_process_start=(
                 (lambda pid: on_status({"sandbox_pid": pid})) if on_status is not None else None
             ),
@@ -374,7 +381,7 @@ class CandidateExecutor:
     def _sandbox_policy(self) -> SandboxPolicy:
         return self.config.runtime.sandbox_policy
 
-    def _candidate_env(self, worktree: Path) -> dict[str, str]:
+    def _candidate_env(self, worktree: Path, *, port: int | None = None) -> dict[str, str]:
         cache_root = worktree / ".gg-cache"
         cache_root.mkdir(parents=True, exist_ok=True)
         env = {
@@ -400,6 +407,9 @@ class CandidateExecutor:
                 "GOMODCACHE": str(cache_root / "go-mod"),
             }
         )
+        if port is not None:
+            env["PORT"] = str(port)
+            env["GG_CANDIDATE_PORT"] = str(port)
         return env
 
     def _disk_quota_error(self, worktree: Path) -> str | None:

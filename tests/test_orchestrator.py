@@ -118,6 +118,16 @@ class CancellingFindPrPlatform(FakePlatform):
         return "https://github.com/example/repo/pull/77"
 
 
+class FailingOutcomePlatform(FakePlatform):
+    def publish_outcome(self, *args, **kwargs) -> None:
+        raise RuntimeError("result comment failed")
+
+
+class FailingDonePlatform(FakePlatform):
+    def publish_done(self, *args, **kwargs) -> None:
+        raise RuntimeError("done label failed")
+
+
 class ThrottledListPlatform(FakePlatform):
     def list_issues(self, state: str = "open", limit: int = 30) -> list[Issue]:
         raise RateLimitThrottleError(
@@ -203,6 +213,29 @@ class JsonAnalysisAgent(AgentBackend):
 
     def is_available(self) -> bool:
         return True
+
+
+class LargeCandidateFileAnalysisAgent(JsonAnalysisAgent):
+    supports_task_analysis = True
+
+    def generate(
+        self,
+        prompt: str,
+        *,
+        cwd: str | None = None,
+        timeout: int | None = None,
+        context: str | None = None,
+    ) -> str:
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "ready": True,
+                "summary": "Touch several files",
+                "acceptance_criteria": ["changes are scoped"],
+                "candidate_files": ["a.py", "b.py"],
+                "context_budget": {"estimated_tokens": 120, "truncated": False},
+            }
+        )
 
 
 class TimeoutRecordingAnalysisAgent(JsonAnalysisAgent):
@@ -1242,6 +1275,45 @@ def test_pipeline_no_pr_completes_with_one_candidate(tmp_path):
     assert summary["logs"]["pipeline"].endswith("pipeline.jsonl")
 
 
+def test_publish_outcome_failure_does_not_persist_completed(monkeypatch, tmp_path):
+    init_repo(tmp_path)
+    monkeypatch.setattr("gg.orchestrator.pipeline.push_branch", lambda *_args, **_kwargs: None)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        "verify:\n  tests: \"python -c 'print(1)'\"\n",
+        encoding="utf-8",
+    )
+    result = OrchestratorPipeline(
+        tmp_path,
+        platform=FailingOutcomePlatform(),
+        agent=FakeAgent(),
+    ).run_issue(42, no_pr=False)
+
+    state = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent()).store.load(result["run_id"])
+    assert result["state"] == "TerminalFailure"
+    assert result["error"]["code"] == "publish_outcome_failed"
+    assert state.state is TaskState.TERMINAL_FAILURE
+    assert state.publishing_step == "pr_created"
+
+
+def test_publish_done_failure_does_not_persist_completed(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        "verify:\n  tests: \"python -c 'print(1)'\"\n",
+        encoding="utf-8",
+    )
+    result = OrchestratorPipeline(
+        tmp_path,
+        platform=FailingDonePlatform(),
+        agent=FakeAgent(),
+    ).run_issue(42, no_pr=True)
+
+    state = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent()).store.load(result["run_id"])
+    assert result["state"] == "TerminalFailure"
+    assert result["error"]["code"] == "publish_done_failed"
+    assert state.state is TaskState.TERMINAL_FAILURE
+    assert state.publishing_step == "local_no_pr"
+
+
 def test_pipeline_persists_runtime_candidate_process_metadata(tmp_path):
     init_repo(tmp_path)
     pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
@@ -1257,12 +1329,14 @@ def test_pipeline_persists_runtime_candidate_process_metadata(tmp_path):
             "worktree_path": "/tmp/worktree",
             "branch": "gg/test",
             "sandbox_pid": 43210,
+            "port": 43000,
         },
     )
 
     loaded = pipeline.store.load(state.run_id)
     candidate = loaded.candidate_states["candidate-1"]
     assert candidate.worktree_path == "/tmp/worktree"
+    assert candidate.port == 43000
     assert candidate.branch == "gg/test"
     assert candidate.sandbox_pid == 43210
 
@@ -1873,6 +1947,35 @@ def test_keyboard_interrupt_marks_run_recoverable(tmp_path):
     assert state["state"] == "ReadyForExecution"
     assert state["last_error"]["code"] == "interrupted"
     assert state["candidate_states"]["candidate-1"]["error"] == "interrupted by signal"
+
+
+def test_mark_interrupted_terminates_known_candidate_processes(monkeypatch, tmp_path):
+    init_repo(tmp_path)
+    killed: list[int] = []
+
+    def fake_killpg(pid, sig):
+        assert sig == signal.SIGTERM
+        killed.append(pid)
+
+    monkeypatch.setattr("gg.orchestrator.pipeline.os.killpg", fake_killpg)
+    pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
+    ready = create_ready_run(pipeline)
+    state = pipeline.store.load(ready["run_id"])
+    state.transition(TaskState.AGENT_SELECTION, reason="test select")
+    state.transition(TaskState.AGENT_RUNNING, reason="test running")
+    state.candidate_states["candidate-1"] = CandidateState(
+        status="running",
+        sandbox_pid=43210,
+        agent_pid=54321,
+    )
+    pipeline.store.write(state)
+
+    pipeline._mark_interrupted(state)
+
+    interrupted = pipeline.store.load(ready["run_id"])
+    assert killed == [43210, 54321]
+    assert interrupted.candidate_states["candidate-1"].status == "failed"
+    assert interrupted.last_error["code"] == "interrupted"
 
 
 def test_resume_outcome_publishing_no_pr_completes_idempotently(tmp_path):
@@ -2788,6 +2891,25 @@ def test_github_platform_get_issue_parses_comments():
     assert issue.comments[0].body == "Please preserve CLI compatibility."
 
 
+def test_github_validate_auth_rejects_missing_scope_line():
+    platform = GitHubPlatform(".")
+    platform._run = lambda args, **kwargs: "Logged in to github.com account octocat"  # type: ignore[method-assign]
+
+    try:
+        platform.validate_auth()
+    except RuntimeError as exc:
+        assert "scopes could not be determined" in str(exc)
+    else:
+        raise AssertionError("missing gh scope line should fail auth validation")
+
+
+def test_github_validate_auth_accepts_required_scopes():
+    platform = GitHubPlatform(".")
+    platform._run = lambda args, **kwargs: "Token scopes: 'repo', 'read:org'"  # type: ignore[method-assign]
+
+    platform.validate_auth()
+
+
 def test_gitlab_platform_get_issue_parses_comments():
     platform = GitLabPlatform(".")
     platform._run = lambda args, **kwargs: json.dumps(  # type: ignore[method-assign]
@@ -3122,9 +3244,9 @@ def test_agent_handoff_is_persisted_before_candidate_setup(monkeypatch, tmp_path
     observed: list[bool] = []
     original_run_setup = CandidateExecutor._run_setup
 
-    def assert_handoff_before_setup(self, worktree):
+    def assert_handoff_before_setup(self, worktree, *, port=None):
         observed.append(bool(list((tmp_path / ".gg" / "runs").glob("*/candidates/candidate-1/agent-handoff.json"))))
-        return original_run_setup(self, worktree)
+        return original_run_setup(self, worktree, port=port)
 
     monkeypatch.setattr(CandidateExecutor, "_run_setup", assert_handoff_before_setup)
 
@@ -3144,6 +3266,14 @@ def test_cli_issue_help_documents_runtime_overrides():
     assert "--repair-fanout" in result.output
     assert "--timeout" in result.output
     assert "--base" in result.output
+    assert "--debug" in result.output
+
+
+def test_cli_run_help_documents_debug_flag():
+    result = CliRunner().invoke(cli, ["run", "--help"])
+
+    assert result.exit_code == 0
+    assert "--debug" in result.output
 
 
 def test_init_params_generation(tmp_path):
@@ -3172,13 +3302,20 @@ def test_init_params_generation(tmp_path):
     assert config.runtime.network.default == "deny"
     assert config.runtime.network.allowed_hosts == ()
     assert config.runtime.port_range == (41000, 45000)
+    assert config.runtime.lock_stale_seconds == 3600
+    assert config.runtime.queue_lock_stale_seconds == 300
+    assert config.runtime.vendored_deps is False
     assert config.runtime.sandbox_policy.deny_read == ["~/.ssh", ".env"]
     assert config.audit.hash_events is False
+    assert config.audit.hash_artifacts is False
     assert config.audit.external_sink == ""
+    assert config.audit.sign_events is False
     assert config.security.allow_lfs_changes is False
     assert config.security.allow_binary_changes is True
     assert config.security.allow_dependency_changes is True
     assert config.cleanup.blocked_timeout_days == 14
+    assert config.cleanup.keep_last == 20
+    assert config.cleanup.ttl_days == 14
     assert config.verify.setup == ""
     assert config.verify.tests == "pytest"
     assert config.verify.security == ""
@@ -3186,9 +3323,20 @@ def test_init_params_generation(tmp_path):
     assert config.verify.discovery_enabled is True
     assert config.verify.test_retry_count == 0
     assert config.verify.block_on_security_high is True
+    assert config.verify.coverage == ""
+    assert config.verify.format_check == ""
+    assert config.verify.dependency_audit == ""
+    assert config.verify.secret_scan == ""
+    assert config.verify.baseline_check is True
+    assert config.verify.advisory_checks is True
     assert config.log.mask_secrets is True
     assert config.cost.mode == "duration-only"
     assert config.analysis.max_context_tokens == 60000
+    assert config.analysis.max_comments == 20
+    assert config.analysis.max_candidate_files == 20
+    assert config.analysis.max_file_chars == 40000
+    assert config.analysis.context_too_large_policy == "fail"
+    assert config.analysis.include_attachments == "links-only"
     assert config.evaluation.max_context_tokens == 60000
     assert config.ci.forbid_interactive_prompts is True
     assert config.recovery.keep_state_backup is True
@@ -3238,9 +3386,27 @@ log:
     assert merged["runtime"]["resource"]["max_disk_mb"] == 4096
     assert merged["runtime"]["network"]["default"] == "deny"
     assert merged["runtime"]["port_range"] == [41000, 45000]
+    assert merged["runtime"]["lock_stale_seconds"] == 3600
+    assert merged["runtime"]["queue_lock_stale_seconds"] == 300
+    assert merged["runtime"]["vendored_deps"] is False
+    assert merged["verify"]["coverage"] == ""
+    assert merged["verify"]["format_check"] == ""
+    assert merged["verify"]["dependency_audit"] == ""
+    assert merged["verify"]["secret_scan"] == ""
+    assert merged["verify"]["baseline_check"] is True
+    assert merged["verify"]["advisory_checks"] is True
+    assert merged["audit"]["hash_artifacts"] is False
+    assert merged["audit"]["sign_events"] is False
+    assert merged["cleanup"]["keep_last"] == 20
+    assert merged["cleanup"]["ttl_days"] == 14
     assert merged["log"]["mask_secrets"] is True
     assert merged["cost"]["mode"] == "duration-only"
     assert merged["analysis"]["max_context_tokens"] == 60000
+    assert merged["analysis"]["max_comments"] == 20
+    assert merged["analysis"]["max_candidate_files"] == 20
+    assert merged["analysis"]["max_file_chars"] == 40000
+    assert merged["analysis"]["context_too_large_policy"] == "fail"
+    assert merged["analysis"]["include_attachments"] == "links-only"
     assert merged["evaluation"]["max_context_tokens"] == 60000
     assert merged["ci"]["forbid_interactive_prompts"] is True
     assert merged["recovery"]["keep_state_backup"] is True
@@ -3347,6 +3513,18 @@ recovery:
     assert config.ci.clock_skew_tolerance_seconds == 8
     assert config.ci.clock_drift_warn_seconds == 90
     assert config.recovery.keep_state_backup is False
+
+
+def test_load_config_accepts_plan_comment_char_alias(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        "verify:\n  tests: ''\nanalysis:\n  max_comment_chars: 321\n",
+        encoding="utf-8",
+    )
+
+    config = load_config(tmp_path)
+
+    assert config.analysis.max_comment_body_chars == 321
 
 
 def test_load_config_allows_unsafe_direct_exec_only_when_explicit(tmp_path):
@@ -4533,6 +4711,47 @@ def test_context_budget_no_violation_when_within_limit(tmp_path):
 
     code = pipeline._enforce_context_budget(state, brief)
     assert code is None
+
+
+def test_context_budget_is_enforced_in_run_issue_flow(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        "verify:\n  tests: ''\nanalysis:\n  max_candidate_files: 1\n  context_too_large_policy: fail\n",
+        encoding="utf-8",
+    )
+
+    result = OrchestratorPipeline(
+        tmp_path,
+        platform=FakePlatform(),
+        agent=LargeCandidateFileAnalysisAgent(),
+    ).run_issue(42, no_pr=True)
+
+    assert result["state"] == "TerminalFailure"
+    assert result["error"]["code"] == "context_too_large"
+    state = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent()).store.load(result["run_id"])
+    assert state.candidate_states == {}
+
+
+def test_context_budget_checks_candidate_file_char_limit(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / "big.py").write_text("x" * 20, encoding="utf-8")
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        "verify:\n  tests: ''\nanalysis:\n  max_file_chars: 10\n",
+        encoding="utf-8",
+    )
+    pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
+    state = create_task_analysis_run(pipeline)
+    from gg.orchestrator.task_analysis import TaskBrief
+    brief = TaskBrief(
+        schema_version=1,
+        issue={"number": 42, "title": "T", "body": "", "labels": [], "url": ""},
+        summary="do it",
+        acceptance_criteria=[],
+        project_context="",
+        candidate_files=["big.py"],
+    )
+
+    assert pipeline._enforce_context_budget(state, brief) == "context_too_large"
 
 
 # ---------------------------------------------------------------------------

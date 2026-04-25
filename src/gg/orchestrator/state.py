@@ -104,6 +104,7 @@ class CandidateState:
     error: str | None = None
     agent_pid: int | None = None
     sandbox_pid: int | None = None
+    port: int | None = None
 
 
 @dataclass

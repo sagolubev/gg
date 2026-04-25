@@ -177,6 +177,19 @@ def constitution(path, debug):
         console.print("Local constitution in .gg/constitution.md is still valid.")
 
 
+def _build_pipeline(path, *, debug: bool = False):
+    from gg.orchestrator.pipeline import OrchestratorPipeline
+
+    if not debug:
+        return OrchestratorPipeline(path)
+
+    from rich.console import Console
+
+    from gg.agents.codex import CodexAgent
+
+    return OrchestratorPipeline(path, agent=CodexAgent(console=Console(), debug=True))
+
+
 @cli.command()
 @click.option("--path", type=click.Path(exists=True), default=".", help="Project path.")
 @click.option("--dry-run", is_flag=True, help="Show the next eligible issue without side effects.")
@@ -188,6 +201,7 @@ def constitution(path, debug):
 @click.option("--repair-fanout", type=int, default=None, help="Override repair candidate fanout.")
 @click.option("--timeout", type=int, default=None, help="Override candidate timeout in seconds.")
 @click.option("--base", default=None, help="Override target default branch for publishing.")
+@click.option("--debug", is_flag=True, help="Show Codex output and verbose agent progress.")
 @click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
 def run(
     path,
@@ -200,6 +214,7 @@ def run(
     repair_fanout,
     timeout,
     base,
+    debug,
     as_json,
 ):
     """Supervisor loop: pick issues and orchestrate agents."""
@@ -207,9 +222,7 @@ def run(
 
     from rich.console import Console
 
-    from gg.orchestrator.pipeline import OrchestratorPipeline
-
-    pipeline = OrchestratorPipeline(path).configure_runtime(
+    pipeline = _build_pipeline(path, debug=debug).configure_runtime(
         max_attempts=max_attempts,
         candidates=candidates,
         max_parallel_candidates=max_parallel_candidates,
@@ -254,6 +267,7 @@ def run(
 @click.option("--timeout", type=int, default=None, help="Override candidate timeout in seconds.")
 @click.option("--base", default=None, help="Override target default branch for publishing.")
 @click.option("--label", "labels", multiple=True, help="Additional label to apply to the issue.")
+@click.option("--debug", is_flag=True, help="Show Codex output and verbose agent progress.")
 @click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
 def issue(
     issue_number,
@@ -267,6 +281,7 @@ def issue(
     timeout,
     base,
     labels,
+    debug,
     as_json,
 ):
     """Process a single GitHub issue."""
@@ -274,9 +289,7 @@ def issue(
 
     from rich.console import Console
 
-    from gg.orchestrator.pipeline import OrchestratorPipeline
-
-    result = OrchestratorPipeline(path).configure_runtime(
+    result = _build_pipeline(path, debug=debug).configure_runtime(
         max_attempts=max_attempts,
         candidates=candidates,
         max_parallel_candidates=max_parallel_candidates,
@@ -378,7 +391,11 @@ def cancel(run_id, path, reason, abandon_worktrees, as_json):
 
     from gg.orchestrator.pipeline import OrchestratorPipeline
 
-    result = OrchestratorPipeline(path).cancel(run_id, reason=reason)
+    result = OrchestratorPipeline(path).cancel(
+        run_id,
+        reason=reason,
+        abandon_worktrees=abandon_worktrees,
+    )
     if as_json:
         click.echo(json.dumps(result, indent=2, ensure_ascii=False))
         return

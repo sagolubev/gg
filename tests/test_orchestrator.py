@@ -131,6 +131,11 @@ class ThrottledClaimPlatform(FakePlatform):
         )
 
 
+class AuthFailPlatform(FakePlatform):
+    def validate_auth(self) -> None:
+        raise RuntimeError("gh auth status failed: missing token")
+
+
 class FakeAgent(AgentBackend):
     def generate(
         self,
@@ -1748,6 +1753,18 @@ def test_run_issue_blocks_and_persists_rate_limit_artifact(tmp_path):
     assert result["error"]["code"] == "rate_limited"
     assert state.state is TaskState.BLOCKED
     assert artifact["bucket"] == "github:example/repo:issues:comment"
+
+
+def test_run_issue_validates_auth_before_claim_side_effects(tmp_path):
+    init_repo(tmp_path)
+    platform = AuthFailPlatform()
+
+    result = OrchestratorPipeline(tmp_path, platform=platform, agent=FakeAgent()).run_issue(42)
+
+    assert result["state"] == "TerminalFailure"
+    assert "missing token" in result["error"]["message"]
+    assert platform.labels == []
+    assert platform.comments == []
 
 
 def test_candidate_executor_can_run_codex_via_sandbox(tmp_path):

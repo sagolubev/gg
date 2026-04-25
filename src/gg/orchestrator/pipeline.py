@@ -61,6 +61,8 @@ class OrchestratorPipeline:
             self.knowledge.record_issue_picked(issue_number=issue.number, title=issue.title, labels=issue.labels)
 
             with self.locks.issue(issue_number):
+                if not dry_run:
+                    self.platform.validate_auth()
                 state.transition(TaskState.CLAIMING, reason="issue selected")
                 self.store.write(state)
                 if not dry_run:
@@ -98,10 +100,15 @@ class OrchestratorPipeline:
             if state is None:
                 raise
             try:
-                state.fail(code="pipeline_error", message=str(exc))
+                failed_before_claim = state.state is TaskState.EXTERNAL_TASK_READY
+                if failed_before_claim:
+                    state.last_error = {"code": "pipeline_error", "message": str(exc), "at": _now_placeholder()}
+                    state.recover_to(TaskState.TERMINAL_FAILURE, reason="pipeline_error before claim")
+                else:
+                    state.fail(code="pipeline_error", message=str(exc))
                 self.knowledge.record_error(issue_number=issue.number, message=str(exc), pattern=type(exc).__name__)
                 self.store.write(state)
-                if not dry_run:
+                if not dry_run and not failed_before_claim:
                     self._mark_issue_failed(issue.number, str(exc))
                 return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
             except Exception:

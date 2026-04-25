@@ -59,6 +59,9 @@ class GitPlatform(ABC):
         """Find an existing open pull/merge request by head branch when supported."""
         return None
 
+    def validate_auth(self) -> None:
+        """Validate tracker CLI authentication before mutating external state."""
+
     @abstractmethod
     def add_comment(self, issue_number: int, body: str) -> None:
         """Add a comment to an issue."""

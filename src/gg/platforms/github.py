@@ -105,6 +105,9 @@ class GitHubPlatform(GitPlatform):
         items = json.loads(raw) if raw else []
         return items[0]["url"] if items else None
 
+    def validate_auth(self) -> None:
+        self._run(["auth", "status"], bucket=self._bucket("auth"))
+
     def add_comment(self, issue_number: int, body: str) -> None:
         self._run(["issue", "comment", str(issue_number), "--body", body], bucket=self._bucket("issues:comment"))
 

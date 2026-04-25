@@ -199,8 +199,16 @@ class CandidateExecutor:
             and (isinstance(self.agent, CodexAgent) or self._sandbox_explicit)
         )
 
-    def run(self, *, run_id: str, issue_number: int, brief: TaskBrief, candidate_id: str = "candidate-1",
-            strategy: str = "conservative") -> CandidateResult:
+    def run(
+        self,
+        *,
+        run_id: str,
+        issue_number: int,
+        brief: TaskBrief,
+        candidate_id: str = "candidate-1",
+        strategy: str = "conservative",
+        repair_context: dict[str, Any] | None = None,
+    ) -> CandidateResult:
         sandbox_error = self.sandbox_preflight_error()
         if sandbox_error is not None:
             raise RuntimeError(sandbox_error)
@@ -213,7 +221,7 @@ class CandidateExecutor:
             branch=branch,
             base_ref=base_commit,
         )
-        prompt = self._prompt(brief, strategy=strategy)
+        prompt = self._prompt(brief, strategy=strategy, repair_context=repair_context)
         started = time.monotonic()
         try:
             setup = self._run_setup(worktree)
@@ -341,7 +349,13 @@ class CandidateExecutor:
         )
         return env
 
-    def _prompt(self, brief: TaskBrief, *, strategy: str) -> str:
+    def _prompt(
+        self,
+        brief: TaskBrief,
+        *,
+        strategy: str,
+        repair_context: dict[str, Any] | None = None,
+    ) -> str:
         criteria = "\n".join(f"- {item}" for item in brief.acceptance_criteria)
         strategy_text = {
             "conservative": "Minimize the diff and prefer existing patterns. Do not add abstractions unless required.",
@@ -354,12 +368,14 @@ class CandidateExecutor:
                 "Repair a previous failed candidate. Focus on producing a passing, minimal patch. "
                 f"Base strategy hint: {base_strategy}."
             )
+        repair_section = _repair_context_section(repair_context)
         return (
             "You are implementing a GitHub issue in this repository.\n"
             "Make the smallest correct code change, update tests when needed, and leave the worktree with the patch applied.\n"
             "Do not create commits or push. The orchestrator will commit and publish after verification.\n\n"
             f"If you cannot continue without a human answer, make no file changes and respond with exactly one line starting with {NEEDS_INPUT_PREFIX!r} followed by the concise question.\n\n"
             f"Strategy: {strategy}\n{strategy_text}\n\n"
+            f"{repair_section}"
             f"Issue #{brief.issue['number']}: {brief.issue['title']}\n\n"
             f"Summary:\n{brief.summary}\n\n"
             f"Acceptance criteria:\n{criteria}\n\n"
@@ -374,6 +390,23 @@ def _extract_needs_input(summary: str) -> str | None:
         return None
     message = text[len(NEEDS_INPUT_PREFIX):].strip()
     return message or "Agent requested additional input."
+
+
+def _repair_context_section(repair_context: dict[str, Any] | None) -> str:
+    if not repair_context:
+        return ""
+    parent = repair_context.get("parent_candidate_id") or "unknown"
+    feedback = str(repair_context.get("feedback") or "").strip()
+    failed_commands = repair_context.get("failed_commands") or []
+    lines = [
+        "Repair context:",
+        f"- Parent candidate: {parent}",
+    ]
+    if feedback:
+        lines.append(f"- Evaluator feedback: {feedback[:2000]}")
+    if failed_commands:
+        lines.append(f"- Failed verification commands: {', '.join(map(str, failed_commands))[:1000]}")
+    return "\n".join(lines) + "\n\n"
 
 
 def _utc_now() -> str:

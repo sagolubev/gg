@@ -345,6 +345,7 @@ class CompactSecondCandidateAgent(AgentBackend):
 class RepairAgent(AgentBackend):
     def __init__(self):
         self.calls = 0
+        self.prompts: list[str] = []
 
     def generate(
         self,
@@ -355,6 +356,7 @@ class RepairAgent(AgentBackend):
         context: str | None = None,
     ) -> str:
         self.calls += 1
+        self.prompts.append(prompt)
         assert cwd is not None
         if self.calls > 1:
             Path(cwd, "repaired.txt").write_text("fixed\n", encoding="utf-8")
@@ -1230,7 +1232,8 @@ def test_pipeline_repairs_after_failed_candidate(tmp_path):
         encoding="utf-8",
     )
 
-    result = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=RepairAgent()).run_issue(
+    agent = RepairAgent()
+    result = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=agent).run_issue(
         42,
         no_pr=True,
     )
@@ -1240,6 +1243,12 @@ def test_pipeline_repairs_after_failed_candidate(tmp_path):
     state = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent()).store.load(result["run_id"])
     assert state.candidate_states["candidate-1"].status == "failed"
     assert state.candidate_states["repair-2-1"].status == "success"
+    assert "Repair context:" in agent.prompts[1]
+    assert "Parent candidate: candidate-1" in agent.prompts[1]
+    repair_result = json.loads(
+        (tmp_path / state.candidate_states["repair-2-1"].result_path).read_text(encoding="utf-8")
+    )
+    assert repair_result["repair_context"]["parent_candidate_id"] == "candidate-1"
 
 
 def test_pipeline_baseline_failures_can_be_allowed_when_identical(tmp_path):

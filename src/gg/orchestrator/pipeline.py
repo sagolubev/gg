@@ -614,6 +614,7 @@ class OrchestratorPipeline:
         evaluator = CandidateEvaluator()
         candidate_records: list[dict[str, Any]] = []
         selected: dict[str, Any] | None = None
+        repair_context: dict[str, Any] | None = None
 
         while state.attempt <= state.max_attempts and selected is None:
             candidate_count = (
@@ -622,7 +623,7 @@ class OrchestratorPipeline:
             strategies = _candidate_strategies(candidate_count)
             if state.attempt > 1:
                 strategies = [f"repair:{strategy}" for strategy in strategies]
-            planned_candidates: list[tuple[int, str, str]] = []
+            planned_candidates: list[tuple[int, str, str, dict[str, Any] | None]] = []
             for index, strategy in enumerate(strategies, start=1):
                 cancelled = self._cancelled_response(state)
                 if cancelled:
@@ -633,7 +634,7 @@ class OrchestratorPipeline:
                 candidate_id = _unique_candidate_id(state, base_candidate_id)
                 state.candidate_states[candidate_id] = CandidateState(status="running", started_at=_now_placeholder())
                 self.store.write(state)
-                planned_candidates.append((index, candidate_id, strategy))
+                planned_candidates.append((index, candidate_id, strategy, repair_context))
             attempt_records = self._run_candidate_batch(
                 state=state,
                 issue=issue,
@@ -719,6 +720,7 @@ class OrchestratorPipeline:
                     "input_request": request_path,
                 }
             if selected is None and state.attempt < state.max_attempts:
+                repair_context = _build_repair_context(attempt_records, evaluation.execution_evaluation)
                 state.attempt += 1
                 state.transition(TaskState.AGENT_RUNNING, reason="repair candidate requested")
                 self.store.write(state)
@@ -755,7 +757,7 @@ class OrchestratorPipeline:
         brief: TaskBrief,
         executor: CandidateExecutor,
         baseline,
-        planned_candidates: list[tuple[int, str, str]],
+        planned_candidates: list[tuple[int, str, str, dict[str, Any] | None]],
     ) -> list[dict[str, Any]]:
         workers = min(len(planned_candidates), self.config.runtime.max_parallel_candidates)
         if workers <= 1:
@@ -769,8 +771,9 @@ class OrchestratorPipeline:
                     index=index,
                     candidate_id=candidate_id,
                     strategy=strategy,
+                    repair_context=repair_context,
                 )
-                for index, candidate_id, strategy in planned_candidates
+                for index, candidate_id, strategy, repair_context in planned_candidates
             ]
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = [
@@ -784,8 +787,9 @@ class OrchestratorPipeline:
                     index=index,
                     candidate_id=candidate_id,
                     strategy=strategy,
+                    repair_context=repair_context,
                 )
-                for index, candidate_id, strategy in planned_candidates
+                for index, candidate_id, strategy, repair_context in planned_candidates
             ]
             results = [future.result() for future in futures]
         return sorted(results, key=lambda item: item["index"])
@@ -801,6 +805,7 @@ class OrchestratorPipeline:
         index: int,
         candidate_id: str,
         strategy: str,
+        repair_context: dict[str, Any] | None,
     ) -> dict[str, Any]:
         candidate = executor.run(
             run_id=state.run_id,
@@ -808,6 +813,7 @@ class OrchestratorPipeline:
             brief=brief,
             candidate_id=candidate_id,
             strategy=strategy,
+            repair_context=repair_context,
         )
         verification_started = time.monotonic()
         candidate_dir = f"candidates/{candidate.candidate_id}"
@@ -820,7 +826,7 @@ class OrchestratorPipeline:
                 issue=brief.issue,
                 worktree_path=candidate.worktree_path,
                 base_commit=candidate.base_commit,
-                instructions=f"strategy={strategy}",
+                instructions=f"strategy={strategy}\n{_repair_context_summary(repair_context)}".strip(),
                 attempt=state.attempt,
                 task_brief_path=state.artifacts.get("task_brief", ""),
                 context_snapshot_path=state.artifacts.get("context_snapshot", ""),
@@ -877,6 +883,7 @@ class OrchestratorPipeline:
         candidate_data["changed_files"] = final_files
         candidate_data["attempt"] = state.attempt
         candidate_data["strategy"] = strategy
+        candidate_data["repair_context"] = repair_context or {}
         candidate_data["patch_path"] = patch_path
         candidate_data["verification"] = verification_path
         candidate_data["verification_passed"] = verification_passed
@@ -1827,6 +1834,36 @@ def _unique_candidate_id(state, base: str) -> str:
     while f"{base}-retry-{suffix}" in state.candidate_states:
         suffix += 1
     return f"{base}-retry-{suffix}"
+
+
+def _build_repair_context(
+    attempt_records: list[dict[str, Any]],
+    execution_evaluation: dict[str, Any] | None,
+) -> dict[str, Any]:
+    parent = next((record for record in attempt_records if record["effective_status"] != "needs_input"), None)
+    if parent is None and attempt_records:
+        parent = attempt_records[0]
+    failed_commands: list[str] = []
+    feedback = "No candidate passed deterministic eligibility gates."
+    if execution_evaluation:
+        reasons = execution_evaluation.get("reasons") or []
+        feedback = "; ".join(str(reason) for reason in reasons)[:2000] or feedback
+        for candidate in execution_evaluation.get("candidates", []):
+            failed_commands.extend(str(command) for command in candidate.get("failed_commands", []))
+    return {
+        "parent_candidate_id": parent["candidate"].candidate_id if parent else "",
+        "parent_result_path": parent.get("result_path", "") if parent else "",
+        "feedback": feedback,
+        "failed_commands": sorted(set(failed_commands)),
+    }
+
+
+def _repair_context_summary(repair_context: dict[str, Any] | None) -> str:
+    if not repair_context:
+        return ""
+    parent = repair_context.get("parent_candidate_id") or "unknown"
+    feedback = str(repair_context.get("feedback") or "").strip()
+    return f"repair parent={parent}; feedback={feedback[:500]}"
 
 
 def _next_artifact_version(artifacts_dir: Path, prefix: str) -> int:

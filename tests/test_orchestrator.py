@@ -1422,6 +1422,26 @@ def test_clean_dry_run_lists_only_terminal_runs(tmp_path):
     assert (tmp_path / ".gg" / "runs" / completed["run_id"]).exists()
 
 
+def test_clean_lists_and_removes_stale_waiting_runs(tmp_path):
+    init_repo(tmp_path)
+    pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
+    ready = pipeline.run_issue(42, dry_run=True)
+    state = pipeline.store.load(ready["run_id"])
+    state.recover_to(TaskState.NEEDS_INPUT, reason="test stale input")
+    pipeline.store.write(state)
+    state_path = tmp_path / ".gg" / "runs" / ready["run_id"] / "state.json"
+    data = json.loads(state_path.read_text(encoding="utf-8"))
+    data["updated_at"] = "2000-01-01T00:00:00Z"
+    state_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+    dry_run = pipeline.clean(dry_run=True)
+    execute = pipeline.clean(dry_run=False)
+
+    assert dry_run["stale_runs"] == [ready["run_id"]]
+    assert execute["stale_runs"] == [ready["run_id"]]
+    assert not (tmp_path / ".gg" / "runs" / ready["run_id"]).exists()
+
+
 def test_clean_execute_removes_terminal_run_and_worktree(tmp_path):
     init_repo(tmp_path)
     pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
@@ -1538,6 +1558,7 @@ def test_init_params_generation(tmp_path):
     assert config.security.allow_lfs_changes is False
     assert config.security.allow_binary_changes is True
     assert config.security.allow_dependency_changes is True
+    assert config.cleanup.blocked_timeout_days == 14
     assert config.verify.setup == ""
     assert config.verify.tests == "pytest"
     assert config.verify.security == ""

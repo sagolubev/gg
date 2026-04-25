@@ -459,6 +459,9 @@ def _write_params(project_path: Path, console: Console) -> None:
             "allow_binary_changes": True,
             "allow_dependency_changes": True,
         },
+        "cleanup": {
+            "blocked_timeout_days": 14,
+        },
         "git": {
             "author_name": "gg-orchestrator",
             "author_email": "gg-orchestrator@users.noreply.local",

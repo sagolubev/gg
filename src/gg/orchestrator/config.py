@@ -81,6 +81,11 @@ class SecurityConfig:
 
 
 @dataclass(frozen=True)
+class CleanupConfig:
+    blocked_timeout_days: int | None = 14
+
+
+@dataclass(frozen=True)
 class GGConfig:
     git: GitConfig
     task_system: TaskSystemConfig = field(default_factory=TaskSystemConfig)
@@ -89,6 +94,7 @@ class GGConfig:
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     audit: AuditConfig = field(default_factory=AuditConfig)
     security: SecurityConfig = field(default_factory=SecurityConfig)
+    cleanup: CleanupConfig = field(default_factory=CleanupConfig)
 
 
 def _mapping(value: Any) -> dict[str, Any]:
@@ -111,6 +117,7 @@ def load_config(project_path: str | Path) -> GGConfig:
     runtime = _mapping(raw.get("runtime"))
     audit = _mapping(raw.get("audit"))
     security = _mapping(raw.get("security"))
+    cleanup = _mapping(raw.get("cleanup"))
     sandbox_policy = _mapping(runtime.get("sandbox_policy"))
     default_branch = project.get("default_branch") or git.get("default_branch") or get_main_branch(root)
     try:
@@ -173,6 +180,9 @@ def load_config(project_path: str | Path) -> GGConfig:
                     "allow_binary_changes": security.get("allow_binary_changes", True),
                     "allow_dependency_changes": security.get("allow_dependency_changes", True),
                 },
+                "cleanup": {
+                    "blocked_timeout_days": cleanup.get("blocked_timeout_days", 14),
+                },
             }
         )
     except Exception as exc:
@@ -232,6 +242,7 @@ def load_config(project_path: str | Path) -> GGConfig:
             allow_binary_changes=model.security.allow_binary_changes,
             allow_dependency_changes=model.security.allow_dependency_changes,
         ),
+        cleanup=CleanupConfig(blocked_timeout_days=model.cleanup.blocked_timeout_days),
     )
 
 

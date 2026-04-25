@@ -304,9 +304,11 @@ def clean(path, dry_run, as_json):
         return
     console = Console()
     mode = "would remove" if dry_run else "removed"
-    console.print(f"{mode} {result['count']} terminal runs")
+    console.print(f"{mode} {result['count']} runs")
     for run_id in result["runs"]:
         console.print(f"  {run_id}")
+    for run_id in result.get("stale_runs", []):
+        console.print(f"  stale: {run_id}")
 
 
 @cli.command()

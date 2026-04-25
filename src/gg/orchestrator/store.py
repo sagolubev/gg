@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 from dataclasses import asdict
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +22,7 @@ from gg.orchestrator.schemas import (
     VerificationArtifactModel,
     validation_error_message,
 )
-from gg.orchestrator.state import TERMINAL_STATES, RunState, utc_now
+from gg.orchestrator.state import TERMINAL_STATES, RunState, TaskState, utc_now
 from gg.platforms.base import Issue
 
 
@@ -136,6 +137,28 @@ class RunStore:
 
     def clean_terminal_runs(self, *, dry_run: bool = True) -> list[str]:
         target_runs = [run for run in self.list_runs() if run.state in TERMINAL_STATES]
+        targets = [run.run_id for run in target_runs]
+        if not dry_run:
+            for run in target_runs:
+                self._remove_worktrees(run)
+                shutil.rmtree(self.path_for(run.run_id), ignore_errors=True)
+        return targets
+
+    def clean_stale_waiting_runs(
+        self,
+        *,
+        blocked_timeout_days: int | None,
+        dry_run: bool = True,
+    ) -> list[str]:
+        if blocked_timeout_days is None:
+            return []
+        cutoff = datetime.now(timezone.utc) - timedelta(days=blocked_timeout_days)
+        target_runs = [
+            run
+            for run in self.list_runs()
+            if run.state in {TaskState.BLOCKED, TaskState.NEEDS_INPUT}
+            and _parse_utc(run.updated_at) <= cutoff
+        ]
         targets = [run.run_id for run in target_runs]
         if not dry_run:
             for run in target_runs:
@@ -442,3 +465,7 @@ def _validate_json_artifact(relative_path: str, data: dict[str, Any]) -> None:
         schema.model_validate(data)
     except Exception as exc:
         raise ValueError(validation_error_message(relative_path, exc)) from exc
+
+
+def _parse_utc(value: str) -> datetime:
+    return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)

@@ -232,12 +232,17 @@ class OrchestratorPipeline:
 
     def clean(self, *, dry_run: bool = True) -> dict[str, Any]:
         targets = self.store.clean_terminal_runs(dry_run=dry_run)
+        stale_runs = self.store.clean_stale_waiting_runs(
+            blocked_timeout_days=self.config.cleanup.blocked_timeout_days,
+            dry_run=dry_run,
+        )
         orphans = self.store.clean_orphan_worktrees(dry_run=dry_run)
         return {
             "dry_run": dry_run,
             "runs": targets,
+            "stale_runs": stale_runs,
             "orphan_worktrees": orphans,
-            "count": len(targets),
+            "count": len(targets) + len(stale_runs),
         }
 
     def cancel(self, run_id: str, *, reason: str = "operator requested cancellation") -> dict[str, Any]:

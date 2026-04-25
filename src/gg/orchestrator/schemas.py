@@ -118,6 +118,10 @@ class SecurityConfigModel(StrictArtifactModel):
     allow_dependency_changes: bool = True
 
 
+class CleanupConfigModel(StrictArtifactModel):
+    blocked_timeout_days: int | None = Field(default=14, ge=0)
+
+
 class GGConfigModel(StrictArtifactModel):
     git: GitConfigModel
     task_system: TaskSystemConfigModel = Field(default_factory=TaskSystemConfigModel)
@@ -126,6 +130,7 @@ class GGConfigModel(StrictArtifactModel):
     runtime: RuntimeConfigModel = Field(default_factory=RuntimeConfigModel)
     audit: AuditConfigModel = Field(default_factory=AuditConfigModel)
     security: SecurityConfigModel = Field(default_factory=SecurityConfigModel)
+    cleanup: CleanupConfigModel = Field(default_factory=CleanupConfigModel)
 
 
 class RunTransitionModel(CompatibleArtifactModel):

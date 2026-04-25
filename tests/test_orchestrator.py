@@ -2369,12 +2369,16 @@ def test_clean_execute_removes_terminal_run_and_worktree(tmp_path):
     completed = pipeline.run_issue(42, no_pr=True)
     state = pipeline.store.load(completed["run_id"])
     worktree_path = Path(state.candidate_states["candidate-1"].worktree_path)
+    object_paths = [path for path in (tmp_path / ".gg" / "objects").glob("*/*") if path.is_file()]
+    assert object_paths
 
     result = pipeline.clean(dry_run=False)
 
     assert result["runs"] == [completed["run_id"]]
+    assert sorted(result["cas_objects"]) == sorted(str(path) for path in object_paths)
     assert not (tmp_path / ".gg" / "runs" / completed["run_id"]).exists()
     assert not worktree_path.exists()
+    assert all(not path.exists() for path in object_paths)
     archive_path = tmp_path / ".gg" / "runs-archive" / f"{completed['run_id']}.json"
     archive = json.loads(archive_path.read_text(encoding="utf-8"))
     assert archive["run_id"] == completed["run_id"]

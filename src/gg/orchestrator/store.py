@@ -231,6 +231,32 @@ class RunStore:
             )
         return [str(path) for path in orphans]
 
+    def clean_unreferenced_objects(
+        self,
+        *,
+        dry_run: bool = True,
+        excluding_runs: set[str] | None = None,
+    ) -> list[str]:
+        objects_dir = self.project_path / ".gg" / "objects"
+        if not objects_dir.exists():
+            return []
+        referenced = self._referenced_object_hashes(excluding_runs=excluding_runs or set())
+        object_paths = [
+            path
+            for path in objects_dir.glob("*/*")
+            if path.is_file() and path.name not in referenced
+        ]
+        if not dry_run:
+            for path in object_paths:
+                path.unlink(missing_ok=True)
+            for directory in sorted(objects_dir.glob("*"), reverse=True):
+                if directory.is_dir():
+                    try:
+                        directory.rmdir()
+                    except OSError:
+                        pass
+        return [str(path) for path in object_paths]
+
     def _remove_worktrees(self, run: RunState) -> None:
         baseline_path = run.baseline.get("worktree_path") if isinstance(run.baseline, dict) else None
         if baseline_path:
@@ -307,6 +333,21 @@ class RunStore:
         if integration_path is not None:
             paths.append(str(integration_path))
         return paths
+
+    def _referenced_object_hashes(self, *, excluding_runs: set[str]) -> set[str]:
+        referenced: set[str] = set()
+        for run_dir in self.runs_dir.glob("*"):
+            if run_dir.name in excluding_runs:
+                continue
+            for snapshot_path in (run_dir / "artifacts").glob("context-snapshot-v*.json"):
+                try:
+                    data = json.loads(snapshot_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                objects = data.get("objects", {})
+                if isinstance(objects, dict):
+                    referenced.update(str(value) for value in objects.values() if value)
+        return referenced
 
     def _remove_worktree_path(self, path: Path) -> None:
         result = subprocess.run(

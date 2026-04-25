@@ -245,6 +245,8 @@ def _parse_findings(command: VerificationCommand, *, stdout: str, stderr: str) -
     findings: list[dict[str, Any]] = []
     if "pytest" in parsers:
         findings.extend(_parse_pytest_findings(stdout, stderr))
+    if {"npm", "vitest", "jest"} & parsers:
+        findings.extend(_parse_js_test_findings(stdout, stderr))
     if "ruff" in parsers:
         findings.extend(_parse_ruff_findings(stdout, stderr))
     if "mypy" in parsers:
@@ -288,6 +290,45 @@ def _parse_secret_findings(stdout: str, stderr: str) -> list[dict[str, Any]]:
                         }
                     )
                     break
+    return findings
+
+
+def _parse_js_test_findings(stdout: str, stderr: str) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    fail_pattern = re.compile(r"^(?:FAIL|ERROR)\s+(?P<test>.+)$")
+    npm_error = re.compile(r"^npm ERR!\s+(?P<message>.+)$")
+    for stream, text in (("stdout", stdout), ("stderr", stderr)):
+        for line_number, raw in enumerate(text.splitlines(), start=1):
+            line = raw.strip()
+            match = fail_pattern.match(line)
+            if match:
+                findings.append(
+                    {
+                        "type": "test_failure",
+                        "category": "test",
+                        "parser": "js-test",
+                        "severity": "error",
+                        "stream": stream,
+                        "line": line_number,
+                        "test": match.group("test"),
+                        "message": line,
+                    }
+                )
+                continue
+            match = npm_error.match(line)
+            if match:
+                findings.append(
+                    {
+                        "type": "test_failure",
+                        "category": "test",
+                        "parser": "npm",
+                        "severity": "error",
+                        "stream": stream,
+                        "line": line_number,
+                        "test": "",
+                        "message": match.group("message"),
+                    }
+                )
     return findings
 
 

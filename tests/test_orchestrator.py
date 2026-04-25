@@ -3223,6 +3223,7 @@ def test_pipeline_discovers_package_verification_commands_as_advisory(tmp_path):
         ("lint", "npm run lint", False),
         ("typecheck", "npm run typecheck", False),
     ]
+    assert commands[0].parser == "npm,vitest,jest"
 
 
 def test_pipeline_discovers_python_verification_surfaces(tmp_path):
@@ -3395,6 +3396,30 @@ def test_verification_runner_parses_pytest_findings(tmp_path):
             "line": 1,
             "test": "tests/test_app.py::test_greeting",
             "message": "AssertionError: nope",
+        }
+    ]
+
+
+def test_verification_runner_parses_js_test_findings(tmp_path):
+    command = VerificationCommand(
+        id="tests",
+        category="test",
+        command="python -c \"print('FAIL  tests/app.test.ts > renders greeting'); raise SystemExit(1)\"",
+        parser="npm,vitest,jest",
+    )
+
+    result = VerificationRunner([command], timeout=5).run(tmp_path)[0]
+
+    assert result.findings == [
+        {
+            "type": "test_failure",
+            "category": "test",
+            "parser": "js-test",
+            "severity": "error",
+            "stream": "stdout",
+            "line": 1,
+            "test": "tests/app.test.ts > renders greeting",
+            "message": "FAIL  tests/app.test.ts > renders greeting",
         }
     ]
 

@@ -2085,6 +2085,9 @@ def _failed_commands(checks) -> list[str]:
 
 def _default_verification_parser(category: str, command: str) -> str:
     if category == "test":
+        lowered = command.lower()
+        if any(tool in lowered for tool in ("npm", "yarn", "pnpm", "bun", "vitest", "jest")):
+            return "npm,vitest,jest"
         return "pytest"
     if category == "lint":
         return "ruff"

@@ -42,6 +42,60 @@ def changed_files(cwd: str | Path) -> list[str]:
     return files
 
 
+def lfs_changed_files(cwd: str | Path, files: list[str]) -> list[str]:
+    if not files:
+        return []
+    output = run_git(["check-attr", "filter", "--", *files], cwd)
+    lfs_paths: list[str] = []
+    for line in output.splitlines():
+        path, _, value = line.partition(": filter:")
+        if value.strip() == "lfs":
+            lfs_paths.append(path.strip())
+    return lfs_paths
+
+
+def binary_changed_files(cwd: str | Path, files: list[str]) -> list[str]:
+    root = Path(cwd)
+    binary_files: list[str] = []
+    for rel_path in files:
+        path = root / rel_path
+        if not path.is_file():
+            continue
+        with path.open("rb") as handle:
+            chunk = handle.read(8192)
+        if b"\0" in chunk:
+            binary_files.append(rel_path)
+    return binary_files
+
+
+def dependency_changed_files(files: list[str]) -> list[str]:
+    dependency_names = {
+        "package.json",
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "bun.lockb",
+        "pyproject.toml",
+        "uv.lock",
+        "poetry.lock",
+        "Pipfile",
+        "Pipfile.lock",
+        "go.mod",
+        "go.sum",
+        "Cargo.toml",
+        "Cargo.lock",
+        "Gemfile",
+        "Gemfile.lock",
+        "composer.json",
+        "composer.lock",
+    }
+    return [
+        file
+        for file in files
+        if Path(file).name in dependency_names or Path(file).name.startswith("requirements")
+    ]
+
+
 def diff(cwd: str | Path) -> str:
     tracked = run_git(["diff", "--binary"], cwd)
     untracked = run_git(["ls-files", "--others", "--exclude-standard"], cwd)

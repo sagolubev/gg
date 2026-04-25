@@ -63,6 +63,13 @@ class AuditConfig:
 
 
 @dataclass(frozen=True)
+class SecurityConfig:
+    allow_lfs_changes: bool = False
+    allow_binary_changes: bool = True
+    allow_dependency_changes: bool = True
+
+
+@dataclass(frozen=True)
 class GGConfig:
     git: GitConfig
     task_system: TaskSystemConfig = field(default_factory=TaskSystemConfig)
@@ -70,6 +77,7 @@ class GGConfig:
     verify: VerifyConfig = field(default_factory=VerifyConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     audit: AuditConfig = field(default_factory=AuditConfig)
+    security: SecurityConfig = field(default_factory=SecurityConfig)
 
 
 def _mapping(value: Any) -> dict[str, Any]:
@@ -95,6 +103,7 @@ def load_config(project_path: str | Path) -> GGConfig:
     verify = _mapping(raw.get("verify"))
     runtime = _mapping(raw.get("runtime"))
     audit = _mapping(raw.get("audit"))
+    security = _mapping(raw.get("security"))
     sandbox_policy = _mapping(runtime.get("sandbox_policy"))
     default_branch = project.get("default_branch") or git.get("default_branch") or get_main_branch(root)
     return GGConfig(
@@ -140,6 +149,11 @@ def load_config(project_path: str | Path) -> GGConfig:
         audit=AuditConfig(
             hash_events=bool(audit.get("hash_events", False)),
             external_sink=str(audit.get("external_sink", "")),
+        ),
+        security=SecurityConfig(
+            allow_lfs_changes=bool(security.get("allow_lfs_changes", False)),
+            allow_binary_changes=bool(security.get("allow_binary_changes", True)),
+            allow_dependency_changes=bool(security.get("allow_dependency_changes", True)),
         ),
     )
 

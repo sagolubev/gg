@@ -13,8 +13,11 @@ from gg.knowledge.engine import KnowledgeEngine
 from gg.orchestrator.config import GGConfig, load_config
 from gg.orchestrator.context import ContextSnapshotStore
 from gg.orchestrator.executor import CandidateExecutor
+from gg.orchestrator.git import binary_changed_files as git_binary_changed_files
 from gg.orchestrator.git import changed_files as git_changed_files
+from gg.orchestrator.git import dependency_changed_files as git_dependency_changed_files
 from gg.orchestrator.git import commit_all, diff as git_diff, push_branch
+from gg.orchestrator.git import lfs_changed_files as git_lfs_changed_files
 from gg.orchestrator.lock import LockManager
 from gg.orchestrator.plugins import create_agent_backend, create_platform
 from gg.orchestrator.rate_limit import RateLimitThrottleError
@@ -496,6 +499,7 @@ class OrchestratorPipeline:
             baseline,
             allow_known_baseline_failures=self.config.verify.allow_known_baseline_failures,
         )
+        policy_violations = self._candidate_policy_violations(candidate.worktree_path, final_files)
         candidate_data = candidate.to_dict()
         candidate_data["changed_files"] = final_files
         candidate_data["attempt"] = state.attempt
@@ -505,6 +509,7 @@ class OrchestratorPipeline:
         candidate_data["verification_passed"] = verification_passed
         candidate_data["verification_mutated_worktree"] = verification_mutated_worktree
         candidate_data["baseline_failed_commands"] = _failed_commands(baseline)
+        candidate_data["policy_violations"] = policy_violations
         result_path = self.store.write_json(
             state.run_id,
             f"{candidate_dir}/candidate-result.json",
@@ -518,6 +523,9 @@ class OrchestratorPipeline:
         if candidate.status == "success" and verification_mutated_worktree:
             effective_status = "failed"
             error = "verification mutated worktree"
+        if candidate.status == "success" and policy_violations:
+            effective_status = "failed"
+            error = "; ".join(item["message"] for item in policy_violations)
         self.store.append_cost(
             state.run_id,
             {
@@ -554,6 +562,40 @@ class OrchestratorPipeline:
             "error": error,
             "final_files": final_files,
         }
+
+    def _candidate_policy_violations(self, worktree_path: str, files: list[str]) -> list[dict[str, Any]]:
+        violations: list[dict[str, Any]] = []
+        if not self.config.security.allow_lfs_changes:
+            paths = git_lfs_changed_files(worktree_path, files)
+            if paths:
+                violations.append(
+                    {
+                        "code": "lfs_changes_blocked",
+                        "message": "LFS file changes are disabled by policy",
+                        "paths": paths,
+                    },
+                )
+        if not self.config.security.allow_binary_changes:
+            paths = git_binary_changed_files(worktree_path, files)
+            if paths:
+                violations.append(
+                    {
+                        "code": "binary_changes_blocked",
+                        "message": "Binary file changes are disabled by policy",
+                        "paths": paths,
+                    },
+                )
+        if not self.config.security.allow_dependency_changes:
+            paths = git_dependency_changed_files(files)
+            if paths:
+                violations.append(
+                    {
+                        "code": "dependency_changes_blocked",
+                        "message": "Dependency manifest changes are disabled by policy",
+                        "paths": paths,
+                    },
+                )
+        return violations
 
     def _publish_winner(
         self,

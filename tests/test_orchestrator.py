@@ -125,6 +125,40 @@ class FakeAgent(AgentBackend):
         return True
 
 
+class DependencyChangingAgent(AgentBackend):
+    def generate(
+        self,
+        prompt: str,
+        *,
+        cwd: str | None = None,
+        timeout: int | None = None,
+        context: str | None = None,
+    ) -> str:
+        assert cwd is not None
+        Path(cwd, "package.json").write_text('{"dependencies":{"left-pad":"1.3.0"}}\n', encoding="utf-8")
+        return "Added dependency manifest."
+
+    def is_available(self) -> bool:
+        return True
+
+
+class LfsChangingAgent(AgentBackend):
+    def generate(
+        self,
+        prompt: str,
+        *,
+        cwd: str | None = None,
+        timeout: int | None = None,
+        context: str | None = None,
+    ) -> str:
+        assert cwd is not None
+        Path(cwd, "asset.bin").write_text("lfs pointer candidate\n", encoding="utf-8")
+        return "Added LFS asset."
+
+    def is_available(self) -> bool:
+        return True
+
+
 class SecondCandidateAgent(AgentBackend):
     def __init__(self):
         self.calls = 0
@@ -325,6 +359,23 @@ def init_repo(path: Path) -> None:
     subprocess.run(["git", "add", "-A"], cwd=path, check=True, capture_output=True)
     subprocess.run(
         ["git", "commit", "-m", "init", "--no-gpg-sign"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+        env={
+            "GIT_AUTHOR_NAME": "test",
+            "GIT_AUTHOR_EMAIL": "t@example.com",
+            "GIT_COMMITTER_NAME": "test",
+            "GIT_COMMITTER_EMAIL": "t@example.com",
+            "PATH": "/usr/bin:/usr/local/bin:/opt/homebrew/bin",
+        },
+    )
+
+
+def commit_repo(path: Path, message: str) -> None:
+    subprocess.run(["git", "add", "-A"], cwd=path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", message, "--no-gpg-sign"],
         cwd=path,
         check=True,
         capture_output=True,
@@ -992,6 +1043,9 @@ def test_init_params_generation(tmp_path):
     assert config.runtime.sandbox_policy.deny_read == ["~/.ssh", ".env"]
     assert config.audit.hash_events is False
     assert config.audit.external_sink == ""
+    assert config.security.allow_lfs_changes is False
+    assert config.security.allow_binary_changes is True
+    assert config.security.allow_dependency_changes is True
     assert config.verify.tests == "pytest"
 
 
@@ -1280,6 +1334,50 @@ audit:
         assert audit["previous_hash"] == previous_hash
         assert audit["hash"] == expected
         previous_hash = audit["hash"]
+
+
+def test_security_policy_can_block_dependency_file_changes(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        """verify:
+  tests: ''
+security:
+  allow_dependency_changes: false
+""",
+        encoding="utf-8",
+    )
+
+    result = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=DependencyChangingAgent()).run_issue(
+        42,
+        no_pr=True,
+    )
+
+    assert result["state"] == "TerminalFailure"
+    state = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent()).store.load(result["run_id"])
+    candidate = state.candidate_states["candidate-1"]
+    assert candidate.error == "Dependency manifest changes are disabled by policy"
+    candidate_result = json.loads((tmp_path / candidate.result_path).read_text(encoding="utf-8"))
+    assert candidate_result["policy_violations"][0]["code"] == "dependency_changes_blocked"
+    assert candidate_result["policy_violations"][0]["paths"] == ["package.json"]
+
+
+def test_security_policy_blocks_lfs_path_changes_by_default(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gitattributes").write_text("*.bin filter=lfs diff=lfs merge=lfs -text\n", encoding="utf-8")
+    commit_repo(tmp_path, "add lfs attributes")
+
+    result = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=LfsChangingAgent()).run_issue(
+        42,
+        no_pr=True,
+    )
+
+    assert result["state"] == "TerminalFailure"
+    state = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent()).store.load(result["run_id"])
+    candidate = state.candidate_states["candidate-1"]
+    assert candidate.error == "LFS file changes are disabled by policy"
+    candidate_result = json.loads((tmp_path / candidate.result_path).read_text(encoding="utf-8"))
+    assert candidate_result["policy_violations"][0]["code"] == "lfs_changes_blocked"
+    assert candidate_result["policy_violations"][0]["paths"] == ["asset.bin"]
 
 
 def test_file_lock_times_out_for_second_holder(tmp_path):

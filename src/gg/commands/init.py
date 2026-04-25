@@ -448,6 +448,11 @@ def _write_params(project_path: Path, console: Console) -> None:
             "hash_events": False,
             "external_sink": "",
         },
+        "security": {
+            "allow_lfs_changes": False,
+            "allow_binary_changes": True,
+            "allow_dependency_changes": True,
+        },
         "git": {
             "author_name": "gg-orchestrator",
             "author_email": "gg-orchestrator@users.noreply.local",

@@ -253,6 +253,7 @@ def run(
 @click.option("--repair-fanout", type=int, default=None, help="Override repair candidate fanout.")
 @click.option("--timeout", type=int, default=None, help="Override candidate timeout in seconds.")
 @click.option("--base", default=None, help="Override target default branch for publishing.")
+@click.option("--label", "labels", multiple=True, help="Additional label to apply to the issue.")
 @click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
 def issue(
     issue_number,
@@ -265,6 +266,7 @@ def issue(
     repair_fanout,
     timeout,
     base,
+    labels,
     as_json,
 ):
     """Process a single GitHub issue."""
@@ -337,18 +339,19 @@ def status(run_id, path, as_json):
 
 
 @cli.command()
+@click.argument("run_id", required=False, default=None)
 @click.option("--path", type=click.Path(exists=True), default=".", help="Project path.")
 @click.option("--dry-run/--execute", default=True, help="Preview cleanup unless --execute is used.")
 @click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
-def clean(path, dry_run, as_json):
-    """Prune terminal run metadata."""
+def clean(run_id, path, dry_run, as_json):
+    """Prune terminal run metadata. Pass RUN_ID to clean a specific run."""
     import json
 
     from rich.console import Console
 
     from gg.orchestrator.pipeline import OrchestratorPipeline
 
-    result = OrchestratorPipeline(path).clean(dry_run=dry_run)
+    result = OrchestratorPipeline(path).clean(dry_run=dry_run, run_id=run_id)
     if as_json:
         click.echo(json.dumps(result, indent=2, ensure_ascii=False))
         return
@@ -365,8 +368,9 @@ def clean(path, dry_run, as_json):
 @click.argument("run_id")
 @click.option("--path", type=click.Path(exists=True), default=".", help="Project path.")
 @click.option("--reason", default="operator requested cancellation", help="Cancellation reason.")
+@click.option("--abandon-worktrees", is_flag=True, help="Remove worktrees even if candidate still running.")
 @click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
-def cancel(run_id, path, reason, as_json):
+def cancel(run_id, path, reason, abandon_worktrees, as_json):
     """Cancel a non-terminal run."""
     import json
 
@@ -423,10 +427,11 @@ def retry(run_id, path, no_pr, as_json):
 
 @cli.command()
 @click.argument("run_id")
-@click.option("--message", required=True, help="Answer or clarification for a blocked run.")
+@click.option("--message", default=None, help="Answer or clarification for a blocked run.")
+@click.option("--file", "input_file", type=click.Path(exists=True), default=None, help="Read input from file.")
 @click.option("--path", type=click.Path(exists=True), default=".", help="Project path.")
 @click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
-def provide(run_id, message, path, as_json):
+def provide(run_id, message, input_file, path, as_json):
     """Provide local input for a Blocked or NeedsInput run."""
     import json
 
@@ -434,6 +439,11 @@ def provide(run_id, message, path, as_json):
 
     from gg.orchestrator.pipeline import OrchestratorPipeline
 
+    if input_file:
+        from pathlib import Path as _Path
+        message = (message or "") + _Path(input_file).read_text(encoding="utf-8")
+    if not message:
+        raise click.UsageError("Provide --message or --file")
     result = OrchestratorPipeline(path).provide(run_id, message=message)
     if as_json:
         click.echo(json.dumps(result, indent=2, ensure_ascii=False))

@@ -182,12 +182,14 @@ class ParallelAgent(AgentBackend):
 class FakeSandbox:
     def __init__(self):
         self.commands: list[list[str]] = []
+        self.policies: list[SandboxPolicy | None] = []
 
     def is_available(self) -> bool:
         return True
 
     def run(self, command, *, cwd, timeout, policy=None):
         self.commands.append(command)
+        self.policies.append(policy)
         Path(cwd, "sandboxed.txt").write_text("ok\n", encoding="utf-8")
         Path(command[3]).write_text("sandbox summary\n", encoding="utf-8")
         return SandboxRunResult(
@@ -631,7 +633,36 @@ def test_init_params_generation(tmp_path):
     assert config.task_system.work_label == "gg:in-progress"
     assert config.selection.include_labels == ("ai-ready",)
     assert config.runtime.candidates == 1
+    assert config.runtime.sandbox_policy.deny_read == ["~/.ssh", ".env"]
     assert config.verify.tests == "pytest"
+
+
+def test_load_config_reads_sandbox_policy(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        """runtime:
+  sandbox_policy:
+    allowed_domains:
+      - example.com
+    denied_domains:
+      - blocked.example.com
+    deny_read:
+      - secrets.txt
+    allow_write:
+      - tmp
+    deny_write:
+      - dist
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(tmp_path)
+
+    assert config.runtime.sandbox_policy.allowed_domains == ["example.com"]
+    assert config.runtime.sandbox_policy.denied_domains == ["blocked.example.com"]
+    assert config.runtime.sandbox_policy.deny_read == ["secrets.txt"]
+    assert config.runtime.sandbox_policy.allow_write == ["tmp"]
+    assert config.runtime.sandbox_policy.deny_write == ["dist"]
 
 
 def test_sandbox_policy_settings_shape():
@@ -675,6 +706,18 @@ def test_rate_limit_store_uses_sqlite_wal(tmp_path):
 
 def test_candidate_executor_can_run_codex_via_sandbox(tmp_path):
     init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        """verify:
+  tests: ''
+runtime:
+  sandbox_policy:
+    allowed_domains:
+      - example.com
+    allow_write:
+      - worktree
+""",
+        encoding="utf-8",
+    )
     sandbox = FakeSandbox()
     config = load_config(tmp_path)
     executor = CandidateExecutor(tmp_path, CodexAgent(), config, sandbox=sandbox)
@@ -692,6 +735,7 @@ def test_candidate_executor_can_run_codex_via_sandbox(tmp_path):
     assert result.status == "success"
     assert sandbox.commands
     assert sandbox.commands[0][0:3] == ["codex", "exec", "-o"]
+    assert sandbox.policies == [config.runtime.sandbox_policy]
 
 
 def test_context_snapshot_uses_content_addressed_objects(tmp_path):

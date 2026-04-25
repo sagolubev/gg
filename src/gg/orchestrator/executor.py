@@ -12,7 +12,7 @@ from gg.agents.codex import CodexAgent
 from gg.orchestrator.config import GGConfig
 from gg.orchestrator.git import changed_files, current_commit, diff, safe_branch_slug
 from gg.orchestrator.git import WorktreeManager
-from gg.orchestrator.sandbox import SandboxRuntime
+from gg.orchestrator.sandbox import SandboxPolicy, SandboxRuntime
 from gg.orchestrator.task_analysis import TaskBrief
 
 
@@ -116,6 +116,7 @@ class CandidateExecutor:
             ["codex", "exec", "-o", str(out_path), prompt],
             cwd=worktree,
             timeout=self.config.runtime.candidate_timeout_seconds,
+            policy=self._sandbox_policy(),
         )
         output = out_path.read_text(encoding="utf-8").strip() if out_path.exists() else ""
         out_path.unlink(missing_ok=True)
@@ -124,6 +125,9 @@ class CandidateExecutor:
         if result.status != "passed" and not output:
             raise RuntimeError(result.stderr.strip() or "sandboxed codex execution failed")
         return output
+
+    def _sandbox_policy(self) -> SandboxPolicy:
+        return self.config.runtime.sandbox_policy
 
     def _prompt(self, brief: TaskBrief, *, strategy: str) -> str:
         criteria = "\n".join(f"- {item}" for item in brief.acceptance_criteria)

@@ -355,6 +355,22 @@ class TaskBriefModel(CompatibleArtifactModel):
         return self
 
 
+class RawIssueArtifactModel(CompatibleArtifactModel):
+    schema_version: Literal[1] = 1
+    issue: dict[str, Any]
+    comments: list[IssueCommentModel] = Field(default_factory=list)
+    inputs: list[LocalInputSummaryModel] = Field(default_factory=list)
+    limits: dict[str, Any] = Field(default_factory=dict)
+    truncated: dict[str, bool] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _required_issue_fields(self) -> "RawIssueArtifactModel":
+        missing = [field for field in ("number", "title") if field not in self.issue]
+        if missing:
+            raise ValueError(f"issue missing required fields: {', '.join(missing)}")
+        return self
+
+
 class AnalysisResultModel(CompatibleArtifactModel):
     schema_version: Literal[1] = 1
     ready: bool = True

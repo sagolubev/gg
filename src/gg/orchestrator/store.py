@@ -24,6 +24,7 @@ from gg.orchestrator.schemas import (
     PublishingIntegrationModel,
     PublishingPreflightModel,
     RateLimitArtifactModel,
+    RawIssueArtifactModel,
     RunOutcomeModel,
     RunSummaryModel,
     TaskBriefModel,
@@ -507,8 +508,10 @@ class RunStore:
 
 def _validate_json_artifact(relative_path: str, data: dict[str, Any]) -> None:
     schema: type | None = None
-    if relative_path == "artifacts/task-brief.json":
+    if relative_path == "artifacts/task-brief.json" or re.match(r"artifacts/task-brief-v\d+\.json$", relative_path):
         schema = TaskBriefModel
+    elif relative_path == "artifacts/raw-issue.json" or re.match(r"artifacts/raw-issue-v\d+\.json$", relative_path):
+        schema = RawIssueArtifactModel
     elif relative_path == "artifacts/evaluation.json":
         schema = EvaluationArtifactModel
     elif relative_path == "artifacts/execution-evaluation.json" or relative_path.endswith("/execution-evaluation.json"):

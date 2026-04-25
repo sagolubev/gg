@@ -1314,6 +1314,12 @@ def test_task_analysis_includes_issue_comments_and_local_inputs(tmp_path):
     refreshed_state = pipeline.store.load(ready["run_id"])
     brief_path = tmp_path / refreshed_state.artifacts["task_brief"]
     brief = json.loads(brief_path.read_text(encoding="utf-8"))
+    raw_issue = json.loads((tmp_path / refreshed_state.artifacts["raw_issue"]).read_text(encoding="utf-8"))
+    assert brief_path.name == "task-brief-v2.json"
+    assert refreshed_state.artifacts["task_brief_version"] == "2"
+    assert raw_issue["issue"]["number"] == 42
+    assert raw_issue["comments"][0]["body"] == "Please keep the file UTF-8 encoded."
+    assert raw_issue["inputs"][0]["message"] == "Use Spanish"
     assert brief["issue"]["comments"][0]["body"] == "Please keep the file UTF-8 encoded."
     assert brief["issue"]["inputs"][0]["message"] == "Use Spanish"
     snapshot = json.loads((tmp_path / refreshed_state.artifacts["context_snapshot"]).read_text(encoding="utf-8"))

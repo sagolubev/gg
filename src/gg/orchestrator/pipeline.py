@@ -34,7 +34,15 @@ from gg.orchestrator.rate_limit import RateLimitThrottleError
 from gg.orchestrator.state import CandidateState, TaskState
 from gg.orchestrator.state import TERMINAL_STATES
 from gg.orchestrator.store import RunStore
-from gg.orchestrator.task_analysis import TaskAnalyzer, TaskBrief
+from gg.orchestrator.task_analysis import (
+    MAX_COMMENTS,
+    MAX_COMMENT_BODY_CHARS,
+    MAX_INPUTS,
+    MAX_INPUT_MESSAGE_CHARS,
+    MAX_ISSUE_BODY_CHARS,
+    TaskAnalyzer,
+    TaskBrief,
+)
 from gg.orchestrator.verification import CheckResult, VerificationRunner, verification_gate_summary
 from gg.platforms.base import GitPlatform, Issue
 from gg.utils.git_ops import find_repo_root
@@ -170,8 +178,7 @@ class OrchestratorPipeline:
                     agent=self._task_analysis_agent(),
                     timeout=self.config.runtime.command_timeout_seconds,
                 ).analyze(issue, inputs=[])
-                brief_path = shadow_store.write_json(state.run_id, "artifacts/task-brief.json", brief.to_dict())
-                state.artifacts["task_brief"] = brief_path
+                self._write_task_analysis_artifacts(shadow_store, state, issue, brief)
                 snapshot_path = ContextSnapshotStore(shadow_root).write_task_snapshot(state.run_id, brief)
                 state.artifacts["context_snapshot"] = snapshot_path
                 if brief.blocked:
@@ -1635,14 +1642,35 @@ class OrchestratorPipeline:
             build_run_outcome(state, selected_candidate_metadata, completed_at=_now_placeholder()),
         )
 
+    def _write_task_analysis_artifacts(
+        self,
+        store: RunStore,
+        state,
+        issue: Issue,
+        brief: TaskBrief,
+    ) -> None:
+        version = _next_artifact_version(store.path_for(state.run_id) / "artifacts", "task-brief")
+        raw_issue_path = store.write_json(
+            state.run_id,
+            f"artifacts/raw-issue-v{version}.json",
+            _raw_issue_artifact(issue, brief),
+        )
+        brief_path = store.write_json(
+            state.run_id,
+            f"artifacts/task-brief-v{version}.json",
+            brief.to_dict(),
+        )
+        state.artifacts["raw_issue"] = raw_issue_path
+        state.artifacts["task_brief"] = brief_path
+        state.artifacts["task_brief_version"] = str(version)
+
     def _refresh_task_analysis(self, state, issue: Issue) -> TaskBrief:
         brief = TaskAnalyzer(
             str(self.project_path),
             agent=self._task_analysis_agent(),
             timeout=self.config.runtime.command_timeout_seconds,
         ).analyze(issue, inputs=self._load_inputs(state.run_id))
-        brief_path = self.store.write_json(state.run_id, "artifacts/task-brief.json", brief.to_dict())
-        state.artifacts["task_brief"] = brief_path
+        self._write_task_analysis_artifacts(self.store, state, issue, brief)
         snapshot_path = ContextSnapshotStore(self.project_path).write_task_snapshot(state.run_id, brief)
         state.artifacts["context_snapshot"] = snapshot_path
         return brief
@@ -1704,6 +1732,46 @@ def _unique_candidate_id(state, base: str) -> str:
     while f"{base}-retry-{suffix}" in state.candidate_states:
         suffix += 1
     return f"{base}-retry-{suffix}"
+
+
+def _next_artifact_version(artifacts_dir: Path, prefix: str) -> int:
+    versions: list[int] = []
+    for path in artifacts_dir.glob(f"{prefix}-v*.json"):
+        match = re.fullmatch(rf"{re.escape(prefix)}-v(\d+)\.json", path.name)
+        if match:
+            versions.append(int(match.group(1)))
+    return (max(versions) + 1) if versions else 1
+
+
+def _raw_issue_artifact(issue: Issue, brief: TaskBrief) -> dict[str, Any]:
+    body = str(brief.issue.get("body", ""))
+    comments = list(brief.issue.get("comments", []))
+    inputs = list(brief.issue.get("inputs", []))
+    return {
+        "schema_version": 1,
+        "issue": {
+            "number": issue.number,
+            "title": issue.title,
+            "body": body,
+            "labels": issue.labels,
+            "url": issue.url,
+        },
+        "comments": comments,
+        "inputs": inputs,
+        "limits": {
+            "max_issue_body_chars": MAX_ISSUE_BODY_CHARS,
+            "max_comments": MAX_COMMENTS,
+            "max_comment_body_chars": MAX_COMMENT_BODY_CHARS,
+            "max_inputs": MAX_INPUTS,
+            "max_input_message_chars": MAX_INPUT_MESSAGE_CHARS,
+        },
+        "truncated": {
+            "issue_body": len(issue.body or "") > MAX_ISSUE_BODY_CHARS,
+            "comments": len(issue.comments) > MAX_COMMENTS
+            or any(len(comment.body or "") > MAX_COMMENT_BODY_CHARS for comment in issue.comments),
+            "inputs": len(inputs) >= MAX_INPUTS,
+        },
+    }
 
 
 def _failed_commands(checks) -> list[str]:

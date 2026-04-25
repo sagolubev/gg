@@ -7,7 +7,8 @@ import re
 import socket
 import sys
 import time
-from dataclasses import dataclass
+import threading
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -22,7 +23,11 @@ class FileLock:
     path: Path
     timeout_seconds: float = 30.0
     poll_interval_seconds: float = 0.1
+    heartbeat_interval_seconds: float | None = 5.0
     _handle: object | None = None
+    _metadata_lock: threading.Lock = field(default_factory=threading.Lock, init=False)
+    _heartbeat_stop: threading.Event = field(default_factory=threading.Event, init=False)
+    _heartbeat_thread: threading.Thread | None = field(default=None, init=False)
 
     def __enter__(self) -> "FileLock":
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -32,6 +37,7 @@ class FileLock:
             try:
                 fcntl.flock(self._handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                 self._write_metadata(acquired_at=_utc_now())
+                self._start_auto_heartbeat()
                 return self
             except BlockingIOError:
                 if time.monotonic() >= deadline:
@@ -43,9 +49,12 @@ class FileLock:
     def __exit__(self, exc_type, exc, tb) -> None:
         if self._handle is None:
             return
-        self._handle.seek(0)
-        self._handle.truncate()
-        self._handle.flush()
+        self._stop_auto_heartbeat()
+        with self._metadata_lock:
+            self._handle.seek(0)
+            self._handle.truncate()
+            self._handle.flush()
+            os.fsync(self._handle.fileno())
         fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
         self._handle.close()
         self._handle = None
@@ -70,10 +79,37 @@ class FileLock:
         if self._handle is None:
             raise RuntimeError(f"cannot write metadata for unacquired lock {self.path}")
         payload = metadata or self._owner_metadata(acquired_at=acquired_at or _utc_now())
-        self._handle.seek(0)
-        self._handle.truncate()
-        self._handle.write(json.dumps(payload, sort_keys=True) + "\n")
-        self._handle.flush()
+        with self._metadata_lock:
+            self._handle.seek(0)
+            self._handle.truncate()
+            self._handle.write(json.dumps(payload, sort_keys=True) + "\n")
+            self._handle.flush()
+            os.fsync(self._handle.fileno())
+
+    def _start_auto_heartbeat(self) -> None:
+        if not self.heartbeat_interval_seconds or self.heartbeat_interval_seconds <= 0:
+            return
+        self._heartbeat_stop.clear()
+        self._heartbeat_thread = threading.Thread(
+            target=self._heartbeat_loop,
+            name=f"gg-lock-heartbeat:{self.path.name}",
+            daemon=True,
+        )
+        self._heartbeat_thread.start()
+
+    def _stop_auto_heartbeat(self) -> None:
+        self._heartbeat_stop.set()
+        if self._heartbeat_thread is not None:
+            self._heartbeat_thread.join(timeout=1)
+            self._heartbeat_thread = None
+
+    def _heartbeat_loop(self) -> None:
+        assert self.heartbeat_interval_seconds is not None
+        while not self._heartbeat_stop.wait(self.heartbeat_interval_seconds):
+            try:
+                self.heartbeat()
+            except (OSError, RuntimeError):
+                return
 
     def _owner_metadata(self, *, acquired_at: str) -> dict[str, Any]:
         return {

@@ -3823,6 +3823,28 @@ def test_file_lock_writes_heartbeat_metadata_and_clears_on_release(tmp_path):
     assert FileLock.read_metadata(path) is None
 
 
+def test_file_lock_auto_heartbeats_while_held(monkeypatch, tmp_path):
+    path = tmp_path / ".gg" / "locks" / "test.lock"
+    calls = 0
+
+    def fake_now() -> str:
+        nonlocal calls
+        calls += 1
+        return "2026-04-25T12:00:00Z" if calls == 1 else "2026-04-25T12:00:01Z"
+
+    monkeypatch.setattr("gg.orchestrator.lock._utc_now", fake_now)
+
+    with FileLock(path, heartbeat_interval_seconds=0.01) as lock:
+        deadline = time.monotonic() + 0.5
+        metadata = lock.metadata()
+        while metadata and metadata["heartbeat_at"] != "2026-04-25T12:00:01Z" and time.monotonic() < deadline:
+            time.sleep(0.01)
+            metadata = lock.metadata()
+
+        assert metadata is not None
+        assert metadata["heartbeat_at"] == "2026-04-25T12:00:01Z"
+
+
 def test_lock_manager_scans_dead_and_stale_owners_without_sleeping(tmp_path):
     manager = LockManager(tmp_path)
     manager.root.mkdir(parents=True, exist_ok=True)

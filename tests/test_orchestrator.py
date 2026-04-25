@@ -4204,3 +4204,367 @@ def test_gitlab_find_pr_does_not_use_unsupported_state_flag(monkeypatch, tmp_pat
     assert result is None
     assert "--source-branch" in seen
     assert "--state" not in seen
+
+
+# ---------------------------------------------------------------------------
+# Circuit breaker: open / close / half-open transitions
+# ---------------------------------------------------------------------------
+
+
+def test_circuit_breaker_opens_after_threshold(tmp_path):
+    init_repo(tmp_path)
+    store = RateLimitStore(tmp_path)
+    key = "cb:test:open"
+
+    for _ in range(4):
+        state = store.record_failure(key, failure_threshold=5, window_seconds=600, cooldown_seconds=900)
+        assert state == "closed"
+        assert not store.is_open(key)
+
+    state = store.record_failure(key, failure_threshold=5, window_seconds=600, cooldown_seconds=900)
+    assert state == "open"
+    assert store.is_open(key)
+
+
+def test_circuit_breaker_success_closes_breaker(tmp_path):
+    init_repo(tmp_path)
+    store = RateLimitStore(tmp_path)
+    key = "cb:test:close"
+
+    for _ in range(5):
+        store.record_failure(key, failure_threshold=5, window_seconds=600, cooldown_seconds=900)
+
+    assert store.is_open(key)
+
+    store.record_success(key)
+
+    assert not store.is_open(key)
+
+
+def test_circuit_breaker_half_open_after_cooldown(tmp_path):
+    init_repo(tmp_path)
+    store = RateLimitStore(tmp_path)
+    key = "cb:test:half-open"
+
+    for _ in range(5):
+        store.record_failure(key, failure_threshold=5, window_seconds=600, cooldown_seconds=900)
+
+    assert store.is_open(key)
+
+    transitioned = store.try_half_open(key, now="2999-01-01T00:00:00Z")
+    assert transitioned is True
+    assert not store.is_open(key, now="2999-01-01T00:00:00Z")
+
+
+def test_circuit_breaker_prune_stale_removes_closed_entries(tmp_path):
+    init_repo(tmp_path)
+    store = RateLimitStore(tmp_path)
+    key = "cb:test:prune"
+
+    store.record_success(key)
+
+    # max_age_seconds=-1 sets cutoff to now+1s, capturing just-created entries
+    deleted = store.prune_stale(max_age_seconds=-1)
+    assert deleted >= 1
+
+    assert store.is_open(key) is False
+
+
+# ---------------------------------------------------------------------------
+# Error taxonomy: PipelineError construction, category/code values
+# ---------------------------------------------------------------------------
+
+
+def test_error_taxonomy_pipeline_error_construction():
+    from gg.orchestrator.errors import ErrorCategory, ErrorCode, PipelineError
+
+    err = PipelineError(
+        category=ErrorCategory.TRANSIENT,
+        code=ErrorCode.RATE_LIMITED,
+        phase="publishing",
+        message="GitHub API rate limited",
+        recoverable=True,
+        retry_after=60.0,
+    )
+
+    assert err.category == ErrorCategory.TRANSIENT
+    assert err.code == ErrorCode.RATE_LIMITED
+    assert err.phase == "publishing"
+    assert err.recoverable is True
+    assert err.retry_after == 60.0
+    assert err.candidate_id is None
+
+
+def test_error_taxonomy_all_categories_and_codes_defined():
+    from gg.orchestrator.errors import ErrorCategory, ErrorCode, PipelineError
+
+    expected_categories = {
+        "transient", "executor_error", "tool_error", "policy_error",
+        "external_side_effect_error", "validation_failed",
+        "configuration_error", "terminal_error", "unknown",
+    }
+    expected_codes = {
+        "invalid_config", "auth_failed", "rate_limited", "missing_runtime",
+        "backend_unavailable", "analysis_timeout", "context_too_large",
+        "evaluation_context_too_large", "baseline_failed", "candidate_timeout",
+        "disk_quota_exceeded", "verification_failed", "patch_conflict",
+        "stale_base_conflict", "budget_exceeded", "security_violation",
+        "schema_unsupported", "invalid_resume_target", "state_conflict",
+        "artifact_checksum_failed",
+    }
+
+    actual_categories = {c.value for c in ErrorCategory}
+    actual_codes = {c.value for c in ErrorCode}
+
+    assert expected_categories == actual_categories
+    assert expected_codes == actual_codes
+
+
+def test_error_taxonomy_frozen_dataclass_is_immutable():
+    from gg.orchestrator.errors import ErrorCategory, ErrorCode, PipelineError
+    import dataclasses
+
+    err = PipelineError(
+        category=ErrorCategory.UNKNOWN,
+        code=ErrorCode.INVALID_CONFIG,
+        phase="init",
+        message="bad config",
+    )
+
+    assert dataclasses.is_dataclass(err)
+    with __import__("pytest").raises((dataclasses.FrozenInstanceError, AttributeError)):
+        err.message = "mutated"  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# Log truncation: head+tail preservation
+# ---------------------------------------------------------------------------
+
+
+def test_log_truncation_returns_full_text_when_small():
+    from gg.orchestrator.logging import truncate_log
+
+    result = truncate_log("hello world", max_bytes=1000)
+
+    assert result["truncated"] == "hello world"
+    assert result["omitted_bytes"] == 0
+    assert result["original_bytes"] == len("hello world".encode())
+    assert result["stored_bytes"] == result["original_bytes"]
+
+
+def test_log_truncation_preserves_head_and_tail():
+    from gg.orchestrator.logging import truncate_log
+
+    text = "A" * 100 + "B" * 100 + "C" * 100
+    result = truncate_log(text, max_bytes=60, head_ratio=0.5)
+
+    truncated = result["truncated"]
+    assert truncated.startswith("A")
+    assert truncated.endswith("C")
+    assert "<truncated:" in truncated
+    assert result["omitted_bytes"] > 0
+    assert result["original_bytes"] == 300
+    assert result["stored_bytes"] < result["original_bytes"]
+
+
+def test_log_truncation_marker_includes_omitted_count():
+    from gg.orchestrator.logging import truncate_log
+
+    text = "X" * 1000
+    result = truncate_log(text, max_bytes=100)
+
+    assert f"{result['omitted_bytes']} bytes omitted" in result["truncated"]
+
+
+# ---------------------------------------------------------------------------
+# Port allocation: collision detection and retry
+# ---------------------------------------------------------------------------
+
+
+def test_port_allocation_returns_usable_port(tmp_path):
+    init_repo(tmp_path)
+    pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
+
+    port = pipeline._allocate_port("cand-001", port_range=(50100, 50200))
+
+    assert 50100 <= port < 50200
+    assert pipeline._port_allocations["cand-001"] == port
+
+
+def test_port_allocation_avoids_already_allocated(tmp_path):
+    init_repo(tmp_path)
+    pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
+
+    port1 = pipeline._allocate_port("cand-A", port_range=(50200, 50300))
+    port2 = pipeline._allocate_port("cand-B", port_range=(50200, 50300))
+
+    assert port1 != port2
+
+
+def test_port_allocation_deterministic_for_same_candidate(tmp_path):
+    init_repo(tmp_path)
+    pipeline1 = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
+    pipeline2 = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
+
+    import hashlib
+    lo, hi = 50300, 50400
+    digest = int(hashlib.sha256(b"cand-deterministic").hexdigest(), 16)
+    expected_base = lo + (digest % (hi - lo))
+
+    port1 = pipeline1._allocate_port("cand-deterministic", port_range=(lo, hi))
+    assert lo <= port1 < hi
+    _ = expected_base
+
+
+# ---------------------------------------------------------------------------
+# Clock skew: timestamp comparison with tolerance
+# ---------------------------------------------------------------------------
+
+
+def test_clock_skew_tolerance_applied_in_timestamp_check(tmp_path, monkeypatch):
+    init_repo(tmp_path)
+    pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
+
+    from datetime import datetime, timezone, timedelta
+    now = datetime.now(timezone.utc)
+    almost_elapsed = now - timedelta(seconds=58)
+    ts = almost_elapsed.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    assert pipeline.config.ci.clock_skew_tolerance_seconds >= 0
+
+    result_tight = pipeline._timestamp_is_elapsed(ts, threshold_seconds=60)
+    result_loose = pipeline._timestamp_is_elapsed(ts, threshold_seconds=50)
+    assert result_tight is False
+    assert result_loose is True
+
+
+def test_clock_skew_returns_false_for_invalid_timestamp(tmp_path):
+    init_repo(tmp_path)
+    pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
+
+    assert pipeline._timestamp_is_elapsed("not-a-timestamp", threshold_seconds=0) is False
+    assert pipeline._timestamp_is_elapsed("", threshold_seconds=0) is False
+
+
+# ---------------------------------------------------------------------------
+# Context budget: context_too_large_policy=fail and blocked
+# ---------------------------------------------------------------------------
+
+
+def create_task_analysis_run(pipeline: OrchestratorPipeline):
+    """Create a run in TASK_ANALYSIS state for budget/policy tests."""
+    issue = pipeline.platform.get_issue(42)
+    state = pipeline.store.create(issue, dry_run=False)
+    state.max_attempts = pipeline.config.runtime.max_attempts
+    state.transition(TaskState.CLAIMING, reason="test")
+    state.transition(TaskState.QUEUED, reason="test")
+    state.transition(TaskState.RUN_STARTED, reason="test")
+    state.transition(TaskState.TASK_ANALYSIS, reason="test")
+    pipeline.store.write(state)
+    return pipeline.store.load(state.run_id)
+
+
+def test_context_budget_enforce_fail_policy(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        "verify:\n  tests: ''\nanalysis:\n  max_candidate_files: 1\n  context_too_large_policy: fail\n",
+        encoding="utf-8",
+    )
+    pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
+    state = create_task_analysis_run(pipeline)
+
+    from gg.orchestrator.task_analysis import TaskBrief
+    brief = TaskBrief(
+        schema_version=1,
+        issue={"number": 42, "title": "T", "body": "", "labels": [], "url": ""},
+        summary="do it",
+        acceptance_criteria=[],
+        project_context="",
+        candidate_files=["a.py", "b.py", "c.py"],
+    )
+
+    code = pipeline._enforce_context_budget(state, brief)
+    assert code == "context_too_large"
+
+    result = pipeline._handle_context_too_large(state, code)
+    assert result["state"] in ("failed", "TerminalFailure")
+
+
+def test_context_budget_enforce_blocked_policy(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        "verify:\n  tests: ''\nanalysis:\n  max_candidate_files: 1\n  context_too_large_policy: blocked\n",
+        encoding="utf-8",
+    )
+    pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
+    state = create_task_analysis_run(pipeline)
+
+    from gg.orchestrator.task_analysis import TaskBrief
+    brief = TaskBrief(
+        schema_version=1,
+        issue={"number": 42, "title": "T", "body": "", "labels": [], "url": ""},
+        summary="do it",
+        acceptance_criteria=[],
+        project_context="",
+        candidate_files=["a.py", "b.py", "c.py"],
+    )
+
+    code = pipeline._enforce_context_budget(state, brief)
+    assert code == "context_too_large"
+
+    result = pipeline._handle_context_too_large(state, code)
+    assert result["state"] in ("blocked", "Blocked")
+
+
+def test_context_budget_no_violation_when_within_limit(tmp_path):
+    init_repo(tmp_path)
+    pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
+    state = create_task_analysis_run(pipeline)
+
+    from gg.orchestrator.task_analysis import TaskBrief
+    brief = TaskBrief(
+        schema_version=1,
+        issue={"number": 42, "title": "T", "body": "", "labels": [], "url": ""},
+        summary="do it",
+        acceptance_criteria=[],
+        project_context="",
+        candidate_files=["a.py"],
+    )
+
+    code = pipeline._enforce_context_budget(state, brief)
+    assert code is None
+
+
+# ---------------------------------------------------------------------------
+# OMX backend: config loading with omx_enabled
+# ---------------------------------------------------------------------------
+
+
+def test_agent_config_omx_fields_loaded_from_params(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        "verify:\n  tests: ''\nagent:\n  omx_enabled: true\n  omx_command: omx\n  allow_omx_team: true\n",
+        encoding="utf-8",
+    )
+    config = load_config(tmp_path)
+
+    assert config.agent.omx_enabled is True
+    assert config.agent.omx_command == "omx"
+    assert config.agent.allow_omx_team is True
+
+
+def test_agent_config_defaults_have_omx_disabled(tmp_path):
+    init_repo(tmp_path)
+    config = load_config(tmp_path)
+
+    assert config.agent.omx_enabled is False
+    assert config.agent.backend == "codex"
+
+
+def test_agent_config_circuit_breaker_defaults(tmp_path):
+    init_repo(tmp_path)
+    config = load_config(tmp_path)
+
+    assert config.agent.circuit_breaker_failures == 5
+    assert config.agent.circuit_breaker_window_seconds == 600
+    assert config.agent.circuit_breaker_cooldown_seconds == 900

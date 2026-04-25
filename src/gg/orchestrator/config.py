@@ -70,8 +70,10 @@ class VerifyConfig:
     typecheck: str = ""
     security: str = ""
     custom: tuple[str, ...] = ()
+    discovery_enabled: bool = True
     test_retry_count: int = 0
     allow_known_baseline_failures: bool = False
+    block_on_security_high: bool = True
 
     def commands(self) -> list[str]:
         return self.check_commands()
@@ -196,8 +198,10 @@ def default_params(project_path: str | Path) -> dict[str, Any]:
             "typecheck": "",
             "security": "",
             "custom": [],
+            "discovery_enabled": True,
             "test_retry_count": 0,
             "allow_known_baseline_failures": False,
+            "block_on_security_high": True,
         },
         "runtime": {
             "agent_backend": "codex",
@@ -332,8 +336,10 @@ def load_config(project_path: str | Path) -> GGConfig:
                     "typecheck": verify.get("typecheck", ""),
                     "security": verify.get("security", ""),
                     "custom": verify.get("custom", []),
+                    "discovery_enabled": verify.get("discovery_enabled", True),
                     "test_retry_count": verify.get("test_retry_count", 0),
                     "allow_known_baseline_failures": verify.get("allow_known_baseline_failures", False),
+                    "block_on_security_high": verify.get("block_on_security_high", True),
                 },
                 "runtime": {
                     "agent_backend": runtime.get("agent_backend", raw.get("agent_backend", "codex")),
@@ -458,8 +464,10 @@ def load_config(project_path: str | Path) -> GGConfig:
             typecheck=model.verify.typecheck,
             security=model.verify.security,
             custom=model.verify.custom,
+            discovery_enabled=model.verify.discovery_enabled,
             test_retry_count=model.verify.test_retry_count,
             allow_known_baseline_failures=model.verify.allow_known_baseline_failures,
+            block_on_security_high=model.verify.block_on_security_high,
         ),
         runtime=RuntimeConfig(
             agent_backend=model.runtime.agent_backend,
@@ -557,8 +565,10 @@ def _reject_unknown_config_keys(raw: dict[str, Any], location: str) -> None:
             "typecheck",
             "security",
             "custom",
+            "discovery_enabled",
             "test_retry_count",
             "allow_known_baseline_failures",
+            "block_on_security_high",
         },
         "runtime": {
             "agent_backend",

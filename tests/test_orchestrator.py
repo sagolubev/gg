@@ -23,7 +23,7 @@ from gg.orchestrator.evaluation import CandidateEvaluator
 from gg.orchestrator.executor import CandidateExecutor
 from gg.orchestrator.git import commit_all
 from gg.orchestrator.lock import FileLock, LockManager
-from gg.orchestrator.pipeline import OrchestratorPipeline
+from gg.orchestrator.pipeline import OrchestratorPipeline, _verification_passed
 from gg.orchestrator.plugins import create_agent_backend, register_agent_backend, register_platform
 from gg.orchestrator.rate_limit import RateLimitStore, RateLimitSnapshot, RateLimitThrottleError
 from gg.orchestrator.sandbox import SandboxPolicy, SandboxRunResult, SandboxRuntime
@@ -42,7 +42,7 @@ from gg.orchestrator.schemas import (
 from gg.orchestrator.state import CandidateState, InvalidTransitionError, RunState, TaskState
 from gg.orchestrator.store import RunStore
 from gg.orchestrator.task_analysis import TaskAnalyzer, extract_single_json_object
-from gg.orchestrator.verification import VerificationCommand, VerificationRunner
+from gg.orchestrator.verification import CheckResult, VerificationCommand, VerificationRunner
 from gg.platforms.base import GitPlatform, Issue, IssueComment
 from gg.platforms.github import GitHubPlatform
 from gg.platforms.gitlab import GitLabPlatform
@@ -2871,7 +2871,9 @@ def test_init_params_generation(tmp_path):
     assert config.verify.tests == "pytest"
     assert config.verify.security == ""
     assert config.verify.custom == ()
+    assert config.verify.discovery_enabled is True
     assert config.verify.test_retry_count == 0
+    assert config.verify.block_on_security_high is True
     assert config.log.mask_secrets is True
     assert config.cost.mode == "duration-only"
     assert config.evaluation.max_context_tokens == 60000
@@ -3102,6 +3104,128 @@ def test_pipeline_assigns_default_verification_parsers(tmp_path):
         ("typecheck", "mypy"),
         ("security", "bandit,secret-scan"),
     ]
+
+
+def test_pipeline_discovers_package_verification_commands_as_advisory(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / "package.json").write_text(
+        json.dumps(
+            {
+                "scripts": {
+                    "test": "vitest run",
+                    "lint": "eslint .",
+                    "typecheck": "tsc --noEmit",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        """verify:
+  tests: ''
+  lint: ''
+  typecheck: ''
+  security: ''
+""",
+        encoding="utf-8",
+    )
+
+    commands = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())._verification_commands()
+
+    assert [(command.id, command.command, command.required) for command in commands] == [
+        ("tests", "npm test", True),
+        ("lint", "npm run lint", False),
+        ("typecheck", "npm run typecheck", False),
+    ]
+
+
+def test_pipeline_discovers_python_verification_surfaces(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.ruff]\nline-length = 100\n[tool.mypy]\npython_version = '3.11'\n[tool.bandit]\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        """verify:
+  tests: ''
+  lint: ''
+  typecheck: ''
+  security: ''
+""",
+        encoding="utf-8",
+    )
+
+    commands = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())._verification_commands()
+
+    assert [(command.id, command.command, command.required, command.parser) for command in commands] == [
+        ("tests", "pytest", True, "pytest"),
+        ("lint", "ruff check .", False, "ruff"),
+        ("typecheck", "mypy .", False, "mypy"),
+        ("security", "bandit -r .", False, "bandit,secret-scan"),
+    ]
+
+
+def test_verification_gate_blocks_new_high_security_findings_even_when_advisory():
+    baseline = [
+        CheckResult(
+            command="bandit -r .",
+            status="failed",
+            exit_code=1,
+            category="security",
+            required=False,
+            findings=[
+                {
+                    "category": "security",
+                    "parser": "bandit",
+                    "severity": "high",
+                    "code": "B999",
+                    "file": "src/legacy.py",
+                    "line": 10,
+                    "message": "legacy issue",
+                }
+            ],
+        )
+    ]
+    checks = [
+        baseline[0],
+        CheckResult(
+            command="bandit -r .",
+            status="failed",
+            exit_code=1,
+            category="security",
+            required=False,
+            findings=[
+                {
+                    "category": "security",
+                    "parser": "bandit",
+                    "severity": "high",
+                    "code": "B999",
+                    "file": "src/new.py",
+                    "line": 5,
+                    "message": "new issue",
+                }
+            ],
+        ),
+    ]
+
+    assert (
+        _verification_passed(
+            checks,
+            baseline,
+            allow_known_baseline_failures=True,
+            block_on_security_high=True,
+        )
+        is False
+    )
+    assert (
+        _verification_passed(
+            baseline,
+            baseline,
+            allow_known_baseline_failures=True,
+            block_on_security_high=True,
+        )
+        is True
+    )
 
 
 def test_pipeline_uses_registered_platform_and_agent_backend(tmp_path):

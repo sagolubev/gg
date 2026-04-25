@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 import hashlib
+import json
 import os
 import re
 import signal
@@ -968,6 +969,7 @@ class OrchestratorPipeline:
             verification,
             baseline,
             allow_known_baseline_failures=self.config.verify.allow_known_baseline_failures,
+            block_on_security_high=self.config.verify.block_on_security_high,
         )
         policy_violations = self._candidate_policy_violations(candidate.worktree_path, final_files)
         effective_status = candidate.status
@@ -1466,6 +1468,7 @@ class OrchestratorPipeline:
             verification,
             self._load_baseline_verification(state),
             allow_known_baseline_failures=self.config.verify.allow_known_baseline_failures,
+            block_on_security_high=self.config.verify.block_on_security_high,
         ):
             state.artifacts["integration_verification"] = verification_path
             return {"error": "integration verification failed", "verification_path": verification_path}
@@ -1816,6 +1819,7 @@ class OrchestratorPipeline:
 
     def _verification_commands(self) -> list[VerificationCommand]:
         commands: list[VerificationCommand] = []
+        configured_categories: set[str] = set()
         for id_, category, command in (
             ("tests", "test", self.config.verify.tests),
             ("lint", "lint", self.config.verify.lint),
@@ -1823,6 +1827,7 @@ class OrchestratorPipeline:
             ("security", "security", self.config.verify.security),
         ):
             if command.strip():
+                configured_categories.add(category)
                 commands.append(
                     VerificationCommand(
                         id=id_,
@@ -1832,6 +1837,8 @@ class OrchestratorPipeline:
                         parser=_default_verification_parser(category, command),
                     )
                 )
+        if self.config.verify.discovery_enabled:
+            commands.extend(_discover_verification_commands(self.project_path, configured_categories))
         for index, command in enumerate(self.config.verify.custom, start=1):
             if command.strip():
                 commands.append(
@@ -2054,6 +2061,98 @@ def _default_verification_parser(category: str, command: str) -> str:
     return ""
 
 
+def _discover_verification_commands(
+    project_path: Path,
+    configured_categories: set[str],
+) -> list[VerificationCommand]:
+    commands: list[VerificationCommand] = []
+    package_scripts = _package_json_scripts(project_path / "package.json")
+
+    if "test" not in configured_categories:
+        if "test" in package_scripts:
+            commands.append(_discovered_command("tests", "test", "npm test", required=True))
+        elif _has_pytest_surface(project_path):
+            commands.append(_discovered_command("tests", "test", "pytest", required=True))
+
+    if "lint" not in configured_categories:
+        if "lint" in package_scripts:
+            commands.append(_discovered_command("lint", "lint", "npm run lint", required=False))
+        elif _has_ruff_surface(project_path):
+            commands.append(_discovered_command("lint", "lint", "ruff check .", required=False))
+
+    if "typecheck" not in configured_categories:
+        if "typecheck" in package_scripts:
+            commands.append(
+                _discovered_command("typecheck", "typecheck", "npm run typecheck", required=False)
+            )
+        elif _has_mypy_surface(project_path):
+            commands.append(_discovered_command("typecheck", "typecheck", "mypy .", required=False))
+
+    if "security" not in configured_categories and _has_bandit_surface(project_path):
+        commands.append(_discovered_command("security", "security", "bandit -r .", required=False))
+
+    return commands
+
+
+def _discovered_command(
+    id_: str,
+    category: str,
+    command: str,
+    *,
+    required: bool,
+) -> VerificationCommand:
+    return VerificationCommand(
+        id=id_,
+        category=category,
+        command=command,
+        required=required,
+        parser=_default_verification_parser(category, command),
+    )
+
+
+def _package_json_scripts(path: Path) -> dict[str, str]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    scripts = payload.get("scripts") if isinstance(payload, dict) else None
+    return {str(key): str(value) for key, value in scripts.items()} if isinstance(scripts, dict) else {}
+
+
+def _has_pytest_surface(project_path: Path) -> bool:
+    return any(
+        (project_path / name).exists()
+        for name in ("pytest.ini", "tox.ini", "setup.cfg", "pyproject.toml", "tests")
+    )
+
+
+def _has_ruff_surface(project_path: Path) -> bool:
+    if (project_path / "ruff.toml").exists() or (project_path / ".ruff.toml").exists():
+        return True
+    return _file_contains(project_path / "pyproject.toml", "[tool.ruff")
+
+
+def _has_mypy_surface(project_path: Path) -> bool:
+    if (project_path / "mypy.ini").exists():
+        return True
+    return _file_contains(project_path / "pyproject.toml", "[tool.mypy")
+
+
+def _has_bandit_surface(project_path: Path) -> bool:
+    return (
+        (project_path / ".bandit").exists()
+        or _file_contains(project_path / "pyproject.toml", "[tool.bandit")
+        or _file_contains(project_path / "pyproject.toml", "bandit")
+    )
+
+
+def _file_contains(path: Path, needle: str) -> bool:
+    try:
+        return needle in path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+
+
 def _agent_context_window_tokens(agent: AgentBackend | None) -> int | None:
     if agent is None:
         return None
@@ -2084,7 +2183,15 @@ def _available_disk_mb(path: Path) -> int:
     return usage.free // (1024 * 1024)
 
 
-def _verification_passed(checks, baseline, *, allow_known_baseline_failures: bool) -> bool:
+def _verification_passed(
+    checks,
+    baseline,
+    *,
+    allow_known_baseline_failures: bool,
+    block_on_security_high: bool,
+) -> bool:
+    if block_on_security_high and _new_high_security_findings(checks, baseline):
+        return False
     failed = {
         check.command
         for check in checks
@@ -2108,6 +2215,40 @@ def _verification_passed(checks, baseline, *, allow_known_baseline_failures: boo
         if baseline_failures.get(check.command) != _check_fingerprint(check):
             return False
     return True
+
+
+def _new_high_security_findings(checks, baseline) -> list[tuple]:
+    baseline_findings = {
+        _security_finding_fingerprint(finding)
+        for check in baseline
+        for finding in (check.findings or [])
+        if _is_high_security_finding(finding)
+    }
+    return [
+        fingerprint
+        for check in checks
+        for finding in (check.findings or [])
+        if _is_high_security_finding(finding)
+        for fingerprint in (_security_finding_fingerprint(finding),)
+        if fingerprint not in baseline_findings
+    ]
+
+
+def _is_high_security_finding(finding: dict[str, Any]) -> bool:
+    if str(finding.get("category", "")).lower() != "security":
+        return False
+    return str(finding.get("severity", "")).lower() in {"high", "critical"}
+
+
+def _security_finding_fingerprint(finding: dict[str, Any]) -> tuple:
+    return (
+        str(finding.get("parser", "")),
+        str(finding.get("code", "")),
+        str(finding.get("file", "")),
+        int(finding.get("line") or 0),
+        str(finding.get("message", "")),
+        str(finding.get("severity", "")).lower(),
+    )
 
 
 def _with_baseline_status(checks, baseline) -> list[CheckResult]:

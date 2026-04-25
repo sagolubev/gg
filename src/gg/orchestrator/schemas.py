@@ -135,8 +135,10 @@ class VerifyConfigModel(StrictArtifactModel):
     typecheck: str = ""
     security: str = ""
     custom: tuple[str, ...] = ()
+    discovery_enabled: bool = True
     test_retry_count: int = Field(default=0, ge=0)
     allow_known_baseline_failures: bool = False
+    block_on_security_high: bool = True
 
 
 class AuditConfigModel(StrictArtifactModel):

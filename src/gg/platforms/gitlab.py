@@ -12,6 +12,8 @@ def _parse_comments(payload: dict) -> list[IssueComment]:
     raw_comments = payload.get("comments") or payload.get("notes") or payload.get("discussions") or []
     if isinstance(raw_comments, dict):
         raw_comments = raw_comments.get("nodes") or raw_comments.get("items") or []
+    if not isinstance(raw_comments, list):
+        return []
     comments: list[IssueComment] = []
     for item in raw_comments:
         node = item if isinstance(item, dict) else {}

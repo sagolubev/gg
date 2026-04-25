@@ -20,7 +20,7 @@ from gg.orchestrator.pipeline import OrchestratorPipeline
 from gg.orchestrator.rate_limit import RateLimitStore, RateLimitSnapshot, RateLimitThrottleError
 from gg.orchestrator.sandbox import SandboxPolicy, SandboxRunResult, SandboxRuntime
 from gg.orchestrator.state import CandidateState, InvalidTransitionError, RunState, TaskState
-from gg.platforms.base import GitPlatform, Issue
+from gg.platforms.base import GitPlatform, Issue, IssueComment
 from gg.platforms.github import GitHubPlatform
 from gg.platforms.gitlab import GitLabPlatform
 
@@ -642,18 +642,20 @@ def test_task_analysis_includes_issue_comments_and_local_inputs(tmp_path):
 
     ready = pipeline.run_issue(42, dry_run=True)
     state = pipeline.store.load(ready["run_id"])
-    state.recover_to(TaskState.BLOCKED, reason="test input before task analysis refresh")
+    state.recover_to(TaskState.BLOCKED, reason="test blocked")
     pipeline.store.write(state)
+
     provided = pipeline.provide(ready["run_id"], message="Use Spanish")
-    assert provided["accepted"] is True
     refreshed = pipeline.resume(ready["run_id"], no_pr=True)
 
+    assert provided["accepted"] is True
     assert refreshed["state"] == "Completed"
-    brief_path = tmp_path / state.artifacts["task_brief"]
+    refreshed_state = pipeline.store.load(ready["run_id"])
+    brief_path = tmp_path / refreshed_state.artifacts["task_brief"]
     brief = json.loads(brief_path.read_text(encoding="utf-8"))
     assert brief["issue"]["comments"][0]["body"] == "Please keep the file UTF-8 encoded."
     assert brief["issue"]["inputs"][0]["message"] == "Use Spanish"
-    snapshot = json.loads((tmp_path / state.artifacts["context_snapshot"]).read_text(encoding="utf-8"))
+    snapshot = json.loads((tmp_path / refreshed_state.artifacts["context_snapshot"]).read_text(encoding="utf-8"))
     for key in ("issue_comments", "local_inputs"):
         digest = snapshot["objects"][key]
         assert ContextSnapshotStore(tmp_path).read_text(digest)

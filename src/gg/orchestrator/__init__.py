@@ -1,13 +1,9 @@
 """Walking-skeleton orchestrator for gg."""
 
-from __future__ import annotations
-
-from typing import Any
-
 __all__ = ["OrchestratorPipeline"]
 
 
-def __getattr__(name: str) -> Any:
+def __getattr__(name: str):
     if name == "OrchestratorPipeline":
         from gg.orchestrator.pipeline import OrchestratorPipeline
 

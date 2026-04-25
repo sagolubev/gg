@@ -17,11 +17,10 @@ from gg.orchestrator.context import ContextSnapshotStore
 from gg.orchestrator.executor import CandidateExecutor
 from gg.orchestrator.lock import FileLock
 from gg.orchestrator.pipeline import OrchestratorPipeline
-from gg.orchestrator.rate_limit import RateLimitStore
+from gg.orchestrator.rate_limit import RateLimitStore, RateLimitSnapshot, RateLimitThrottleError
 from gg.orchestrator.sandbox import SandboxPolicy, SandboxRunResult, SandboxRuntime
 from gg.orchestrator.state import CandidateState, InvalidTransitionError, RunState, TaskState
-from gg.orchestrator.store import RunStore
-from gg.platforms.base import GitPlatform, Issue, IssueComment
+from gg.platforms.base import GitPlatform, Issue
 from gg.platforms.github import GitHubPlatform
 from gg.platforms.gitlab import GitLabPlatform
 
@@ -80,6 +79,30 @@ class CancellingFindPrPlatform(FakePlatform):
         assert self.pipeline is not None
         self.pipeline.cancel(self.run_id, reason="cancel during publish")
         return "https://github.com/example/repo/pull/77"
+
+
+class ThrottledListPlatform(FakePlatform):
+    def list_issues(self, state: str = "open", limit: int = 30) -> list[Issue]:
+        raise RateLimitThrottleError(
+            RateLimitSnapshot(
+                bucket="github:example/repo:issues:read",
+                remaining=0,
+                reset_at="2999-01-01T00:00:00Z",
+                limit=5000,
+            )
+        )
+
+
+class ThrottledClaimPlatform(FakePlatform):
+    def add_comment(self, issue_number: int, body: str) -> None:
+        raise RateLimitThrottleError(
+            RateLimitSnapshot(
+                bucket="github:example/repo:issues:comment",
+                remaining=0,
+                reset_at="2999-01-01T00:00:00Z",
+                limit=5000,
+            )
+        )
 
 
 class FakeAgent(AgentBackend):
@@ -1028,6 +1051,83 @@ def test_rate_limit_store_uses_sqlite_wal(tmp_path):
     assert store.get("github:sagolubev/gg-test").limit == 5000
     assert store.should_throttle("github:sagolubev/gg-test") is True
     assert (tmp_path / ".gg" / "rate-limits.sqlite3").exists()
+
+
+def test_rate_limit_store_records_headers_backoff_and_resume(tmp_path):
+    init_repo(tmp_path)
+    store = RateLimitStore(tmp_path)
+    bucket = "github:example/repo:issues:read"
+
+    snapshot = store.record_http_headers(
+        bucket,
+        "< X-RateLimit-Remaining: 0\n< X-RateLimit-Reset: 1893456000\n< X-RateLimit-Limit: 5000\n",
+    )
+    backoff = store.backoff(bucket, retry_after_seconds=30, now="2030-01-01T00:00:00Z")
+
+    assert snapshot is not None
+    assert snapshot.limit == 5000
+    assert store.should_throttle(bucket, now="2029-12-31T23:59:59Z") is True
+    assert backoff.reset_at == "2030-01-01T00:00:30Z"
+    assert store.should_throttle(bucket, now="2030-01-01T00:00:31Z") is False
+
+
+def test_github_platform_reuses_stored_rate_limit_until_reset(monkeypatch, tmp_path):
+    init_repo(tmp_path)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/example/repo.git"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    calls: list[tuple[list[str], dict[str, str]]] = []
+
+    def fake_run(args, **kwargs):
+        calls.append((args, kwargs.get("env", {})))
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout="[]",
+            stderr="< X-RateLimit-Remaining: 0\n< X-RateLimit-Reset: 4102444800\n< X-RateLimit-Limit: 5000\n",
+        )
+
+    monkeypatch.setattr("gg.platforms.base.subprocess.run", fake_run)
+
+    platform = GitHubPlatform(str(tmp_path))
+
+    assert platform.list_issues() == []
+    assert calls[0][1]["GH_DEBUG"] == "api"
+    try:
+        platform.list_issues()
+    except RateLimitThrottleError as exc:
+        assert exc.snapshot.bucket == "github:example/repo:issues:read"
+        assert exc.snapshot.reset_at == "2100-01-01T00:00:00Z"
+    else:
+        raise AssertionError("expected second call to short-circuit on stored rate limit")
+    assert len(calls) == 1
+
+
+def test_run_next_returns_throttled_response_when_issue_polling_is_rate_limited(tmp_path):
+    init_repo(tmp_path)
+
+    result = OrchestratorPipeline(tmp_path, platform=ThrottledListPlatform(), agent=FakeAgent()).run_next()
+
+    assert result["state"] == "Throttled"
+    assert result["bucket"] == "github:example/repo:issues:read"
+    assert result["remaining"] == 0
+
+
+def test_run_issue_blocks_and_persists_rate_limit_artifact(tmp_path):
+    init_repo(tmp_path)
+    pipeline = OrchestratorPipeline(tmp_path, platform=ThrottledClaimPlatform(), agent=FakeAgent())
+
+    result = pipeline.run_issue(42)
+    state = pipeline.store.load(result["run_id"])
+    artifact = json.loads((tmp_path / state.artifacts["rate_limit"]).read_text(encoding="utf-8"))
+
+    assert result["state"] == TaskState.BLOCKED.value
+    assert result["error"]["code"] == "rate_limited"
+    assert state.state is TaskState.BLOCKED
+    assert artifact["bucket"] == "github:example/repo:issues:comment"
 
 
 def test_candidate_executor_can_run_codex_via_sandbox(tmp_path):

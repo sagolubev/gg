@@ -17,6 +17,7 @@ from gg.orchestrator.executor import CandidateExecutor
 from gg.orchestrator.git import changed_files as git_changed_files
 from gg.orchestrator.git import commit_all, diff as git_diff, push_branch
 from gg.orchestrator.lock import LockManager
+from gg.orchestrator.rate_limit import RateLimitThrottleError
 from gg.orchestrator.state import CandidateState, TaskState
 from gg.orchestrator.state import TERMINAL_STATES
 from gg.orchestrator.store import RunStore
@@ -46,12 +47,13 @@ class OrchestratorPipeline:
         self.knowledge = KnowledgeEngine(self.project_path)
 
     def run_issue(self, issue_number: int, *, dry_run: bool = False, no_pr: bool = False) -> dict[str, Any]:
-        issue = self.platform.get_issue(issue_number)
-        state = self.store.create(issue, dry_run=dry_run)
-        state.max_attempts = self.config.runtime.max_attempts
-        self.knowledge.record_issue_picked(issue_number=issue.number, title=issue.title, labels=issue.labels)
-
+        state = None
         try:
+            issue = self.platform.get_issue(issue_number)
+            state = self.store.create(issue, dry_run=dry_run)
+            state.max_attempts = self.config.runtime.max_attempts
+            self.knowledge.record_issue_picked(issue_number=issue.number, title=issue.title, labels=issue.labels)
+
             with self.locks.issue(issue_number):
                 state.transition(TaskState.CLAIMING, reason="issue selected")
                 self.store.write(state)
@@ -75,11 +77,18 @@ class OrchestratorPipeline:
                 if dry_run:
                     return {"run_id": state.run_id, "state": state.state.value, "dry_run": True}
 
-                return self._execute_ready_state(state, issue, brief, no_pr=no_pr)
+            return self._execute_ready_state(state, issue, brief, no_pr=no_pr)
+        except RateLimitThrottleError as exc:
+            if state is None:
+                return self._throttled_response(exc)
+            return self._block_on_rate_limit(state, issue_number, exc)
         except KeyboardInterrupt:
-            self._mark_interrupted(state)
+            if state is not None:
+                self._mark_interrupted(state)
             raise
         except Exception as exc:
+            if state is None:
+                raise
             try:
                 state.fail(code="pipeline_error", message=str(exc))
                 self.knowledge.record_error(issue_number=issue.number, message=str(exc), pattern=type(exc).__name__)
@@ -92,7 +101,10 @@ class OrchestratorPipeline:
 
     def run_next(self, *, dry_run: bool = False, no_pr: bool = False) -> dict[str, Any]:
         with self.locks.queue():
-            issues = self.platform.list_issues(limit=30)
+            try:
+                issues = self.platform.list_issues(limit=30)
+            except RateLimitThrottleError as exc:
+                return self._throttled_response(exc)
             eligible = self._eligible_issues(issues)
             if not eligible:
                 return {"state": "NoEligibleIssue", "message": "No eligible open issues found."}
@@ -759,6 +771,49 @@ class OrchestratorPipeline:
             self.platform.add_comment(issue_number, body)
         except Exception:
             return
+
+    def _block_on_rate_limit(self, state, issue_number: int, exc: RateLimitThrottleError) -> dict[str, Any]:
+        artifact = self.store.write_json(
+            state.run_id,
+            "artifacts/rate-limit.json",
+            {
+                "schema_version": 1,
+                "issue_number": issue_number,
+                "bucket": exc.snapshot.bucket,
+                "remaining": exc.snapshot.remaining,
+                "reset_at": exc.snapshot.reset_at,
+                "limit": exc.snapshot.limit,
+                "message": str(exc),
+                "captured_at": _now_placeholder(),
+            },
+        )
+        state.artifacts["rate_limit"] = artifact
+        state.last_error = {
+            "code": "rate_limited",
+            "message": str(exc),
+            "bucket": exc.snapshot.bucket,
+            "reset_at": exc.snapshot.reset_at,
+            "at": _now_placeholder(),
+        }
+        if state.state not in TERMINAL_STATES:
+            state.recover_to(TaskState.BLOCKED, reason=f"rate limited: {exc.snapshot.bucket}")
+        self.store.write(state)
+        self.knowledge.record_error(issue_number=issue_number, message=str(exc), pattern="RateLimitThrottleError")
+        return {
+            "run_id": state.run_id,
+            "state": state.state.value,
+            "error": state.last_error,
+            "rate_limit": artifact,
+        }
+
+    def _throttled_response(self, exc: RateLimitThrottleError) -> dict[str, Any]:
+        return {
+            "state": "Throttled",
+            "message": str(exc),
+            "bucket": exc.snapshot.bucket,
+            "reset_at": exc.snapshot.reset_at,
+            "remaining": exc.snapshot.remaining,
+        }
 
     def _platform(self) -> GitPlatform:
         platform = detect_platform(self.project_path)

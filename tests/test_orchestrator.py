@@ -20,8 +20,7 @@ from gg.orchestrator.pipeline import OrchestratorPipeline
 from gg.orchestrator.rate_limit import RateLimitStore, RateLimitSnapshot, RateLimitThrottleError
 from gg.orchestrator.sandbox import SandboxPolicy, SandboxRunResult, SandboxRuntime
 from gg.orchestrator.state import CandidateState, InvalidTransitionError, RunState, TaskState
-from gg.orchestrator.store import RunStore
-from gg.platforms.base import GitPlatform, Issue, IssueComment
+from gg.platforms.base import GitPlatform, Issue
 from gg.platforms.github import GitHubPlatform
 from gg.platforms.gitlab import GitLabPlatform
 
@@ -1093,8 +1092,9 @@ def test_github_platform_reuses_stored_rate_limit_until_reset(monkeypatch, tmp_p
             stderr="< X-RateLimit-Remaining: 0\n< X-RateLimit-Reset: 4102444800\n< X-RateLimit-Limit: 5000\n",
         )
 
-    platform = GitHubPlatform(str(tmp_path))
     monkeypatch.setattr("gg.platforms.base.subprocess.run", fake_run)
+
+    platform = GitHubPlatform(str(tmp_path))
 
     assert platform.list_issues() == []
     try:

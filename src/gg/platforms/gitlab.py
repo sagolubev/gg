@@ -74,10 +74,7 @@ class GitLabPlatform(GitPlatform):
         ]
 
     def get_issue(self, number: int) -> Issue:
-        raw = self._run(
-            ["issue", "view", str(number), "--comments", "--output", "json"],
-            bucket=self._bucket("issues:read"),
-        )
+        raw = self._run(["issue", "view", str(number), "--output", "json"], bucket=self._bucket("issues:read"))
         i = json.loads(raw)
         return Issue(
             number=i.get("iid", number),

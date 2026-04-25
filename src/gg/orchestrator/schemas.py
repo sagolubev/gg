@@ -67,6 +67,8 @@ class GitConfigModel(StrictArtifactModel):
     default_branch: str = "main"
     author_name: str = "gg-orchestrator"
     author_email: str = "gg-orchestrator@users.noreply.local"
+    committer_name: str = "gg-orchestrator"
+    committer_email: str = "gg-orchestrator@users.noreply.local"
 
 
 class TaskSystemConfigModel(StrictArtifactModel):
@@ -79,6 +81,7 @@ class TaskSystemConfigModel(StrictArtifactModel):
 class SelectionConfigModel(StrictArtifactModel):
     include_labels: tuple[str, ...] = ("ai-ready",)
     exclude_labels: tuple[str, ...] = ("gg:in-progress", "gg:blocked", "gg:done")
+    order: str = "priority_then_oldest"
 
 
 class RuntimeResourceConfigModel(StrictArtifactModel):
@@ -102,7 +105,7 @@ class RuntimeConfigModel(StrictArtifactModel):
     max_attempts: int = Field(default=1, ge=1)
     repair_candidates: int = Field(default=1, ge=1)
     use_sandbox_runtime: bool = True
-    require_sandbox_runtime: bool = False
+    require_sandbox_runtime: bool = True
     allow_unsafe_direct_exec: bool = False
     analysis_timeout_seconds: int = Field(default=900, ge=1)
     evaluation_timeout_seconds: int = Field(default=900, ge=1)
@@ -113,6 +116,9 @@ class RuntimeConfigModel(StrictArtifactModel):
     network: RuntimeNetworkConfigModel = Field(default_factory=RuntimeNetworkConfigModel)
     port_range: tuple[int, int] = (41000, 45000)
     sandbox_policy: SandboxPolicyModel = Field(default_factory=SandboxPolicyModel)
+    lock_stale_seconds: int = Field(default=3600, ge=1)
+    queue_lock_stale_seconds: int = Field(default=300, ge=1)
+    vendored_deps: bool = False
 
     @field_validator("port_range")
     @classmethod
@@ -139,11 +145,19 @@ class VerifyConfigModel(StrictArtifactModel):
     test_retry_count: int = Field(default=0, ge=0)
     allow_known_baseline_failures: bool = False
     block_on_security_high: bool = True
+    coverage: str = ""
+    format_check: str = ""
+    dependency_audit: str = ""
+    secret_scan: str = ""
+    baseline_check: bool = True
+    advisory_checks: bool = True
 
 
 class AuditConfigModel(StrictArtifactModel):
     hash_events: bool = False
+    hash_artifacts: bool = False
     external_sink: str = ""
+    sign_events: bool = False
 
 
 class SecurityConfigModel(StrictArtifactModel):
@@ -154,6 +168,8 @@ class SecurityConfigModel(StrictArtifactModel):
 
 class CleanupConfigModel(StrictArtifactModel):
     blocked_timeout_days: int | None = Field(default=14, ge=0)
+    keep_last: int = Field(default=20, ge=0)
+    ttl_days: int = Field(default=14, ge=0)
 
 
 class LogConfigModel(StrictArtifactModel):
@@ -179,6 +195,10 @@ class AnalysisConfigModel(StrictArtifactModel):
     max_inputs: int = Field(default=10, ge=0)
     max_input_message_chars: int = Field(default=2000, ge=1)
     max_agent_response_chars: int = Field(default=12000, ge=1)
+    max_candidate_files: int = Field(default=20, ge=1)
+    max_file_chars: int = Field(default=40000, ge=1)
+    context_too_large_policy: str = "fail"
+    include_attachments: str = "links-only"
 
 
 class EvaluationConfigModel(StrictArtifactModel):
@@ -201,6 +221,30 @@ class RecoveryConfigModel(StrictArtifactModel):
     keep_state_backup: bool = True
 
 
+class PollingConfigModel(StrictArtifactModel):
+    poll_interval_seconds: int = Field(default=60, ge=1)
+    jitter_seconds: int = Field(default=15, ge=0)
+
+
+class AgentConfigModel(StrictArtifactModel):
+    backend: str = "codex"
+    codex_command: str = "codex"
+    omx_enabled: bool = False
+    omx_command: str = "omx"
+    use_omx_exec: bool = False
+    allow_omx_team: bool = False
+    max_retries_per_phase: int = Field(default=3, ge=0)
+    circuit_breaker_failures: int = Field(default=5, ge=1)
+    circuit_breaker_window_seconds: int = Field(default=600, ge=1)
+    circuit_breaker_cooldown_seconds: int = Field(default=900, ge=1)
+
+
+class SecretsConfigModel(StrictArtifactModel):
+    allow_from_env: bool = True
+    allow_from_keyring: bool = False
+    forbid_in_project_config: bool = True
+
+
 class GGConfigModel(StrictArtifactModel):
     git: GitConfigModel
     task_system: TaskSystemConfigModel = Field(default_factory=TaskSystemConfigModel)
@@ -216,6 +260,10 @@ class GGConfigModel(StrictArtifactModel):
     evaluation: EvaluationConfigModel = Field(default_factory=EvaluationConfigModel)
     ci: CIConfigModel = Field(default_factory=CIConfigModel)
     recovery: RecoveryConfigModel = Field(default_factory=RecoveryConfigModel)
+    polling: PollingConfigModel = Field(default_factory=PollingConfigModel)
+    agent: AgentConfigModel = Field(default_factory=AgentConfigModel)
+    secrets: SecretsConfigModel = Field(default_factory=SecretsConfigModel)
+    profiles: dict[str, Any] = Field(default_factory=dict)
 
 
 class RunTransitionModel(CompatibleArtifactModel):
@@ -487,6 +535,14 @@ class AgentHandoffModel(CompatibleArtifactModel):
     context_snapshot_path: str = ""
     instructions: str = ""
     artifacts: dict[str, str] = Field(default_factory=dict)
+    handoff_id: str = ""
+    target_agent: dict[str, Any] = Field(default_factory=dict)
+    reason: str = ""
+    task: dict[str, Any] = Field(default_factory=dict)
+    context: dict[str, Any] = Field(default_factory=dict)
+    workspace: dict[str, Any] = Field(default_factory=dict)
+    resume: dict[str, Any] | None = None
+    execution_policy: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("created_at")
     @classmethod
@@ -508,6 +564,9 @@ class AgentResultModel(CompatibleArtifactModel):
     changed_files: list[str] = Field(default_factory=list)
     artifacts: dict[str, str] = Field(default_factory=dict)
     metrics: dict[str, Any] = Field(default_factory=dict)
+    needs_input: dict[str, Any] | None = None
+    failure: dict[str, Any] | None = None
+    decisions: list[dict[str, Any]] = Field(default_factory=list)
 
     @field_validator("status")
     @classmethod
@@ -596,6 +655,14 @@ class ArchiveSummaryModel(CompatibleArtifactModel):
     removed_worktrees: list[str] = Field(default_factory=list)
     retained_artifacts: dict[str, str] = Field(default_factory=dict)
     outcome: RunOutcomeModel | None = None
+    final_state: str = ""
+    created_at: str = ""
+    completed_at: str | None = None
+    pr_url: str | None = None
+    winner: str | None = None
+    traffic_light: str | None = None
+    artifact_hashes: dict[str, str] = Field(default_factory=dict)
+    summary: str = ""
 
     @field_validator("archived_at")
     @classmethod

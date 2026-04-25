@@ -23,6 +23,7 @@ class TaskSystemConfig:
 class SelectionConfig:
     include_labels: tuple[str, ...] = ("ai-ready",)
     exclude_labels: tuple[str, ...] = ("gg:in-progress", "gg:blocked", "gg:done")
+    order: str = "priority_then_oldest"
 
 
 @dataclass(frozen=True)
@@ -49,7 +50,7 @@ class RuntimeConfig:
     max_attempts: int = 1
     repair_candidates: int = 1
     use_sandbox_runtime: bool = True
-    require_sandbox_runtime: bool = False
+    require_sandbox_runtime: bool = True
     allow_unsafe_direct_exec: bool = False
     analysis_timeout_seconds: int = 900
     evaluation_timeout_seconds: int = 900
@@ -60,6 +61,9 @@ class RuntimeConfig:
     network: RuntimeNetworkConfig = field(default_factory=RuntimeNetworkConfig)
     port_range: tuple[int, int] = (41000, 45000)
     sandbox_policy: SandboxPolicy = field(default_factory=SandboxPolicy)
+    lock_stale_seconds: int = 3600
+    queue_lock_stale_seconds: int = 300
+    vendored_deps: bool = False
 
 
 @dataclass(frozen=True)
@@ -74,6 +78,12 @@ class VerifyConfig:
     test_retry_count: int = 0
     allow_known_baseline_failures: bool = False
     block_on_security_high: bool = True
+    coverage: str = ""
+    format_check: str = ""
+    dependency_audit: str = ""
+    secret_scan: str = ""
+    baseline_check: bool = True
+    advisory_checks: bool = True
 
     def commands(self) -> list[str]:
         return self.check_commands()
@@ -91,12 +101,16 @@ class GitConfig:
     default_branch: str = "main"
     author_name: str = "gg-orchestrator"
     author_email: str = "gg-orchestrator@users.noreply.local"
+    committer_name: str = "gg-orchestrator"
+    committer_email: str = "gg-orchestrator@users.noreply.local"
 
 
 @dataclass(frozen=True)
 class AuditConfig:
     hash_events: bool = False
+    hash_artifacts: bool = False
     external_sink: str = ""
+    sign_events: bool = False
 
 
 @dataclass(frozen=True)
@@ -109,6 +123,8 @@ class SecurityConfig:
 @dataclass(frozen=True)
 class CleanupConfig:
     blocked_timeout_days: int | None = 14
+    keep_last: int = 20
+    ttl_days: int = 14
 
 
 @dataclass(frozen=True)
@@ -137,6 +153,10 @@ class AnalysisConfig:
     max_inputs: int = 10
     max_input_message_chars: int = 2000
     max_agent_response_chars: int = 12000
+    max_candidate_files: int = 20
+    max_file_chars: int = 40000
+    context_too_large_policy: str = "fail"
+    include_attachments: str = "links-only"
 
     def to_limits(self) -> dict[str, int]:
         return {
@@ -175,6 +195,33 @@ class RecoveryConfig:
 
 
 @dataclass(frozen=True)
+class PollingConfig:
+    poll_interval_seconds: int = 60
+    jitter_seconds: int = 15
+
+
+@dataclass(frozen=True)
+class AgentConfig:
+    backend: str = "codex"
+    codex_command: str = "codex"
+    omx_enabled: bool = False
+    omx_command: str = "omx"
+    use_omx_exec: bool = False
+    allow_omx_team: bool = False
+    max_retries_per_phase: int = 3
+    circuit_breaker_failures: int = 5
+    circuit_breaker_window_seconds: int = 600
+    circuit_breaker_cooldown_seconds: int = 900
+
+
+@dataclass(frozen=True)
+class SecretsConfig:
+    allow_from_env: bool = True
+    allow_from_keyring: bool = False
+    forbid_in_project_config: bool = True
+
+
+@dataclass(frozen=True)
 class GGConfig:
     git: GitConfig
     task_system: TaskSystemConfig = field(default_factory=TaskSystemConfig)
@@ -190,6 +237,10 @@ class GGConfig:
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
     ci: CIConfig = field(default_factory=CIConfig)
     recovery: RecoveryConfig = field(default_factory=RecoveryConfig)
+    polling: PollingConfig = field(default_factory=PollingConfig)
+    agent: AgentConfig = field(default_factory=AgentConfig)
+    secrets: SecretsConfig = field(default_factory=SecretsConfig)
+    profiles: dict[str, dict] = field(default_factory=dict)
 
 
 def _mapping(value: Any) -> dict[str, Any]:
@@ -315,6 +366,28 @@ def default_params(project_path: str | Path) -> dict[str, Any]:
         "recovery": {
             "keep_state_backup": True,
         },
+        "polling": {
+            "poll_interval_seconds": 60,
+            "jitter_seconds": 15,
+        },
+        "agent": {
+            "backend": "codex",
+            "codex_command": "codex",
+            "omx_enabled": False,
+            "omx_command": "omx",
+            "use_omx_exec": False,
+            "allow_omx_team": False,
+            "max_retries_per_phase": 3,
+            "circuit_breaker_failures": 5,
+            "circuit_breaker_window_seconds": 600,
+            "circuit_breaker_cooldown_seconds": 900,
+        },
+        "secrets": {
+            "allow_from_env": True,
+            "allow_from_keyring": False,
+            "forbid_in_project_config": True,
+        },
+        "profiles": {},
     }
 
 
@@ -342,6 +415,10 @@ def load_config(project_path: str | Path) -> GGConfig:
     evaluation = _mapping(raw.get("evaluation"))
     ci = _mapping(raw.get("ci"))
     recovery = _mapping(raw.get("recovery"))
+    polling = _mapping(raw.get("polling"))
+    agent = _mapping(raw.get("agent"))
+    secrets = _mapping(raw.get("secrets"))
+    profiles: dict[str, dict] = raw.get("profiles") or {}
     sandbox_policy = _mapping(runtime.get("sandbox_policy"))
     resource = _mapping(runtime.get("resource"))
     network = _mapping(runtime.get("network"))
@@ -353,6 +430,8 @@ def load_config(project_path: str | Path) -> GGConfig:
                     "default_branch": default_branch,
                     "author_name": git.get("author_name", "gg-orchestrator"),
                     "author_email": git.get("author_email", "gg-orchestrator@users.noreply.local"),
+                    "committer_name": git.get("committer_name", "gg-orchestrator"),
+                    "committer_email": git.get("committer_email", "gg-orchestrator@users.noreply.local"),
                 },
                 "task_system": {
                     "platform": task_system.get("platform", raw.get("platform", "auto")),
@@ -366,6 +445,7 @@ def load_config(project_path: str | Path) -> GGConfig:
                         "exclude_labels",
                         ["gg:in-progress", "gg:blocked", "gg:done"],
                     ),
+                    "order": selection.get("order", "priority_then_oldest"),
                 },
                 "verify": {
                     "setup": verify.get("setup", ""),
@@ -378,6 +458,12 @@ def load_config(project_path: str | Path) -> GGConfig:
                     "test_retry_count": verify.get("test_retry_count", 0),
                     "allow_known_baseline_failures": verify.get("allow_known_baseline_failures", False),
                     "block_on_security_high": verify.get("block_on_security_high", True),
+                    "coverage": verify.get("coverage", ""),
+                    "format_check": verify.get("format_check", ""),
+                    "dependency_audit": verify.get("dependency_audit", ""),
+                    "secret_scan": verify.get("secret_scan", ""),
+                    "baseline_check": verify.get("baseline_check", True),
+                    "advisory_checks": verify.get("advisory_checks", True),
                 },
                 "runtime": {
                     "agent_backend": runtime.get("agent_backend", raw.get("agent_backend", "codex")),
@@ -421,6 +507,9 @@ def load_config(project_path: str | Path) -> GGConfig:
                         ),
                     },
                     "port_range": runtime.get("port_range", [41000, 45000]),
+                    "lock_stale_seconds": runtime.get("lock_stale_seconds", 3600),
+                    "queue_lock_stale_seconds": runtime.get("queue_lock_stale_seconds", 300),
+                    "vendored_deps": runtime.get("vendored_deps", False),
                     "sandbox_policy": {
                         "allowed_domains": sandbox_policy.get("allowed_domains", []),
                         "denied_domains": sandbox_policy.get("denied_domains", []),
@@ -431,7 +520,9 @@ def load_config(project_path: str | Path) -> GGConfig:
                 },
                 "audit": {
                     "hash_events": audit.get("hash_events", False),
+                    "hash_artifacts": audit.get("hash_artifacts", False),
                     "external_sink": audit.get("external_sink", ""),
+                    "sign_events": audit.get("sign_events", False),
                 },
                 "security": {
                     "allow_lfs_changes": security.get("allow_lfs_changes", False),
@@ -440,6 +531,8 @@ def load_config(project_path: str | Path) -> GGConfig:
                 },
                 "cleanup": {
                     "blocked_timeout_days": cleanup.get("blocked_timeout_days", 14),
+                    "keep_last": cleanup.get("keep_last", 20),
+                    "ttl_days": cleanup.get("ttl_days", 14),
                 },
                 "log": {
                     "max_size_mb": log.get("max_size_mb", 50),
@@ -462,6 +555,10 @@ def load_config(project_path: str | Path) -> GGConfig:
                     "max_inputs": analysis.get("max_inputs", 10),
                     "max_input_message_chars": analysis.get("max_input_message_chars", 2000),
                     "max_agent_response_chars": analysis.get("max_agent_response_chars", 12000),
+                    "max_candidate_files": analysis.get("max_candidate_files", 20),
+                    "max_file_chars": analysis.get("max_file_chars", 40000),
+                    "context_too_large_policy": analysis.get("context_too_large_policy", "fail"),
+                    "include_attachments": analysis.get("include_attachments", "links-only"),
                 },
                 "evaluation": {
                     "max_context_tokens": evaluation.get("max_context_tokens", 60000),
@@ -486,6 +583,28 @@ def load_config(project_path: str | Path) -> GGConfig:
                 "recovery": {
                     "keep_state_backup": recovery.get("keep_state_backup", True),
                 },
+                "polling": {
+                    "poll_interval_seconds": polling.get("poll_interval_seconds", 60),
+                    "jitter_seconds": polling.get("jitter_seconds", 15),
+                },
+                "agent": {
+                    "backend": agent.get("backend", "codex"),
+                    "codex_command": agent.get("codex_command", "codex"),
+                    "omx_enabled": agent.get("omx_enabled", False),
+                    "omx_command": agent.get("omx_command", "omx"),
+                    "use_omx_exec": agent.get("use_omx_exec", False),
+                    "allow_omx_team": agent.get("allow_omx_team", False),
+                    "max_retries_per_phase": agent.get("max_retries_per_phase", 3),
+                    "circuit_breaker_failures": agent.get("circuit_breaker_failures", 5),
+                    "circuit_breaker_window_seconds": agent.get("circuit_breaker_window_seconds", 600),
+                    "circuit_breaker_cooldown_seconds": agent.get("circuit_breaker_cooldown_seconds", 900),
+                },
+                "secrets": {
+                    "allow_from_env": secrets.get("allow_from_env", True),
+                    "allow_from_keyring": secrets.get("allow_from_keyring", False),
+                    "forbid_in_project_config": secrets.get("forbid_in_project_config", True),
+                },
+                "profiles": profiles,
             }
         )
     except Exception as exc:
@@ -495,6 +614,8 @@ def load_config(project_path: str | Path) -> GGConfig:
             default_branch=model.git.default_branch,
             author_name=model.git.author_name,
             author_email=model.git.author_email,
+            committer_name=model.git.committer_name,
+            committer_email=model.git.committer_email,
         ),
         task_system=TaskSystemConfig(
             platform=model.task_system.platform,
@@ -505,6 +626,7 @@ def load_config(project_path: str | Path) -> GGConfig:
         selection=SelectionConfig(
             include_labels=model.selection.include_labels,
             exclude_labels=model.selection.exclude_labels,
+            order=model.selection.order,
         ),
         verify=VerifyConfig(
             setup=model.verify.setup,
@@ -517,6 +639,12 @@ def load_config(project_path: str | Path) -> GGConfig:
             test_retry_count=model.verify.test_retry_count,
             allow_known_baseline_failures=model.verify.allow_known_baseline_failures,
             block_on_security_high=model.verify.block_on_security_high,
+            coverage=model.verify.coverage,
+            format_check=model.verify.format_check,
+            dependency_audit=model.verify.dependency_audit,
+            secret_scan=model.verify.secret_scan,
+            baseline_check=model.verify.baseline_check,
+            advisory_checks=model.verify.advisory_checks,
         ),
         runtime=RuntimeConfig(
             agent_backend=model.runtime.agent_backend,
@@ -545,6 +673,9 @@ def load_config(project_path: str | Path) -> GGConfig:
                 allowed_hosts=model.runtime.network.allowed_hosts,
             ),
             port_range=model.runtime.port_range,
+            lock_stale_seconds=model.runtime.lock_stale_seconds,
+            queue_lock_stale_seconds=model.runtime.queue_lock_stale_seconds,
+            vendored_deps=model.runtime.vendored_deps,
             sandbox_policy=SandboxPolicy(
                 allowed_domains=list(model.runtime.sandbox_policy.allowed_domains),
                 denied_domains=list(model.runtime.sandbox_policy.denied_domains),
@@ -555,14 +686,20 @@ def load_config(project_path: str | Path) -> GGConfig:
         ),
         audit=AuditConfig(
             hash_events=model.audit.hash_events,
+            hash_artifacts=model.audit.hash_artifacts,
             external_sink=model.audit.external_sink,
+            sign_events=model.audit.sign_events,
         ),
         security=SecurityConfig(
             allow_lfs_changes=model.security.allow_lfs_changes,
             allow_binary_changes=model.security.allow_binary_changes,
             allow_dependency_changes=model.security.allow_dependency_changes,
         ),
-        cleanup=CleanupConfig(blocked_timeout_days=model.cleanup.blocked_timeout_days),
+        cleanup=CleanupConfig(
+            blocked_timeout_days=model.cleanup.blocked_timeout_days,
+            keep_last=model.cleanup.keep_last,
+            ttl_days=model.cleanup.ttl_days,
+        ),
         log=LogConfig(
             max_size_mb=model.log.max_size_mb,
             max_command_log_chars=model.log.max_command_log_chars,
@@ -584,6 +721,10 @@ def load_config(project_path: str | Path) -> GGConfig:
             max_inputs=model.analysis.max_inputs,
             max_input_message_chars=model.analysis.max_input_message_chars,
             max_agent_response_chars=model.analysis.max_agent_response_chars,
+            max_candidate_files=model.analysis.max_candidate_files,
+            max_file_chars=model.analysis.max_file_chars,
+            context_too_large_policy=model.analysis.context_too_large_policy,
+            include_attachments=model.analysis.include_attachments,
         ),
         evaluation=EvaluationConfig(
             max_context_tokens=model.evaluation.max_context_tokens,
@@ -600,6 +741,28 @@ def load_config(project_path: str | Path) -> GGConfig:
             clock_drift_warn_seconds=model.ci.clock_drift_warn_seconds,
         ),
         recovery=RecoveryConfig(keep_state_backup=model.recovery.keep_state_backup),
+        polling=PollingConfig(
+            poll_interval_seconds=model.polling.poll_interval_seconds,
+            jitter_seconds=model.polling.jitter_seconds,
+        ),
+        agent=AgentConfig(
+            backend=model.agent.backend,
+            codex_command=model.agent.codex_command,
+            omx_enabled=model.agent.omx_enabled,
+            omx_command=model.agent.omx_command,
+            use_omx_exec=model.agent.use_omx_exec,
+            allow_omx_team=model.agent.allow_omx_team,
+            max_retries_per_phase=model.agent.max_retries_per_phase,
+            circuit_breaker_failures=model.agent.circuit_breaker_failures,
+            circuit_breaker_window_seconds=model.agent.circuit_breaker_window_seconds,
+            circuit_breaker_cooldown_seconds=model.agent.circuit_breaker_cooldown_seconds,
+        ),
+        secrets=SecretsConfig(
+            allow_from_env=model.secrets.allow_from_env,
+            allow_from_keyring=model.secrets.allow_from_keyring,
+            forbid_in_project_config=model.secrets.forbid_in_project_config,
+        ),
+        profiles=model.profiles,
     )
 
 
@@ -615,9 +778,9 @@ def _reject_unknown_config_keys(raw: dict[str, Any], location: str) -> None:
     allowed: dict[str, set[str] | None] = {
         "schema_version": None,
         "project": {"default_branch"},
-        "git": {"default_branch", "author_name", "author_email"},
+        "git": {"default_branch", "author_name", "author_email", "committer_name", "committer_email"},
         "task_system": {"platform", "work_label", "done_label", "blocked_label"},
-        "selection": {"include_labels", "exclude_labels"},
+        "selection": {"include_labels", "exclude_labels", "order"},
         "verify": {
             "setup",
             "tests",
@@ -629,6 +792,12 @@ def _reject_unknown_config_keys(raw: dict[str, Any], location: str) -> None:
             "test_retry_count",
             "allow_known_baseline_failures",
             "block_on_security_high",
+            "coverage",
+            "format_check",
+            "dependency_audit",
+            "secret_scan",
+            "baseline_check",
+            "advisory_checks",
         },
         "runtime": {
             "agent_backend",
@@ -657,10 +826,13 @@ def _reject_unknown_config_keys(raw: dict[str, Any], location: str) -> None:
             "network_default",
             "allowed_network_hosts",
             "sandbox_policy",
+            "lock_stale_seconds",
+            "queue_lock_stale_seconds",
+            "vendored_deps",
         },
-        "audit": {"hash_events", "external_sink"},
+        "audit": {"hash_events", "hash_artifacts", "external_sink", "sign_events"},
         "security": {"allow_lfs_changes", "allow_binary_changes", "allow_dependency_changes"},
-        "cleanup": {"blocked_timeout_days"},
+        "cleanup": {"blocked_timeout_days", "keep_last", "ttl_days"},
         "log": {"max_size_mb", "max_command_log_chars", "mask_secrets"},
         "cost": {"enabled", "mode", "max_usd_per_run", "max_tokens_per_run"},
         "analysis": {
@@ -673,6 +845,10 @@ def _reject_unknown_config_keys(raw: dict[str, Any], location: str) -> None:
             "max_inputs",
             "max_input_message_chars",
             "max_agent_response_chars",
+            "max_candidate_files",
+            "max_file_chars",
+            "context_too_large_policy",
+            "include_attachments",
         },
         "evaluation": {
             "max_context_tokens",
@@ -689,6 +865,21 @@ def _reject_unknown_config_keys(raw: dict[str, Any], location: str) -> None:
             "clock_drift_warn_seconds",
         },
         "recovery": {"keep_state_backup"},
+        "polling": {"poll_interval_seconds", "jitter_seconds"},
+        "agent": {
+            "backend",
+            "codex_command",
+            "omx_enabled",
+            "omx_command",
+            "use_omx_exec",
+            "allow_omx_team",
+            "max_retries_per_phase",
+            "circuit_breaker_failures",
+            "circuit_breaker_window_seconds",
+            "circuit_breaker_cooldown_seconds",
+        },
+        "secrets": {"allow_from_env", "allow_from_keyring", "forbid_in_project_config"},
+        "profiles": None,
         # Backward-compatible root-level aliases.
         "platform": None,
         "agent_backend": None,

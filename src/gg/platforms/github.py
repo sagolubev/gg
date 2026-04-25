@@ -70,7 +70,7 @@ class GitHubPlatform(GitPlatform):
     def get_issue(self, number: int) -> Issue:
         raw = self._run([
             "issue", "view", str(number),
-            "--json", "number,title,body,labels,assignees,state,url",
+            "--json", "number,title,body,labels,assignees,state,url,comments",
         ], bucket=self._bucket("issues:read"))
         i = json.loads(raw)
         return Issue(

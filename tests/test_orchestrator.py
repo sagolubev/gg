@@ -1324,28 +1324,35 @@ def test_provide_rejects_non_blocked_run(tmp_path):
 
 def test_github_platform_get_issue_parses_comments():
     platform = GitHubPlatform(".")
-    platform._run = lambda args, **kwargs: json.dumps(  # type: ignore[method-assign]
-        {
-            "number": 7,
-            "title": "Add comments",
-            "body": "Body",
-            "labels": [{"name": "ai-ready"}],
-            "assignees": [{"login": "octocat"}],
-            "state": "open",
-            "url": "https://github.com/example/repo/issues/7",
-            "comments": [
-                {
-                    "author": {"login": "maintainer"},
-                    "body": "Please preserve CLI compatibility.",
-                    "createdAt": "2026-04-25T12:00:00Z",
-                    "url": "https://github.com/example/repo/issues/7#issuecomment-1",
-                }
-            ],
-        }
-    )
+    seen: list[str] = []
+
+    def fake_run(args, **kwargs):
+        seen.extend(args)
+        return json.dumps(
+            {
+                "number": 7,
+                "title": "Add comments",
+                "body": "Body",
+                "labels": [{"name": "ai-ready"}],
+                "assignees": [{"login": "octocat"}],
+                "state": "open",
+                "url": "https://github.com/example/repo/issues/7",
+                "comments": [
+                    {
+                        "author": {"login": "maintainer"},
+                        "body": "Please preserve CLI compatibility.",
+                        "createdAt": "2026-04-25T12:00:00Z",
+                        "url": "https://github.com/example/repo/issues/7#issuecomment-1",
+                    }
+                ],
+            }
+        )
+
+    platform._run = fake_run  # type: ignore[method-assign]
 
     issue = platform.get_issue(7)
 
+    assert "number,title,body,labels,assignees,state,url,comments" in seen
     assert issue.comments[0].author == "maintainer"
     assert issue.comments[0].body == "Please preserve CLI compatibility."
 

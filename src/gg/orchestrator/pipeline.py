@@ -108,38 +108,6 @@ class OrchestratorPipeline:
     def resume(self, run_id: str, *, no_pr: bool = False) -> dict[str, Any]:
         state = self.store.load(run_id)
         issue_number = int(state.issue["number"])
-        if state.state in TERMINAL_STATES:
-            return {
-                "run_id": run_id,
-                "state": state.state.value,
-                "resumed": False,
-                "message": "Terminal runs are immutable; start a new run for a fresh attempt.",
-            }
-        brief_path = state.artifacts.get("task_brief")
-        if not brief_path:
-            state.fail(code="missing_task_brief", message="cannot resume without task brief artifact")
-            self.store.write(state)
-            return {"run_id": run_id, "state": state.state.value, "error": state.last_error}
-        issue = self.platform.get_issue(issue_number)
-        if state.state is TaskState.OUTCOME_PUBLISHING:
-            return self._resume_publishing(state, issue, no_pr=no_pr)
-        if state.state is TaskState.NEEDS_INPUT:
-            return {
-                "run_id": run_id,
-                "state": state.state.value,
-                "resumed": False,
-                "message": "Run is waiting for local input. Use gg provide before resuming.",
-            }
-        for candidate in state.candidate_states.values():
-            if candidate.status == "running":
-                candidate.status = "failed"
-                candidate.finished_at = _now_placeholder()
-                candidate.error = "interrupted before completion"
-        brief = self._refresh_task_analysis(state, issue)
-        if state.state is not TaskState.READY_FOR_EXECUTION:
-            state.recover_to(TaskState.READY_FOR_EXECUTION, reason=f"resume from {state.state.value}")
-            self.store.write(state)
-        state.dry_run = False
         try:
             with self.locks.issue(issue_number):
                 state = self.store.load(run_id)

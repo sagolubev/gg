@@ -108,8 +108,23 @@ class GitHubPlatform(GitPlatform):
         items = json.loads(raw) if raw else []
         return items[0]["url"] if items else None
 
+    REQUIRED_SCOPES = frozenset({"repo", "read:org"})
+
     def validate_auth(self) -> None:
-        self._run(["auth", "status"], bucket=self._bucket("auth"))
+        output = self._run(["auth", "status"], bucket=self._bucket("auth"))
+        token_scopes: set[str] = set()
+        for line in output.splitlines():
+            line = line.strip().lower()
+            if "token scopes:" in line or "oauth scopes:" in line:
+                scopes_part = line.split(":", 1)[1] if ":" in line else ""
+                token_scopes = {s.strip().strip("'\"") for s in scopes_part.split(",") if s.strip()}
+                break
+        if token_scopes and not token_scopes.issuperset(self.REQUIRED_SCOPES):
+            missing = self.REQUIRED_SCOPES - token_scopes
+            raise RuntimeError(
+                f"GitHub token is missing required scopes: {', '.join(sorted(missing))}. "
+                f"Token has: {', '.join(sorted(token_scopes))}"
+            )
 
     def add_comment(self, issue_number: int, body: str) -> None:
         self._run(["issue", "comment", str(issue_number), "--body", body], bucket=self._bucket("issues:comment"))

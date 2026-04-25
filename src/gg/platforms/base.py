@@ -191,6 +191,20 @@ class GitPlatform(ABC):
             "\n".join(details),
         )
 
+    def mark_in_progress(self, issue_number: int, *, work_label: str = "gg:in-progress") -> None:
+        """Mark an issue as in-progress by applying the work label."""
+        if work_label:
+            self.add_labels(issue_number, [work_label])
+
+    def publish_started_comment(self, issue_number: int, *, run_id: str) -> None:
+        """Post a comment indicating the orchestrator started working on this issue."""
+        self.add_stage_comment_once(
+            issue_number,
+            run_id,
+            "started",
+            f"gg started processing this issue. Run: `{run_id}`",
+        )
+
     def cleanup_claim(self, issue_number: int, *, work_label: str, blocked_label: str) -> None:
         """Remove transient claim labels from a tracker task."""
         self.apply_labels(issue_number, add=[], remove=[work_label, blocked_label])

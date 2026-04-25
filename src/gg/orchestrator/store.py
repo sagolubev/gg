@@ -168,8 +168,11 @@ class RunStore:
         except Exception as exc:
             raise ValueError(validation_error_message(str(path), exc)) from exc
 
-    def clean_terminal_runs(self, *, dry_run: bool = True) -> list[str]:
-        target_runs = [run for run in self.list_runs() if run.state in TERMINAL_STATES]
+    def clean_terminal_runs(self, *, dry_run: bool = True, run_id: str | None = None) -> list[str]:
+        target_runs = [
+            run for run in self.list_runs()
+            if run.state in TERMINAL_STATES and (run_id is None or run.run_id == run_id)
+        ]
         targets = [run.run_id for run in target_runs]
         if not dry_run:
             for run in target_runs:

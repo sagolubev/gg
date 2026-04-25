@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import re
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -54,6 +55,7 @@ class OrchestratorPipeline:
             self.project_path,
             audit_hash_events=self.config.audit.hash_events,
             audit_sink_path=self.config.audit.external_sink or None,
+            keep_state_backup=self.config.recovery.keep_state_backup,
         )
         self.locks = LockManager(self.project_path)
         self.platform = platform or create_platform(self.config.task_system.platform, self.project_path)
@@ -68,6 +70,8 @@ class OrchestratorPipeline:
         no_pr: bool = False,
         skip_existing: bool = False,
     ) -> dict[str, Any]:
+        if dry_run:
+            return self._dry_run_issue(issue_number, skip_existing=skip_existing)
         state = None
         issue = None
         try:
@@ -110,9 +114,6 @@ class OrchestratorPipeline:
                 state.transition(TaskState.READY_FOR_EXECUTION, reason="task brief ready")
                 self.store.write(state)
 
-                if dry_run:
-                    return {"run_id": state.run_id, "state": state.state.value, "dry_run": True}
-
                 return self._execute_ready_state(state, issue, brief, no_pr=no_pr)
         except RateLimitThrottleError as exc:
             if state is None:
@@ -139,6 +140,66 @@ class OrchestratorPipeline:
                 return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
             except Exception:
                 raise
+
+    def _dry_run_issue(self, issue_number: int, *, skip_existing: bool = False) -> dict[str, Any]:
+        with self.locks.issue(issue_number):
+            if skip_existing:
+                existing = self._existing_local_issue_run(issue_number)
+                if existing is not None:
+                    return {
+                        "run_id": existing.run_id,
+                        "state": "AlreadyClaimed",
+                        "existing_state": existing.state.value,
+                        "issue": existing.issue,
+                        "dry_run": True,
+                    }
+            issue = self.platform.get_issue(issue_number)
+            with tempfile.TemporaryDirectory(prefix="gg-dry-run-") as shadow_dir:
+                shadow_root = Path(shadow_dir)
+                shadow_store = RunStore(shadow_root)
+                state = shadow_store.create(issue, dry_run=True)
+                state.max_attempts = self.config.runtime.max_attempts
+                state.transition(TaskState.CLAIMING, reason="dry-run issue selected")
+                shadow_store.write(state)
+                state.transition(TaskState.QUEUED, reason="dry-run claim simulated")
+                state.transition(TaskState.RUN_STARTED, reason="dry-run start pipeline")
+                state.transition(TaskState.TASK_ANALYSIS, reason="dry-run create task brief")
+                shadow_store.write(state)
+                brief = TaskAnalyzer(
+                    str(self.project_path),
+                    agent=self._task_analysis_agent(),
+                    timeout=self.config.runtime.command_timeout_seconds,
+                ).analyze(issue, inputs=[])
+                brief_path = shadow_store.write_json(state.run_id, "artifacts/task-brief.json", brief.to_dict())
+                state.artifacts["task_brief"] = brief_path
+                snapshot_path = ContextSnapshotStore(shadow_root).write_task_snapshot(state.run_id, brief)
+                state.artifacts["context_snapshot"] = snapshot_path
+                if brief.blocked:
+                    state.transition(TaskState.BLOCKED, reason="dry-run task analysis missing information")
+                    state.last_error = {
+                        "code": "missing_task_info",
+                        "message": "; ".join(brief.missing_questions)
+                        or "task analysis needs more information",
+                        "at": _now_placeholder(),
+                    }
+                    shadow_store.write(state)
+                    return {
+                        "run_id": state.run_id,
+                        "state": state.state.value,
+                        "dry_run": True,
+                        "blocked": True,
+                        "missing_questions": brief.missing_questions,
+                        "error": state.last_error,
+                        "planned_operations": self._planned_claim_operations(issue, state.run_id),
+                    }
+                state.transition(TaskState.READY_FOR_EXECUTION, reason="dry-run task brief ready")
+                shadow_store.write(state)
+                return {
+                    "run_id": state.run_id,
+                    "state": state.state.value,
+                    "dry_run": True,
+                    "planned_operations": self._planned_claim_operations(issue, state.run_id),
+                }
 
     def run_next(self, *, dry_run: bool = False, no_pr: bool = False) -> dict[str, Any]:
         batch = self.run_batch(batch_size=1, dry_run=dry_run, no_pr=no_pr)
@@ -1313,6 +1374,26 @@ class OrchestratorPipeline:
             self.platform.add_comment(issue_number, f"{marker}\n{message}")
         except Exception:
             return
+
+    def _planned_claim_operations(self, issue: Issue, run_id: str) -> list[dict[str, Any]]:
+        operations: list[dict[str, Any]] = []
+        if self.config.task_system.work_label:
+            operations.append(
+                {
+                    "operation": "add_labels",
+                    "issue_number": issue.number,
+                    "labels": [self.config.task_system.work_label],
+                }
+            )
+        operations.append(
+            {
+                "operation": "add_comment",
+                "issue_number": issue.number,
+                "marker": f"<!-- gg-run-id={run_id} stage=claim -->",
+                "body": f"gg picked this issue for implementation. Run: `{run_id}`",
+            }
+        )
+        return operations
 
     def _stage_comment_exists(self, issue_number: int, marker: str) -> bool:
         try:

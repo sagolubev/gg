@@ -12,14 +12,19 @@ from typing import Any
 
 from gg.orchestrator.logging import append_jsonl, mask_secrets
 from gg.orchestrator.schemas import (
+    AgentHandoffModel,
+    AgentResultModel,
+    ArchiveSummaryModel,
     CandidateResultModel,
     EvaluationArtifactModel,
+    ExecutionEvaluationModel,
     InputArtifactModel,
     InputRequestModel,
     PatchConflictModel,
     PublishingIntegrationModel,
     PublishingPreflightModel,
     RateLimitArtifactModel,
+    RunOutcomeModel,
     RunSummaryModel,
     TaskBriefModel,
     VerificationArtifactModel,
@@ -41,12 +46,14 @@ class RunStore:
         *,
         audit_hash_events: bool = False,
         audit_sink_path: str | Path | None = None,
+        keep_state_backup: bool = False,
     ):
         self.project_path = Path(project_path).resolve()
         self.runs_dir = self.project_path / ".gg" / "runs"
         self.runs_dir.mkdir(parents=True, exist_ok=True)
         self.audit_hash_events = audit_hash_events
         self.audit_sink_path = self._resolve_audit_sink(audit_sink_path)
+        self.keep_state_backup = keep_state_backup
 
     def create(self, issue: Issue, *, dry_run: bool = False) -> RunState:
         stamp = utc_now().replace("-", "").replace(":", "").replace("T", "-").rstrip("Z")
@@ -121,6 +128,11 @@ class RunStore:
         state.artifacts.setdefault("run_summary", self._run_summary_relative_path(state.run_id))
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(state.to_dict(), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        if self.keep_state_backup and path.exists():
+            backup_path = path.with_name("state.json.bak")
+            backup_tmp = backup_path.with_suffix(".bak.tmp")
+            backup_tmp.write_bytes(path.read_bytes())
+            backup_tmp.replace(backup_path)
         tmp.replace(path)
         self._write_run_summary(run_dir, state)
         self._write_logs(run_dir, state, current)
@@ -139,6 +151,16 @@ class RunStore:
         return sorted(runs, key=lambda run: run.updated_at, reverse=True)
 
     def _load_state_file(self, path: Path) -> RunState:
+        try:
+            return self._read_state_file(path)
+        except ValueError:
+            if self.keep_state_backup and path.name == "state.json":
+                backup_path = path.with_name("state.json.bak")
+                if backup_path.exists():
+                    return self._read_state_file(backup_path)
+            raise
+
+    def _read_state_file(self, path: Path) -> RunState:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
@@ -404,6 +426,11 @@ class RunStore:
             "created_at": state.created_at,
             "updated_at": state.updated_at,
             "dry_run": state.dry_run,
+            "baseline": state.baseline,
+            "stage_attempts": state.stage_attempts,
+            "locks": state.locks,
+            "operator": state.operator,
+            "cost": state.cost,
             "publishing_step": state.publishing_step,
             "cancel_requested": state.cancel_requested,
             "pr_url": state.pr_url,
@@ -476,6 +503,12 @@ def _validate_json_artifact(relative_path: str, data: dict[str, Any]) -> None:
         schema = TaskBriefModel
     elif relative_path == "artifacts/evaluation.json":
         schema = EvaluationArtifactModel
+    elif relative_path == "artifacts/execution-evaluation.json" or relative_path.endswith("/execution-evaluation.json"):
+        schema = ExecutionEvaluationModel
+    elif relative_path == "artifacts/run-outcome.json" or relative_path.endswith("/run-outcome.json"):
+        schema = RunOutcomeModel
+    elif relative_path == "artifacts/archive-summary.json" or relative_path.endswith("/archive-summary.json"):
+        schema = ArchiveSummaryModel
     elif relative_path == "artifacts/input-request.json":
         schema = InputRequestModel
     elif relative_path == "artifacts/rate-limit.json":
@@ -490,6 +523,10 @@ def _validate_json_artifact(relative_path: str, data: dict[str, Any]) -> None:
         schema = VerificationArtifactModel
     elif relative_path.startswith("inputs/input-v1-") and relative_path.endswith(".json"):
         schema = InputArtifactModel
+    elif relative_path.endswith("/agent-handoff.json"):
+        schema = AgentHandoffModel
+    elif relative_path.endswith("/agent-result.json"):
+        schema = AgentResultModel
     elif relative_path.endswith("/candidate-result.json"):
         schema = CandidateResultModel
     if schema is None:

@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
+import yaml
 from click.testing import CliRunner
 
 from gg.agents.base import AgentBackend
@@ -18,15 +21,20 @@ from gg.orchestrator.context import ContextSnapshotStore
 from gg.orchestrator.evaluation import CandidateEvaluator
 from gg.orchestrator.executor import CandidateExecutor
 from gg.orchestrator.git import commit_all
-from gg.orchestrator.lock import FileLock
+from gg.orchestrator.lock import FileLock, LockManager
 from gg.orchestrator.pipeline import OrchestratorPipeline
 from gg.orchestrator.plugins import create_agent_backend, register_agent_backend, register_platform
 from gg.orchestrator.rate_limit import RateLimitStore, RateLimitSnapshot, RateLimitThrottleError
 from gg.orchestrator.sandbox import SandboxPolicy, SandboxRunResult, SandboxRuntime
 from gg.orchestrator.schemas import (
+    AgentHandoffModel,
+    AgentResultModel,
+    ArchiveSummaryModel,
     CandidateResultModel,
+    ExecutionEvaluationModel,
     GGConfigModel,
     InputArtifactModel,
+    RunOutcomeModel,
     RunStateModel,
     validation_error_message,
 )
@@ -557,6 +565,34 @@ def read_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
+def create_ready_run(
+    pipeline: OrchestratorPipeline,
+    issue_number: int = 42,
+    *,
+    blocked: bool = False,
+) -> dict:
+    issue = pipeline.platform.get_issue(issue_number)
+    state = pipeline.store.create(issue, dry_run=False)
+    state.max_attempts = pipeline.config.runtime.max_attempts
+    state.transition(TaskState.CLAIMING, reason="test fixture issue selected")
+    state.transition(TaskState.QUEUED, reason="test fixture claim complete")
+    state.transition(TaskState.RUN_STARTED, reason="test fixture start pipeline")
+    state.transition(TaskState.TASK_ANALYSIS, reason="test fixture create task brief")
+    pipeline.store.write(state)
+    brief = pipeline._refresh_task_analysis(state, issue)
+    if blocked or brief.blocked:
+        state.transition(TaskState.BLOCKED, reason="test fixture blocked")
+        state.last_error = {
+            "code": "missing_task_info",
+            "message": "; ".join(brief.missing_questions) or "test fixture blocked",
+            "at": state.updated_at,
+        }
+    else:
+        state.transition(TaskState.READY_FOR_EXECUTION, reason="test fixture task brief ready")
+    pipeline.store.write(state)
+    return {"run_id": state.run_id, "state": state.state.value}
+
+
 def test_artifact_schemas_reject_invalid_nested_values():
     try:
         RunStateModel.model_validate(
@@ -604,6 +640,87 @@ def test_artifact_schemas_tolerate_additive_resume_fields():
 
     assert state.run_id == "run-1"
     assert state.candidate_states["candidate-1"].status == "success"
+    assert state.baseline == {}
+    assert state.stage_attempts == {}
+    assert state.operator == {}
+    assert state.cost is None
+
+
+def test_run_state_round_trips_phase_c_resume_fields():
+    state = RunState(
+        run_id="run-1",
+        issue={"number": 1},
+        baseline={
+            "status": "failed",
+            "commit": "abc123",
+            "failed_commands": ["pytest"],
+            "checked_at": "2026-04-25T12:00:00Z",
+        },
+        stage_attempts={"analysis": 1, "execution": 2},
+        locks={"run": {"owner_pid": 123, "heartbeat_at": "2026-04-25T12:00:00Z"}},
+        operator={"requested_by": "cli"},
+        cost={"total_usd": 0.25, "events": 1},
+    )
+
+    loaded = RunState.from_dict(state.to_dict())
+
+    assert loaded.baseline["status"] == "failed"
+    assert loaded.stage_attempts == {"analysis": 1, "execution": 2}
+    assert loaded.locks["run"]["owner_pid"] == 123
+    assert loaded.operator == {"requested_by": "cli"}
+    assert loaded.cost == {
+        "total_usd": 0.25,
+        "total_tokens": None,
+        "input_tokens": None,
+        "output_tokens": None,
+        "duration_seconds": None,
+        "events": 1,
+    }
+
+
+def test_phase_c_artifact_placeholders_validate_minimal_contracts():
+    AgentHandoffModel.model_validate(
+        {
+            "schema_version": 1,
+            "run_id": "run-1",
+            "candidate_id": "candidate-1",
+            "attempt": 1,
+            "created_at": "2026-04-25T12:00:00Z",
+        }
+    )
+    AgentResultModel.model_validate(
+        {
+            "schema_version": 1,
+            "run_id": "run-1",
+            "candidate_id": "candidate-1",
+            "status": "success",
+            "finished_at": "2026-04-25T12:00:00Z",
+        }
+    )
+    ExecutionEvaluationModel.model_validate(
+        {
+            "schema_version": 1,
+            "run_id": "run-1",
+            "evaluated_at": "2026-04-25T12:00:00Z",
+            "verdict": "accept",
+        }
+    )
+    RunOutcomeModel.model_validate(
+        {
+            "schema_version": 1,
+            "run_id": "run-1",
+            "state": "Completed",
+            "status": "success",
+            "completed_at": "2026-04-25T12:00:00Z",
+        }
+    )
+    ArchiveSummaryModel.model_validate(
+        {
+            "schema_version": 1,
+            "run_id": "run-1",
+            "archived_at": "2026-04-25T12:00:00Z",
+        }
+    )
 
 
 def test_config_schema_reports_nested_field_paths():
@@ -695,6 +812,33 @@ def test_run_store_rejects_invalid_state_json_with_path(tmp_path):
     assert "candidate_states.candidate-1.status" in message
 
 
+def test_run_store_state_backup_is_opt_in_and_recovers_corrupt_primary(tmp_path):
+    init_repo(tmp_path)
+    issue = Issue(number=1, title="Backup state", body="", labels=["ai-ready"])
+
+    default_store = RunStore(tmp_path)
+    default_state = default_store.create(issue, dry_run=True)
+    default_state.operator = {"name": "cli"}
+    default_store.write(default_state)
+    default_run_dir = tmp_path / ".gg" / "runs" / default_state.run_id
+    assert not (default_run_dir / "state.json.bak").exists()
+
+    backup_store = RunStore(tmp_path, keep_state_backup=True)
+    state = backup_store.create(Issue(number=2, title="Recover state", body="", labels=["ai-ready"]), dry_run=True)
+    state.operator = {"name": "cli"}
+    backup_store.write(state)
+    run_dir = tmp_path / ".gg" / "runs" / state.run_id
+    assert (run_dir / "state.json.bak").exists()
+
+    state.operator = {"name": "updated"}
+    backup_store.write(state)
+    (run_dir / "state.json").write_text("{not-json\n", encoding="utf-8")
+
+    recovered = backup_store.load(state.run_id)
+
+    assert recovered.operator == {"name": "cli"}
+
+
 def test_candidate_and_input_artifact_schemas_are_explicit():
     candidate = CandidateResultModel.model_validate(
         {
@@ -744,27 +888,40 @@ def test_run_state_rejects_illegal_transition():
 
 def test_pipeline_dry_run_reaches_ready_for_execution(tmp_path):
     init_repo(tmp_path)
-    result = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent()).run_issue(
+    platform = FakePlatform()
+    result = OrchestratorPipeline(tmp_path, platform=platform, agent=FakeAgent()).run_issue(
         42,
         dry_run=True,
     )
 
     assert result["state"] == "ReadyForExecution"
+    assert result["dry_run"] is True
+    assert result["planned_operations"] == [
+        {"operation": "add_labels", "issue_number": 42, "labels": ["gg:in-progress"]},
+        {
+            "operation": "add_comment",
+            "issue_number": 42,
+            "marker": f"<!-- gg-run-id={result['run_id']} stage=claim -->",
+            "body": f"gg picked this issue for implementation. Run: `{result['run_id']}`",
+        },
+    ]
     runs = list((tmp_path / ".gg" / "runs").glob("*/state.json"))
-    assert len(runs) == 1
-    assert (runs[0].parent / "artifacts" / "task-brief.json").exists()
-    assert (runs[0].parent / "artifacts" / "context-snapshot-v1.json").exists()
-    assert any((tmp_path / ".gg" / "objects").glob("*/*"))
+    assert runs == []
+    assert not any((tmp_path / ".gg" / "objects").glob("*/*"))
+    assert not (tmp_path.parent / ".gg-worktrees" / tmp_path.name).exists()
+    assert platform.comments == []
+    assert platform.labels == []
 
 
 def test_run_store_uses_unique_run_ids(tmp_path):
     init_repo(tmp_path)
-    pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
+    store = RunStore(tmp_path)
+    issue = Issue(number=42, title="Add greeting", body="", labels=["ai-ready"])
 
-    first = pipeline.run_issue(42, dry_run=True)
-    second = pipeline.run_issue(42, dry_run=True)
+    first = store.create(issue)
+    second = store.create(issue)
 
-    assert first["run_id"] != second["run_id"]
+    assert first.run_id != second.run_id
     runs = list((tmp_path / ".gg" / "runs").glob("*/state.json"))
     assert len(runs) == 2
 
@@ -981,7 +1138,7 @@ def test_cancel_waits_for_candidate_batch_to_quiesce(tmp_path):
         ),
     )
     pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=agent)
-    ready = pipeline.run_issue(42, dry_run=True)
+    ready = create_ready_run(pipeline)
     run_ref["run_id"] = ready["run_id"]
 
     result = pipeline.resume(ready["run_id"], no_pr=True)
@@ -1093,7 +1250,7 @@ def test_commit_all_removes_candidate_cache_before_staging(tmp_path):
 def test_resume_ready_run_executes_same_run(tmp_path):
     init_repo(tmp_path)
     pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
-    ready = pipeline.run_issue(42, dry_run=True)
+    ready = create_ready_run(pipeline)
 
     result = pipeline.resume(ready["run_id"], no_pr=True)
 
@@ -1117,7 +1274,7 @@ def test_task_analysis_includes_issue_comments_and_local_inputs(tmp_path):
     platform.issues = [issue]
     pipeline = OrchestratorPipeline(tmp_path, platform=platform, agent=FakeAgent())
 
-    ready = pipeline.run_issue(42, dry_run=True)
+    ready = create_ready_run(pipeline)
     state = pipeline.store.load(ready["run_id"])
     state.recover_to(TaskState.BLOCKED, reason="test blocked")
     pipeline.store.write(state)
@@ -1174,16 +1331,16 @@ def test_task_analyzer_can_return_blocked_brief(tmp_path):
 def test_pipeline_uses_agent_analysis_blocked_result(tmp_path):
     init_repo(tmp_path)
 
-    result = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=BlockedAnalysisAgent()).run_issue(
+    pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=BlockedAnalysisAgent())
+    result = pipeline.run_issue(
         42,
         dry_run=True,
     )
 
     assert result["state"] == "Blocked"
     assert result["missing_questions"] == ["Which greeting language should be used?"]
-    state = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent()).store.load(result["run_id"])
-    brief = json.loads((tmp_path / state.artifacts["task_brief"]).read_text(encoding="utf-8"))
-    assert brief["blocked"] is True
+    assert result["dry_run"] is True
+    assert list((tmp_path / ".gg" / "runs").glob("*/state.json")) == []
 
 
 def test_json_extraction_rejects_conflicting_payloads():
@@ -1200,7 +1357,7 @@ def test_json_extraction_rejects_conflicting_payloads():
 def test_resume_interrupted_agent_running_marks_stale_candidate(tmp_path):
     init_repo(tmp_path)
     pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
-    ready = pipeline.run_issue(42, dry_run=True)
+    ready = create_ready_run(pipeline)
     state = pipeline.store.load(ready["run_id"])
     state.transition(TaskState.AGENT_SELECTION, reason="test")
     state.transition(TaskState.AGENT_RUNNING, reason="test")
@@ -1254,7 +1411,7 @@ def test_publish_honors_cancel_request_after_branch_push(tmp_path):
     init_repo(tmp_path)
     platform = CancellingFindPrPlatform()
     pipeline = OrchestratorPipeline(tmp_path, platform=platform, agent=FakeAgent())
-    ready = pipeline.run_issue(42, dry_run=True)
+    ready = create_ready_run(pipeline)
     state = pipeline.store.load(ready["run_id"])
     state.recover_to(TaskState.OUTCOME_PUBLISHING, reason="test interrupted publish")
     state.publishing_step = "branch_pushed"
@@ -1300,7 +1457,7 @@ def test_publish_skips_duplicate_result_comment_when_marker_exists(tmp_path):
     init_repo(tmp_path)
     platform = FakePlatform()
     pipeline = OrchestratorPipeline(tmp_path, platform=platform, agent=FakeAgent())
-    ready = pipeline.run_issue(42, dry_run=True)
+    ready = create_ready_run(pipeline)
     state = pipeline.store.load(ready["run_id"])
     state.recover_to(TaskState.OUTCOME_PUBLISHING, reason="test idempotent publish")
     state.publishing_step = "pr_created"
@@ -1373,7 +1530,7 @@ def test_publish_records_patch_conflict_before_pr(monkeypatch, tmp_path):
     monkeypatch.setattr("gg.orchestrator.pipeline.push_branch", lambda *_args, **_kwargs: None)
     platform = FakePlatform()
     pipeline = OrchestratorPipeline(tmp_path, platform=platform, agent=FakeAgent())
-    ready = pipeline.run_issue(42, dry_run=True)
+    ready = create_ready_run(pipeline)
     state = pipeline.store.load(ready["run_id"])
     state.recover_to(TaskState.OUTCOME_PUBLISHING, reason="test integration conflict")
     state.publishing_step = "started"
@@ -1408,7 +1565,7 @@ def test_resume_publish_applies_existing_integration_before_commit(monkeypatch, 
     monkeypatch.setattr("gg.orchestrator.pipeline.push_branch", lambda *_args, **_kwargs: None)
     platform = FakePlatform()
     pipeline = OrchestratorPipeline(tmp_path, platform=platform, agent=FakeAgent())
-    ready = pipeline.run_issue(42, dry_run=True)
+    ready = create_ready_run(pipeline)
     state = pipeline.store.load(ready["run_id"])
     base_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True).strip()
     patch_path = pipeline.store.write_text(
@@ -1473,7 +1630,7 @@ def test_resume_publish_resets_unverified_dirty_integration_worktree(monkeypatch
     monkeypatch.setattr("gg.orchestrator.pipeline.push_branch", lambda *_args, **_kwargs: None)
     platform = FakePlatform()
     pipeline = OrchestratorPipeline(tmp_path, platform=platform, agent=FakeAgent())
-    ready = pipeline.run_issue(42, dry_run=True)
+    ready = create_ready_run(pipeline)
     state = pipeline.store.load(ready["run_id"])
     base_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True).strip()
     patch_path = pipeline.store.write_text(
@@ -1548,7 +1705,7 @@ def test_resume_publish_reverifies_dirty_verified_integration_worktree(monkeypat
     monkeypatch.setattr("gg.orchestrator.pipeline.push_branch", lambda *_args, **_kwargs: None)
     platform = FakePlatform()
     pipeline = OrchestratorPipeline(tmp_path, platform=platform, agent=FakeAgent())
-    ready = pipeline.run_issue(42, dry_run=True)
+    ready = create_ready_run(pipeline)
     state = pipeline.store.load(ready["run_id"])
     base_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True).strip()
     patch_path = pipeline.store.write_text(
@@ -1632,7 +1789,7 @@ def test_publish_fails_when_default_branch_sync_fails(monkeypatch, tmp_path):
     )
     platform = FakePlatform()
     pipeline = OrchestratorPipeline(tmp_path, platform=platform, agent=FakeAgent())
-    ready = pipeline.run_issue(42, dry_run=True)
+    ready = create_ready_run(pipeline)
     state = pipeline.store.load(ready["run_id"])
     state.recover_to(TaskState.OUTCOME_PUBLISHING, reason="test sync failure")
     state.publishing_step = "started"
@@ -1677,7 +1834,7 @@ def test_publish_integration_verification_allows_identical_baseline_failure(monk
 def test_resume_publishing_rejects_invalid_evaluation_artifact(tmp_path):
     init_repo(tmp_path)
     pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
-    ready = pipeline.run_issue(42, dry_run=True)
+    ready = create_ready_run(pipeline)
     state = pipeline.store.load(ready["run_id"])
     state.recover_to(TaskState.OUTCOME_PUBLISHING, reason="test invalid evaluation")
     evaluation_path = tmp_path / ".gg" / "runs" / state.run_id / "artifacts" / "evaluation.json"
@@ -1699,7 +1856,7 @@ def test_resume_publishing_fails_closed_on_invalid_integration_artifact(monkeypa
     monkeypatch.setattr("gg.orchestrator.pipeline.push_branch", lambda *_args, **_kwargs: None)
     platform = FakePlatform()
     pipeline = OrchestratorPipeline(tmp_path, platform=platform, agent=FakeAgent())
-    ready = pipeline.run_issue(42, dry_run=True)
+    ready = create_ready_run(pipeline)
     state = pipeline.store.load(ready["run_id"])
     state.recover_to(TaskState.OUTCOME_PUBLISHING, reason="test invalid integration")
     state.publishing_step = "branch_pushed"
@@ -1732,7 +1889,7 @@ def test_stage_comment_uses_run_marker_for_idempotency(tmp_path):
     init_repo(tmp_path)
     platform = FakePlatform()
     pipeline = OrchestratorPipeline(tmp_path, platform=platform, agent=FakeAgent())
-    ready = pipeline.run_issue(42, dry_run=True)
+    ready = create_ready_run(pipeline)
     marker = f"<!-- gg-run-id={ready['run_id']} stage=blocked -->"
     platform.issue.comments.append(IssueComment(body=f"{marker}\nold blocked", author="gg"))
 
@@ -1745,7 +1902,7 @@ def test_publish_fails_with_preflight_artifact_when_base_commit_missing(tmp_path
     init_repo(tmp_path)
     platform = FakePlatform()
     pipeline = OrchestratorPipeline(tmp_path, platform=platform, agent=FakeAgent())
-    ready = pipeline.run_issue(42, dry_run=True)
+    ready = create_ready_run(pipeline)
     state = pipeline.store.load(ready["run_id"])
     state.recover_to(TaskState.OUTCOME_PUBLISHING, reason="test publish preflight")
     state.publishing_step = "started"
@@ -1795,7 +1952,7 @@ def test_interrupt_during_publishing_preserves_publish_resume_state(tmp_path):
 def test_retry_ready_run_aliases_resume(tmp_path):
     init_repo(tmp_path)
     pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
-    ready = pipeline.run_issue(42, dry_run=True)
+    ready = create_ready_run(pipeline)
 
     result = pipeline.retry(ready["run_id"], no_pr=True)
 
@@ -1929,7 +2086,7 @@ def test_provide_accepts_blocked_run_input(tmp_path):
     init_repo(tmp_path)
     platform = FakePlatform()
     pipeline = OrchestratorPipeline(tmp_path, platform=platform, agent=FakeAgent())
-    ready = pipeline.run_issue(42, dry_run=True)
+    ready = create_ready_run(pipeline)
     state = pipeline.store.load(ready["run_id"])
     state.recover_to(TaskState.BLOCKED, reason="test blocked")
     pipeline.store.write(state)
@@ -1947,7 +2104,7 @@ def test_provide_accepts_blocked_run_input(tmp_path):
 def test_provide_rejects_non_blocked_run(tmp_path):
     init_repo(tmp_path)
     pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
-    ready = pipeline.run_issue(42, dry_run=True)
+    ready = create_ready_run(pipeline)
 
     result = pipeline.provide(ready["run_id"], message="hello")
 
@@ -2024,7 +2181,8 @@ def test_gitlab_platform_get_issue_parses_comments():
 
 def test_cli_status_reads_runs(tmp_path):
     init_repo(tmp_path)
-    OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent()).run_issue(42, dry_run=True)
+    pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
+    create_ready_run(pipeline)
 
     result = CliRunner().invoke(cli, ["status", "--path", str(tmp_path), "--json"])
 
@@ -2053,7 +2211,7 @@ def test_clean_dry_run_lists_only_terminal_runs(tmp_path):
     init_repo(tmp_path)
     pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
     completed = pipeline.run_issue(42, no_pr=True)
-    ready = pipeline.run_issue(42, dry_run=True)
+    ready = create_ready_run(pipeline)
 
     result = pipeline.clean(dry_run=True)
 
@@ -2065,7 +2223,7 @@ def test_clean_dry_run_lists_only_terminal_runs(tmp_path):
 def test_clean_lists_and_removes_stale_waiting_runs(tmp_path):
     init_repo(tmp_path)
     pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
-    ready = pipeline.run_issue(42, dry_run=True)
+    ready = create_ready_run(pipeline)
     state = pipeline.store.load(ready["run_id"])
     state.recover_to(TaskState.NEEDS_INPUT, reason="test stale input")
     pipeline.store.write(state)
@@ -2111,7 +2269,7 @@ def test_clean_removes_orphan_worktrees(tmp_path):
 def test_cancel_non_terminal_run(tmp_path):
     init_repo(tmp_path)
     pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
-    ready = pipeline.run_issue(42, dry_run=True)
+    ready = create_ready_run(pipeline)
 
     result = pipeline.cancel(ready["run_id"], reason="test cancel")
 
@@ -2207,7 +2365,16 @@ def test_init_params_generation(tmp_path):
     assert config.runtime.agent_backend == "codex"
     assert config.runtime.candidates == 1
     assert config.runtime.max_parallel_runs == 1
+    assert config.runtime.allow_unsafe_direct_exec is False
+    assert config.runtime.require_sandbox_runtime is True
+    assert config.runtime.analysis_timeout_seconds == 900
+    assert config.runtime.evaluation_timeout_seconds == 900
     assert config.runtime.setup_timeout_seconds == 600
+    assert config.runtime.resource.max_disk_mb == 4096
+    assert config.runtime.resource.disk_poll_interval_seconds == 30
+    assert config.runtime.network.default == "deny"
+    assert config.runtime.network.allowed_hosts == ()
+    assert config.runtime.port_range == (41000, 45000)
     assert config.runtime.sandbox_policy.deny_read == ["~/.ssh", ".env"]
     assert config.audit.hash_events is False
     assert config.audit.external_sink == ""
@@ -2220,6 +2387,143 @@ def test_init_params_generation(tmp_path):
     assert config.verify.security == ""
     assert config.verify.custom == ()
     assert config.verify.test_retry_count == 0
+    assert config.log.mask_secrets is True
+    assert config.cost.mode == "duration-only"
+    assert config.evaluation.max_context_tokens == 60000
+    assert config.ci.forbid_interactive_prompts is True
+    assert config.recovery.keep_state_backup is True
+
+
+def test_init_params_merges_missing_defaults_without_overwriting_user_values(tmp_path):
+    init_repo(tmp_path)
+    params_path = tmp_path / ".gg" / "params.yaml"
+    params_path.write_text(
+        """verify:
+  tests: custom-test
+runtime:
+  candidates: 2
+log:
+  max_size_mb: 7
+""",
+        encoding="utf-8",
+    )
+
+    _write_params(tmp_path, console=type("Console", (), {"print": lambda *args, **kwargs: None})())
+
+    merged = yaml.safe_load(params_path.read_text(encoding="utf-8"))
+    assert merged["verify"]["tests"] == "custom-test"
+    assert merged["runtime"]["candidates"] == 2
+    assert merged["log"]["max_size_mb"] == 7
+    assert merged["runtime"]["allow_unsafe_direct_exec"] is False
+    assert merged["runtime"]["resource"]["max_disk_mb"] == 4096
+    assert merged["runtime"]["network"]["default"] == "deny"
+    assert merged["runtime"]["port_range"] == [41000, 45000]
+    assert merged["log"]["mask_secrets"] is True
+    assert merged["cost"]["mode"] == "duration-only"
+    assert merged["evaluation"]["max_context_tokens"] == 60000
+    assert merged["ci"]["forbid_interactive_prompts"] is True
+    assert merged["recovery"]["keep_state_backup"] is True
+
+
+def test_load_config_reads_phase_b_contract(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        """verify:
+  tests: ''
+runtime:
+  require_sandbox_runtime: false
+  allow_unsafe_direct_exec: false
+  analysis_timeout_seconds: 123
+  evaluation_timeout_seconds: 456
+  resource:
+    max_disk_mb: 2048
+    disk_poll_interval_seconds: 12
+    allow_candidate_downscale: true
+    allow_network_fs: true
+    allow_unsafe_fs: true
+  network:
+    default: allow
+    allowed_hosts:
+      - example.com
+  port_range:
+    - 42000
+    - 42010
+log:
+  max_size_mb: 12
+  max_command_log_chars: 3456
+  mask_secrets: false
+cost:
+  enabled: true
+  mode: token-estimate
+  max_usd_per_run: 3.5
+  max_tokens_per_run: 10000
+evaluation:
+  max_context_tokens: 111
+  max_diff_lines_per_candidate: 222
+  max_log_chars_per_check: 333
+  max_total_log_chars: 444
+  prefer_deterministic_when_truncated: false
+ci:
+  mode: true
+  default_dry_run: true
+  forbid_interactive_prompts: false
+  clock_skew_tolerance_seconds: 8
+  clock_drift_warn_seconds: 90
+recovery:
+  keep_state_backup: false
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(tmp_path)
+
+    assert config.runtime.allow_unsafe_direct_exec is False
+    assert config.runtime.require_sandbox_runtime is True
+    assert config.runtime.analysis_timeout_seconds == 123
+    assert config.runtime.evaluation_timeout_seconds == 456
+    assert config.runtime.resource.max_disk_mb == 2048
+    assert config.runtime.resource.disk_poll_interval_seconds == 12
+    assert config.runtime.resource.allow_candidate_downscale is True
+    assert config.runtime.resource.allow_network_fs is True
+    assert config.runtime.resource.allow_unsafe_fs is True
+    assert config.runtime.network.default == "allow"
+    assert config.runtime.network.allowed_hosts == ("example.com",)
+    assert config.runtime.port_range == (42000, 42010)
+    assert config.log.max_size_mb == 12
+    assert config.log.max_command_log_chars == 3456
+    assert config.log.mask_secrets is False
+    assert config.cost.enabled is True
+    assert config.cost.mode == "token-estimate"
+    assert config.cost.max_usd_per_run == 3.5
+    assert config.cost.max_tokens_per_run == 10000
+    assert config.evaluation.max_context_tokens == 111
+    assert config.evaluation.max_diff_lines_per_candidate == 222
+    assert config.evaluation.max_log_chars_per_check == 333
+    assert config.evaluation.max_total_log_chars == 444
+    assert config.evaluation.prefer_deterministic_when_truncated is False
+    assert config.ci.mode is True
+    assert config.ci.default_dry_run is True
+    assert config.ci.forbid_interactive_prompts is False
+    assert config.ci.clock_skew_tolerance_seconds == 8
+    assert config.ci.clock_drift_warn_seconds == 90
+    assert config.recovery.keep_state_backup is False
+
+
+def test_load_config_allows_unsafe_direct_exec_only_when_explicit(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        """verify:
+  tests: ''
+runtime:
+  allow_unsafe_direct_exec: true
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(tmp_path)
+
+    assert config.runtime.allow_unsafe_direct_exec is True
+    assert config.runtime.require_sandbox_runtime is False
 
 
 def test_load_config_reads_sandbox_policy(tmp_path):
@@ -2531,7 +2835,7 @@ def test_candidate_setup_uses_isolated_package_cache_env(tmp_path):
 def test_context_snapshot_uses_content_addressed_objects(tmp_path):
     init_repo(tmp_path)
     pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
-    ready = pipeline.run_issue(42, dry_run=True)
+    ready = create_ready_run(pipeline)
     state = pipeline.store.load(ready["run_id"])
     snapshot = tmp_path / state.artifacts["context_snapshot"]
     data = json.loads(snapshot.read_text(encoding="utf-8"))
@@ -2545,7 +2849,7 @@ def test_context_snapshot_uses_content_addressed_objects(tmp_path):
 def test_error_logs_mask_secrets(tmp_path):
     init_repo(tmp_path)
     pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
-    ready = pipeline.run_issue(42, dry_run=True)
+    ready = create_ready_run(pipeline)
 
     pipeline.cancel(ready["run_id"], reason="revoke ghp_abcdefghijklmnopqrstuvwxyz12345")
 
@@ -2594,7 +2898,7 @@ audit:
     )
     pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
 
-    ready = pipeline.run_issue(42, dry_run=True)
+    ready = create_ready_run(pipeline)
 
     run_dir = tmp_path / ".gg" / "runs" / ready["run_id"]
     events = read_jsonl(run_dir / "pipeline.jsonl")
@@ -2673,6 +2977,72 @@ def test_file_lock_times_out_for_second_holder(tmp_path):
                 raise AssertionError("second lock should not be acquired")
         except TimeoutError:
             pass
+
+
+def test_file_lock_writes_heartbeat_metadata_and_clears_on_release(tmp_path):
+    path = tmp_path / ".gg" / "locks" / "test.lock"
+
+    with FileLock(path) as lock:
+        metadata = lock.metadata()
+        assert metadata is not None
+        assert metadata["owner_pid"] > 0
+        assert metadata["hostname"]
+        assert metadata["cwd"]
+        assert metadata["command"]
+        assert metadata["acquired_at"]
+        assert metadata["heartbeat_at"]
+        heartbeat = lock.heartbeat()
+        assert heartbeat["owner_pid"] == metadata["owner_pid"]
+
+    assert FileLock.read_metadata(path) is None
+
+
+def test_lock_manager_scans_dead_and_stale_owners_without_sleeping(tmp_path):
+    manager = LockManager(tmp_path)
+    manager.root.mkdir(parents=True, exist_ok=True)
+    dead_path = manager.root / "run-dead.lock"
+    stale_path = manager.root / "run-stale.lock"
+    dead_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "owner_pid": 999999999,
+                "hostname": "host",
+                "cwd": str(tmp_path),
+                "command": "gg issue 1",
+                "acquired_at": "2026-04-25T12:00:00Z",
+                "heartbeat_at": "2026-04-25T12:00:00Z",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    stale_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "owner_pid": os.getpid(),
+                "hostname": "host",
+                "cwd": str(tmp_path),
+                "command": "gg issue 2",
+                "acquired_at": "2026-04-25T12:00:00Z",
+                "heartbeat_at": "2026-04-25T12:00:00Z",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    stale = manager.scan_stale(
+        max_heartbeat_age_seconds=1,
+        now=datetime(2026, 4, 25, 12, 0, 2, tzinfo=timezone.utc),
+    )
+
+    reasons = {Path(item["path"]).name: item["reason"] for item in stale}
+    assert reasons == {
+        "run-dead.lock": "owner_not_running",
+        "run-stale.lock": "heartbeat_stale",
+    }
 
 
 def test_gitlab_find_pr_does_not_use_unsupported_state_flag(monkeypatch, tmp_path):

@@ -15,6 +15,7 @@ from gg.analyzers.structure import StructureMap, analyze_structure
 from gg.generators.agent_files import generate_agent_files
 from gg.generators.specs import UserContext, generate_specs
 from gg.knowledge.engine import KnowledgeEngine
+from gg.orchestrator.config import default_params
 from gg.platforms.base import detect_platform
 from gg.utils.git_ops import find_repo_root, get_main_branch, get_remote_url, parse_remote_url
 from gg.utils.system import run_all_checks
@@ -400,73 +401,22 @@ def _write_config(project_path: Path, platform: str, console: Console) -> None:
 
 def _write_params(project_path: Path, console: Console) -> None:
     params_path = project_path / ".gg" / "params.yaml"
+    params = default_params(project_path)
     if params_path.exists():
-        console.print("  [dim].gg/params.yaml already exists[/dim]")
+        existing = yaml.safe_load(params_path.read_text(encoding="utf-8")) or {}
+        if not isinstance(existing, dict):
+            raise ValueError(f"{params_path}: expected YAML mapping")
+        changed = _merge_missing_params(existing, params)
+        if changed:
+            params_path.write_text(
+                yaml.dump(existing, default_flow_style=False, sort_keys=False, allow_unicode=True),
+                encoding="utf-8",
+            )
+            console.print("  [green]  -> .gg/params.yaml merged missing defaults[/green]")
+        else:
+            console.print("  [dim].gg/params.yaml already up to date[/dim]")
         return
 
-    main_branch = get_main_branch(project_path)
-    params = {
-        "schema_version": 1,
-        "project": {
-            "default_branch": main_branch,
-        },
-        "task_system": {
-            "platform": "auto",
-            "work_label": "gg:in-progress",
-            "done_label": "gg:done",
-            "blocked_label": "gg:blocked",
-        },
-        "selection": {
-            "include_labels": ["ai-ready"],
-            "exclude_labels": ["gg:in-progress", "gg:blocked", "gg:done"],
-        },
-        "verify": {
-            "setup": "",
-            "tests": _default_verify_command(project_path),
-            "lint": "",
-            "typecheck": "",
-            "security": "",
-            "custom": [],
-            "test_retry_count": 0,
-            "allow_known_baseline_failures": False,
-        },
-        "runtime": {
-            "agent_backend": "codex",
-            "candidates": 1,
-            "max_parallel_candidates": 1,
-            "max_parallel_runs": 1,
-            "max_attempts": 1,
-            "repair_candidates": 1,
-            "use_sandbox_runtime": True,
-            "require_sandbox_runtime": False,
-            "candidate_timeout_seconds": 1800,
-            "command_timeout_seconds": 600,
-            "setup_timeout_seconds": 600,
-            "sandbox_policy": {
-                "allowed_domains": [],
-                "denied_domains": [],
-                "deny_read": ["~/.ssh", ".env"],
-                "allow_write": ["."],
-                "deny_write": [".env"],
-            },
-        },
-        "audit": {
-            "hash_events": False,
-            "external_sink": "",
-        },
-        "security": {
-            "allow_lfs_changes": False,
-            "allow_binary_changes": True,
-            "allow_dependency_changes": True,
-        },
-        "cleanup": {
-            "blocked_timeout_days": 14,
-        },
-        "git": {
-            "author_name": "gg-orchestrator",
-            "author_email": "gg-orchestrator@users.noreply.local",
-        },
-    }
     params_path.write_text(
         yaml.dump(params, default_flow_style=False, sort_keys=False, allow_unicode=True),
         encoding="utf-8",
@@ -474,12 +424,16 @@ def _write_params(project_path: Path, console: Console) -> None:
     console.print("  [green]  -> .gg/params.yaml[/green]")
 
 
-def _default_verify_command(project_path: Path) -> str:
-    if (project_path / "pyproject.toml").exists():
-        return "pytest"
-    if (project_path / "package.json").exists():
-        return "npm test"
-    return ""
+def _merge_missing_params(target: dict, defaults: dict) -> bool:
+    changed = False
+    for key, value in defaults.items():
+        if key not in target:
+            target[key] = value
+            changed = True
+            continue
+        if isinstance(target[key], dict) and isinstance(value, dict):
+            changed = _merge_missing_params(target[key], value) or changed
+    return changed
 
 
 def _print_final(project_path: Path, console: Console) -> None:

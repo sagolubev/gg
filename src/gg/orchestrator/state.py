@@ -109,7 +109,12 @@ class RunState:
     max_attempts: int = 1
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
+    baseline: dict[str, Any] = field(default_factory=dict)
     candidate_states: dict[str, CandidateState] = field(default_factory=dict)
+    stage_attempts: dict[str, int] = field(default_factory=dict)
+    locks: dict[str, Any] = field(default_factory=dict)
+    operator: dict[str, Any] = field(default_factory=dict)
+    cost: dict[str, Any] | None = None
     artifacts: dict[str, str] = field(default_factory=dict)
     transitions: list[dict[str, Any]] = field(default_factory=list)
     last_error: dict[str, Any] | None = None
@@ -165,6 +170,16 @@ class RunState:
             transition.model_dump(by_alias=True)
             for transition in validated.transitions
         ]
+        baseline = (
+            validated.baseline.model_dump()
+            if hasattr(validated.baseline, "model_dump")
+            else validated.baseline
+        )
+        cost = (
+            validated.cost.model_dump()
+            if hasattr(validated.cost, "model_dump")
+            else validated.cost
+        )
         return cls(
             run_id=validated.run_id,
             issue=validated.issue,
@@ -174,7 +189,12 @@ class RunState:
             max_attempts=validated.max_attempts,
             created_at=validated.created_at,
             updated_at=validated.updated_at,
+            baseline=baseline,
             candidate_states=candidate_states,
+            stage_attempts=validated.stage_attempts,
+            locks=validated.locks,
+            operator=validated.operator,
+            cost=cost,
             artifacts=validated.artifacts,
             transitions=transitions,
             last_error=validated.last_error,

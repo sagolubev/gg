@@ -81,6 +81,19 @@ class SelectionConfigModel(StrictArtifactModel):
     exclude_labels: tuple[str, ...] = ("gg:in-progress", "gg:blocked", "gg:done")
 
 
+class RuntimeResourceConfigModel(StrictArtifactModel):
+    max_disk_mb: int = Field(default=4096, ge=1)
+    disk_poll_interval_seconds: int = Field(default=30, ge=1)
+    allow_candidate_downscale: bool = False
+    allow_network_fs: bool = False
+    allow_unsafe_fs: bool = False
+
+
+class RuntimeNetworkConfigModel(StrictArtifactModel):
+    default: Literal["deny", "allow"] = "deny"
+    allowed_hosts: tuple[str, ...] = ()
+
+
 class RuntimeConfigModel(StrictArtifactModel):
     agent_backend: str = "codex"
     candidates: int = Field(default=1, ge=1)
@@ -90,10 +103,29 @@ class RuntimeConfigModel(StrictArtifactModel):
     repair_candidates: int = Field(default=1, ge=1)
     use_sandbox_runtime: bool = True
     require_sandbox_runtime: bool = False
+    allow_unsafe_direct_exec: bool = False
+    analysis_timeout_seconds: int = Field(default=900, ge=1)
+    evaluation_timeout_seconds: int = Field(default=900, ge=1)
     candidate_timeout_seconds: int = Field(default=1800, ge=1)
     command_timeout_seconds: int = Field(default=600, ge=1)
     setup_timeout_seconds: int = Field(default=600, ge=1)
+    resource: RuntimeResourceConfigModel = Field(default_factory=RuntimeResourceConfigModel)
+    network: RuntimeNetworkConfigModel = Field(default_factory=RuntimeNetworkConfigModel)
+    port_range: tuple[int, int] = (41000, 45000)
     sandbox_policy: SandboxPolicyModel = Field(default_factory=SandboxPolicyModel)
+
+    @field_validator("port_range")
+    @classmethod
+    def _port_range(cls, value: tuple[int, int]) -> tuple[int, int]:
+        start, end = value
+        if start < 1 or end > 65535 or start >= end:
+            raise ValueError("port_range must be two increasing TCP ports between 1 and 65535")
+        return value
+
+    @model_validator(mode="after")
+    def _derive_sandbox_requirement(self) -> "RuntimeConfigModel":
+        self.require_sandbox_runtime = not self.allow_unsafe_direct_exec
+        return self
 
 
 class VerifyConfigModel(StrictArtifactModel):
@@ -122,6 +154,39 @@ class CleanupConfigModel(StrictArtifactModel):
     blocked_timeout_days: int | None = Field(default=14, ge=0)
 
 
+class LogConfigModel(StrictArtifactModel):
+    max_size_mb: int = Field(default=50, ge=1)
+    max_command_log_chars: int = Field(default=200000, ge=1)
+    mask_secrets: bool = True
+
+
+class CostConfigModel(StrictArtifactModel):
+    enabled: bool = False
+    mode: str = "duration-only"
+    max_usd_per_run: float | None = Field(default=None, ge=0)
+    max_tokens_per_run: int | None = Field(default=None, ge=0)
+
+
+class EvaluationConfigModel(StrictArtifactModel):
+    max_context_tokens: int = Field(default=60000, ge=1)
+    max_diff_lines_per_candidate: int = Field(default=2000, ge=1)
+    max_log_chars_per_check: int = Field(default=12000, ge=1)
+    max_total_log_chars: int = Field(default=50000, ge=1)
+    prefer_deterministic_when_truncated: bool = True
+
+
+class CIConfigModel(StrictArtifactModel):
+    mode: bool = False
+    default_dry_run: bool = False
+    forbid_interactive_prompts: bool = True
+    clock_skew_tolerance_seconds: int = Field(default=5, ge=0)
+    clock_drift_warn_seconds: int = Field(default=60, ge=0)
+
+
+class RecoveryConfigModel(StrictArtifactModel):
+    keep_state_backup: bool = True
+
+
 class GGConfigModel(StrictArtifactModel):
     git: GitConfigModel
     task_system: TaskSystemConfigModel = Field(default_factory=TaskSystemConfigModel)
@@ -131,6 +196,11 @@ class GGConfigModel(StrictArtifactModel):
     audit: AuditConfigModel = Field(default_factory=AuditConfigModel)
     security: SecurityConfigModel = Field(default_factory=SecurityConfigModel)
     cleanup: CleanupConfigModel = Field(default_factory=CleanupConfigModel)
+    log: LogConfigModel = Field(default_factory=LogConfigModel)
+    cost: CostConfigModel = Field(default_factory=CostConfigModel)
+    evaluation: EvaluationConfigModel = Field(default_factory=EvaluationConfigModel)
+    ci: CIConfigModel = Field(default_factory=CIConfigModel)
+    recovery: RecoveryConfigModel = Field(default_factory=RecoveryConfigModel)
 
 
 class RunTransitionModel(CompatibleArtifactModel):
@@ -181,6 +251,29 @@ class CandidateStateModel(CompatibleArtifactModel):
         return _validate_optional_timestamp(value)
 
 
+class BaselineStateModel(CompatibleArtifactModel):
+    status: str = ""
+    commit: str = ""
+    worktree_path: str = ""
+    verification_path: str = ""
+    failed_commands: list[str] = Field(default_factory=list)
+    checked_at: str = ""
+
+    @field_validator("checked_at")
+    @classmethod
+    def _checked_timestamp(cls, value: str) -> str:
+        return _validate_optional_timestamp(value)
+
+
+class CostAggregateModel(CompatibleArtifactModel):
+    total_usd: float | None = Field(default=None, ge=0)
+    total_tokens: int | None = Field(default=None, ge=0)
+    input_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
+    duration_seconds: float | None = Field(default=None, ge=0)
+    events: int | None = Field(default=None, ge=0)
+
+
 class RunStateModel(CompatibleArtifactModel):
     schema_version: Literal[1] = 1
     run_id: str
@@ -190,7 +283,12 @@ class RunStateModel(CompatibleArtifactModel):
     max_attempts: int = Field(default=1, ge=1)
     created_at: str
     updated_at: str
+    baseline: BaselineStateModel | dict[str, Any] = Field(default_factory=dict)
     candidate_states: dict[str, CandidateStateModel] = Field(default_factory=dict)
+    stage_attempts: dict[str, int] = Field(default_factory=dict)
+    locks: dict[str, Any] = Field(default_factory=dict)
+    operator: dict[str, Any] = Field(default_factory=dict)
+    cost: CostAggregateModel | dict[str, Any] | None = None
     artifacts: dict[str, str] = Field(default_factory=dict)
     transitions: list[RunTransitionModel] = Field(default_factory=list)
     last_error: dict[str, Any] | None = None
@@ -210,6 +308,14 @@ class RunStateModel(CompatibleArtifactModel):
     @classmethod
     def _timestamp(cls, value: str) -> str:
         return _validate_required_timestamp(value)
+
+    @field_validator("stage_attempts")
+    @classmethod
+    def _stage_attempts(cls, value: dict[str, int]) -> dict[str, int]:
+        invalid = [stage for stage, attempts in value.items() if attempts < 0]
+        if invalid:
+            raise ValueError(f"stage attempts must be non-negative: {', '.join(sorted(invalid))}")
+        return value
 
 
 class IssueCommentModel(CompatibleArtifactModel):
@@ -271,8 +377,16 @@ class CheckResultModel(CompatibleArtifactModel):
     command: str
     status: str
     exit_code: int | None
+    category: str = "custom"
+    required: bool = True
     stdout: str = ""
     stderr: str = ""
+    stdout_path: str = ""
+    stderr_path: str = ""
+    duration_ms: int | None = Field(default=None, ge=0)
+    truncated: bool = False
+    baseline_status: str | None = None
+    findings: list[dict[str, Any]] = Field(default_factory=list)
     attempts: int = Field(default=1, ge=0)
     flaky: bool = False
 
@@ -288,6 +402,123 @@ class VerificationArtifactModel(CompatibleArtifactModel):
     schema_version: Literal[1] = 1
     checks: list[CheckResultModel] = Field(default_factory=list)
     failed_commands: list[str] = Field(default_factory=list)
+    baseline_status: str | None = None
+    required_passed: bool | None = None
+    advisory_failed_commands: list[str] = Field(default_factory=list)
+    findings: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class AgentHandoffModel(CompatibleArtifactModel):
+    schema_version: Literal[1] = 1
+    run_id: str = ""
+    candidate_id: str = ""
+    issue: dict[str, Any] = Field(default_factory=dict)
+    attempt: int = Field(default=1, ge=1)
+    created_at: str = ""
+    worktree_path: str = ""
+    base_commit: str = ""
+    task_brief_path: str = ""
+    context_snapshot_path: str = ""
+    instructions: str = ""
+    artifacts: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("created_at")
+    @classmethod
+    def _created_timestamp(cls, value: str) -> str:
+        return _validate_optional_timestamp(value)
+
+
+class AgentResultModel(CompatibleArtifactModel):
+    schema_version: Literal[1] = 1
+    run_id: str = ""
+    candidate_id: str = ""
+    status: str
+    started_at: str = ""
+    finished_at: str = ""
+    duration_seconds: float | None = Field(default=None, ge=0)
+    exit_code: int | None = None
+    summary: str = ""
+    error: str | None = None
+    changed_files: list[str] = Field(default_factory=list)
+    artifacts: dict[str, str] = Field(default_factory=dict)
+    metrics: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("status")
+    @classmethod
+    def _status(cls, value: str) -> str:
+        allowed = CANDIDATE_STATUSES | {"cancelled", "interrupted"}
+        if value not in allowed:
+            raise ValueError(f"unknown agent result status: {value}")
+        return value
+
+    @field_validator("started_at", "finished_at")
+    @classmethod
+    def _timestamp(cls, value: str) -> str:
+        return _validate_optional_timestamp(value)
+
+
+class ExecutionEvaluationModel(CompatibleArtifactModel):
+    schema_version: Literal[1] = 1
+    run_id: str = ""
+    attempt: int = Field(default=1, ge=1)
+    evaluated_at: str = ""
+    selected_candidate_id: str | None = None
+    verdict: str = ""
+    traffic_light: str = ""
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
+    required_gates_passed: bool | None = None
+    repair_recommended: bool = False
+    reasons: list[str] = Field(default_factory=list)
+    deterministic_gates: dict[str, Any] = Field(default_factory=dict)
+    llm_evaluation: dict[str, Any] | None = None
+
+    @field_validator("evaluated_at")
+    @classmethod
+    def _evaluated_timestamp(cls, value: str) -> str:
+        return _validate_optional_timestamp(value)
+
+
+class RunOutcomeModel(CompatibleArtifactModel):
+    schema_version: Literal[1] = 1
+    run_id: str = ""
+    issue: dict[str, Any] = Field(default_factory=dict)
+    state: str = ""
+    status: str = ""
+    completed_at: str = ""
+    selected_candidate_id: str | None = None
+    pr_url: str | None = None
+    summary: str = ""
+    artifacts: dict[str, str] = Field(default_factory=dict)
+    error: dict[str, Any] | None = None
+
+    @field_validator("state")
+    @classmethod
+    def _state_value(cls, value: str) -> str:
+        if value and value not in TASK_STATES:
+            raise ValueError(f"unknown state: {value}")
+        return value
+
+    @field_validator("completed_at")
+    @classmethod
+    def _completed_timestamp(cls, value: str) -> str:
+        return _validate_optional_timestamp(value)
+
+
+class ArchiveSummaryModel(CompatibleArtifactModel):
+    schema_version: Literal[1] = 1
+    run_id: str = ""
+    issue: dict[str, Any] = Field(default_factory=dict)
+    archived_at: str = ""
+    source_path: str = ""
+    archive_path: str = ""
+    removed_worktrees: list[str] = Field(default_factory=list)
+    retained_artifacts: dict[str, str] = Field(default_factory=dict)
+    outcome: RunOutcomeModel | None = None
+
+    @field_validator("archived_at")
+    @classmethod
+    def _archived_timestamp(cls, value: str) -> str:
+        return _validate_optional_timestamp(value)
 
 
 class PolicyViolationModel(CompatibleArtifactModel):
@@ -481,6 +712,11 @@ class RunSummaryModel(CompatibleArtifactModel):
     created_at: str
     updated_at: str
     dry_run: bool = False
+    baseline: dict[str, Any] = Field(default_factory=dict)
+    stage_attempts: dict[str, int] = Field(default_factory=dict)
+    locks: dict[str, Any] = Field(default_factory=dict)
+    operator: dict[str, Any] = Field(default_factory=dict)
+    cost: dict[str, Any] | None = None
     publishing_step: str | None = None
     cancel_requested: bool = False
     pr_url: str | None = None

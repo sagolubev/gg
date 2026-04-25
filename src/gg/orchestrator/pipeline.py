@@ -1032,7 +1032,7 @@ class OrchestratorPipeline:
             return {"error": str(exc)}
         if (
             integration
-            and state.publishing_step in {"integration_created", "patch_applied"}
+            and state.publishing_step in {"integration_created", "patch_applied", "verified"}
             and Path(integration.get("worktree_path", "")).exists()
         ):
             integration_branch = integration["integration_branch"]
@@ -1113,7 +1113,7 @@ class OrchestratorPipeline:
         }
 
     def _publishing_target(self, state, winner: dict[str, Any]) -> dict[str, Any]:
-        if state.publishing_step not in {"verified", "committed", "branch_pushed", "pr_created", "result_commented"}:
+        if state.publishing_step not in {"committed", "branch_pushed", "pr_created", "result_commented"}:
             return winner
         data = self._integration_artifact(state, required=True)
         verification_path = state.artifacts.get("integration_verification", winner.get("verification_path", ""))

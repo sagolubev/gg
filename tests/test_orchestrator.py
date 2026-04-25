@@ -1543,6 +1543,87 @@ index 0000000..186cf24
     ).returncode != 0
 
 
+def test_resume_publish_reverifies_dirty_verified_integration_worktree(monkeypatch, tmp_path):
+    init_repo(tmp_path)
+    monkeypatch.setattr("gg.orchestrator.pipeline.push_branch", lambda *_args, **_kwargs: None)
+    platform = FakePlatform()
+    pipeline = OrchestratorPipeline(tmp_path, platform=platform, agent=FakeAgent())
+    ready = pipeline.run_issue(42, dry_run=True)
+    state = pipeline.store.load(ready["run_id"])
+    base_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True).strip()
+    patch_path = pipeline.store.write_text(
+        state.run_id,
+        "candidates/candidate-1/patch.diff",
+        """diff --git a/resumed.txt b/resumed.txt
+new file mode 100644
+index 0000000..186cf24
+--- /dev/null
++++ b/resumed.txt
+@@ -0,0 +1 @@
++resumed
+""",
+    )
+    worktree = tmp_path.parent / ".gg-worktrees" / tmp_path.name / state.run_id / "integration-verified"
+    subprocess.run(
+        ["git", "worktree", "add", "-b", "gg/verified-integration", str(worktree), base_commit],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(["git", "apply", str(tmp_path / patch_path)], cwd=worktree, check=True, capture_output=True)
+    (worktree / "evil.txt").write_text("unverified dirty state\n", encoding="utf-8")
+    state.recover_to(TaskState.OUTCOME_PUBLISHING, reason="test dirty verified integration")
+    state.publishing_step = "verified"
+    state.artifacts["publishing_integration"] = pipeline.store.write_json(
+        state.run_id,
+        "artifacts/publishing-integration.json",
+        {
+            "schema_version": 1,
+            "candidate_id": "candidate-1",
+            "source_branch": "gg/source",
+            "integration_branch": "gg/verified-integration",
+            "worktree_path": str(worktree),
+            "base_ref": base_commit,
+            "patch_path": patch_path,
+            "created_at": state.updated_at,
+        },
+    )
+    state.artifacts["integration_verification"] = pipeline.store.write_json(
+        state.run_id,
+        "artifacts/integration-verification.json",
+        {"schema_version": 1, "checks": []},
+    )
+    pipeline.store.write(state)
+
+    result = pipeline._publish_winner(
+        state,
+        platform.issue,
+        {
+            "candidate_id": "candidate-1",
+            "worktree_path": str(tmp_path),
+            "branch": "gg/source",
+            "base_commit": base_commit,
+            "patch_path": patch_path,
+            "summary": "done",
+            "verification_path": "verify.json",
+        },
+        no_pr=False,
+    )
+
+    assert result["state"] == "Completed"
+    assert "resumed" in subprocess.check_output(
+        ["git", "show", "gg/verified-integration:resumed.txt"],
+        cwd=tmp_path,
+        text=True,
+    )
+    assert subprocess.run(
+        ["git", "cat-file", "-e", "gg/verified-integration:evil.txt"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    ).returncode != 0
+
+
 def test_publish_fails_when_default_branch_sync_fails(monkeypatch, tmp_path):
     init_repo(tmp_path)
     monkeypatch.setattr(

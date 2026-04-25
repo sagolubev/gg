@@ -775,11 +775,13 @@ class OrchestratorPipeline:
                 pr_url=pr_url,
                 pr_number=_parse_pr_number(pr_url),
             )
-            self.platform.add_comment(
-                issue.number,
-                f"<!-- gg-run-id={state.run_id} stage=result -->\n"
-                f"gg completed this run.\n\nPR: {pr_url}",
-            )
+            result_marker = f"<!-- gg-run-id={state.run_id} stage=result -->"
+            if not _issue_has_comment_marker(issue, result_marker):
+                self.platform.add_comment(
+                    issue.number,
+                    f"{result_marker}\n"
+                    f"gg completed this run.\n\nPR: {pr_url}",
+                )
             state.publishing_step = "result_commented"
             self.store.write(state)
             cancelled = self._cancelled_response(state)
@@ -1045,6 +1047,10 @@ def _parse_pr_number(pr_url: str) -> int:
     if not match:
         return 0
     return int(next(group for group in match.groups() if group))
+
+
+def _issue_has_comment_marker(issue: Issue, marker: str) -> bool:
+    return any(marker in comment.body for comment in issue.comments)
 
 
 def _candidate_strategies(count: int) -> list[str]:

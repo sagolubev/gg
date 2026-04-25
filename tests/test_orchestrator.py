@@ -1171,6 +1171,41 @@ def test_publish_honors_cancel_request_after_branch_push(tmp_path):
     assert cancelled.state is TaskState.CANCELLED
 
 
+def test_publish_skips_duplicate_result_comment_when_marker_exists(tmp_path):
+    init_repo(tmp_path)
+    platform = FakePlatform()
+    pipeline = OrchestratorPipeline(tmp_path, platform=platform, agent=FakeAgent())
+    ready = pipeline.run_issue(42, dry_run=True)
+    state = pipeline.store.load(ready["run_id"])
+    state.recover_to(TaskState.OUTCOME_PUBLISHING, reason="test idempotent publish")
+    state.publishing_step = "pr_created"
+    state.pr_url = "https://github.com/example/repo/pull/5"
+    pipeline.store.write(state)
+    platform.issue.comments.append(
+        IssueComment(
+            body=f"<!-- gg-run-id={state.run_id} stage=result -->\nold result",
+            author="gg",
+            created_at="2026-04-25T12:00:00Z",
+        )
+    )
+
+    result = pipeline._publish_winner(
+        state,
+        platform.issue,
+        {
+            "candidate_id": "candidate-1",
+            "worktree_path": str(tmp_path),
+            "branch": "gg/test",
+            "summary": "done",
+            "verification_path": "verify.json",
+        },
+        no_pr=False,
+    )
+
+    assert result["state"] == "Completed"
+    assert platform.comments == []
+
+
 def test_interrupt_during_publishing_preserves_publish_resume_state(tmp_path):
     init_repo(tmp_path)
     pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())

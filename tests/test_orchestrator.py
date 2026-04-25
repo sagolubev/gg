@@ -179,6 +179,62 @@ class ParallelAgent(AgentBackend):
         return True
 
 
+class SlowSerialAgent(AgentBackend):
+    def __init__(self):
+        self.active = 0
+        self.max_active = 0
+        self._lock = threading.Lock()
+
+    def generate(
+        self,
+        prompt: str,
+        *,
+        cwd: str | None = None,
+        timeout: int | None = None,
+        context: str | None = None,
+    ) -> str:
+        assert cwd is not None
+        with self._lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        time.sleep(0.2)
+        Path(cwd, "serial.txt").write_text("serial\n", encoding="utf-8")
+        with self._lock:
+            self.active -= 1
+        return "serial"
+
+    def is_available(self) -> bool:
+        return True
+
+
+class CancellingParallelAgent(AgentBackend):
+    def __init__(self, *, cancel_after_started):
+        self._cancel_after_started = cancel_after_started
+        self._started = 0
+        self._lock = threading.Lock()
+
+    def generate(
+        self,
+        prompt: str,
+        *,
+        cwd: str | None = None,
+        timeout: int | None = None,
+        context: str | None = None,
+    ) -> str:
+        assert cwd is not None
+        with self._lock:
+            self._started += 1
+            started = self._started
+        if started == 2:
+            self._cancel_after_started()
+        time.sleep(0.1)
+        Path(cwd, f"candidate-{started}.txt").write_text("done\n", encoding="utf-8")
+        return f"candidate {started}"
+
+    def is_available(self) -> bool:
+        return True
+
+
 class FakeSandbox:
     def __init__(self):
         self.commands: list[list[str]] = []
@@ -317,6 +373,60 @@ def test_pipeline_uses_parallel_fanout_when_enabled(tmp_path):
 
     assert result["state"] == "Completed"
     assert agent.max_active >= 2
+
+
+def test_issue_lock_serializes_same_issue_execution(tmp_path):
+    init_repo(tmp_path)
+    agent = SlowSerialAgent()
+    platform = FakePlatform()
+    results: list[dict[str, str]] = []
+
+    def run_pipeline() -> None:
+        pipeline = OrchestratorPipeline(tmp_path, platform=platform, agent=agent)
+        results.append(pipeline.run_issue(42, no_pr=True))
+
+    first = threading.Thread(target=run_pipeline)
+    second = threading.Thread(target=run_pipeline)
+
+    first.start()
+    time.sleep(0.05)
+    second.start()
+    first.join()
+    second.join()
+
+    assert [result["state"] for result in results] == ["Completed", "Completed"]
+    assert agent.max_active == 1
+
+
+def test_cancel_waits_for_candidate_batch_to_quiesce(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        "verify:\n  tests: ''\nruntime:\n  candidates: 2\n  max_parallel_candidates: 2\n",
+        encoding="utf-8",
+    )
+    pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
+    run_ref: dict[str, str] = {}
+    cancel_event = threading.Event()
+
+    agent = CancellingParallelAgent(
+        cancel_after_started=lambda: (
+            pipeline.cancel(run_ref["run_id"], reason="cancel while candidates running"),
+            cancel_event.set(),
+        ),
+    )
+    pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=agent)
+    ready = pipeline.run_issue(42, dry_run=True)
+    run_ref["run_id"] = ready["run_id"]
+
+    result = pipeline.resume(ready["run_id"], no_pr=True)
+
+    assert cancel_event.is_set()
+    assert result["cancelled"] is True
+    assert result["state"] == "Cancelled"
+    state = pipeline.store.load(ready["run_id"])
+    assert state.cancel_requested is True
+    assert state.candidates_quiescent() is True
+    assert all(candidate.status != "running" for candidate in state.candidate_states.values())
 
 
 def test_pipeline_repairs_after_failed_candidate(tmp_path):

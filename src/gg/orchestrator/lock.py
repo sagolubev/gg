@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fcntl
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,3 +47,7 @@ class LockManager:
 
     def issue(self, issue_number: int) -> FileLock:
         return FileLock(self.root / f"issue-{issue_number}.lock")
+
+    def run(self, run_id: str) -> FileLock:
+        safe_run_id = re.sub(r"[^A-Za-z0-9._-]+", "-", run_id).strip("-") or "run"
+        return FileLock(self.root / f"run-{safe_run_id}.lock")

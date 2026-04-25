@@ -76,10 +76,10 @@ class OrchestratorPipeline:
                 state.transition(TaskState.READY_FOR_EXECUTION, reason="task brief ready")
                 self.store.write(state)
 
-            if dry_run:
-                return {"run_id": state.run_id, "state": state.state.value, "dry_run": True}
+                if dry_run:
+                    return {"run_id": state.run_id, "state": state.state.value, "dry_run": True}
 
-            return self._execute_ready_state(state, issue, brief, no_pr=no_pr)
+                return self._execute_ready_state(state, issue, brief, no_pr=no_pr)
         except KeyboardInterrupt:
             self._mark_interrupted(state)
             raise
@@ -112,34 +112,36 @@ class OrchestratorPipeline:
     def resume(self, run_id: str, *, no_pr: bool = False) -> dict[str, Any]:
         state = self.store.load(run_id)
         issue_number = int(state.issue["number"])
-        if state.state in TERMINAL_STATES:
-            return {
-                "run_id": run_id,
-                "state": state.state.value,
-                "resumed": False,
-                "message": "Terminal runs are immutable; start a new run for a fresh attempt.",
-            }
-        brief_path = state.artifacts.get("task_brief")
-        if not brief_path:
-            state.fail(code="missing_task_brief", message="cannot resume without task brief artifact")
-            self.store.write(state)
-            return {"run_id": run_id, "state": state.state.value, "error": state.last_error}
-        brief_data = json.loads((self.project_path / brief_path).read_text(encoding="utf-8"))
-        brief = TaskBrief.from_dict(brief_data)
-        issue = self.platform.get_issue(issue_number)
-        if state.state is TaskState.OUTCOME_PUBLISHING:
-            return self._resume_publishing(state, issue, no_pr=no_pr)
-        for candidate in state.candidate_states.values():
-            if candidate.status == "running":
-                candidate.status = "failed"
-                candidate.finished_at = _now_placeholder()
-                candidate.error = "interrupted before completion"
-        if state.state is not TaskState.READY_FOR_EXECUTION:
-            state.recover_to(TaskState.READY_FOR_EXECUTION, reason=f"resume from {state.state.value}")
-            self.store.write(state)
-        state.dry_run = False
         try:
-            return self._execute_ready_state(state, issue, brief, no_pr=no_pr)
+            with self.locks.issue(issue_number):
+                state = self.store.load(run_id)
+                if state.state in TERMINAL_STATES:
+                    return {
+                        "run_id": run_id,
+                        "state": state.state.value,
+                        "resumed": False,
+                        "message": "Terminal runs are immutable; start a new run for a fresh attempt.",
+                    }
+                brief_path = state.artifacts.get("task_brief")
+                if not brief_path:
+                    state.fail(code="missing_task_brief", message="cannot resume without task brief artifact")
+                    self.store.write(state)
+                    return {"run_id": run_id, "state": state.state.value, "error": state.last_error}
+                brief_data = json.loads((self.project_path / brief_path).read_text(encoding="utf-8"))
+                brief = TaskBrief.from_dict(brief_data)
+                issue = self.platform.get_issue(issue_number)
+                if state.state is TaskState.OUTCOME_PUBLISHING:
+                    return self._resume_publishing(state, issue, no_pr=no_pr)
+                for candidate in state.candidate_states.values():
+                    if candidate.status == "running":
+                        candidate.status = "failed"
+                        candidate.finished_at = _now_placeholder()
+                        candidate.error = "interrupted before completion"
+                if state.state is not TaskState.READY_FOR_EXECUTION:
+                    state.recover_to(TaskState.READY_FOR_EXECUTION, reason=f"resume from {state.state.value}")
+                    self.store.write(state)
+                state.dry_run = False
+                return self._execute_ready_state(state, issue, brief, no_pr=no_pr)
         except KeyboardInterrupt:
             self._mark_interrupted(state)
             raise
@@ -183,14 +185,22 @@ class OrchestratorPipeline:
         state = self.store.load(run_id)
         if state.state in TERMINAL_STATES:
             return {"run_id": run_id, "state": state.state.value, "cancelled": False}
+        if state.has_running_candidates():
+            state.cancel_requested = True
+            state.last_error = {"code": "cancel_requested", "message": reason, "at": _now_placeholder()}
+            with self.locks.run(run_id):
+                self.store.write(state)
+            return {"run_id": run_id, "state": state.state.value, "cancelled": False, "cancel_requested": True}
         if state.state is TaskState.OUTCOME_PUBLISHING and state.publishing_step not in {None, "started"}:
             state.cancel_requested = True
             state.last_error = {"code": "cancel_requested", "message": reason, "at": _now_placeholder()}
-            self.store.write(state)
+            with self.locks.run(run_id):
+                self.store.write(state)
             return {"run_id": run_id, "state": state.state.value, "cancelled": False, "cancel_requested": True}
         state.transition(TaskState.CANCELLED, reason=reason)
         state.last_error = {"code": "cancelled", "message": reason, "at": _now_placeholder()}
-        self.store.write(state)
+        with self.locks.run(run_id):
+            self.store.write(state)
         return {"run_id": run_id, "state": state.state.value, "cancelled": True}
 
     def provide(self, run_id: str, *, message: str, source: str = "cli") -> dict[str, Any]:
@@ -298,9 +308,6 @@ class OrchestratorPipeline:
                 planned_candidates=planned_candidates,
             )
             for record in attempt_records:
-                cancelled = self._cancelled_response(state)
-                if cancelled:
-                    return cancelled
                 candidate = record["candidate"]
                 effective_status = record["effective_status"]
                 state.candidate_states[candidate.candidate_id] = CandidateState(
@@ -326,6 +333,9 @@ class OrchestratorPipeline:
                     selected = record
                 self.store.write(state)
 
+            cancelled = self._cancelled_response(state)
+            if cancelled:
+                return cancelled
             state.transition(TaskState.RESULT_EVALUATION, reason="candidate set quiescent")
             evaluation_path = self._write_evaluation(state, selected, candidate_records)
             state.artifacts["evaluation"] = evaluation_path
@@ -616,8 +626,12 @@ class OrchestratorPipeline:
         except FileNotFoundError:
             return None
         if latest.state is TaskState.CANCELLED:
+            if not latest.candidates_quiescent():
+                return None
             return {"run_id": state.run_id, "state": latest.state.value, "cancelled": True}
         if latest.cancel_requested:
+            if not latest.candidates_quiescent():
+                return None
             latest.transition(TaskState.CANCELLED, reason="cancel requested during publishing")
             latest.last_error = latest.last_error or {
                 "code": "cancel_requested",

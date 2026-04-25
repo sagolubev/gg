@@ -34,6 +34,8 @@ TERMINAL_STATES = {
     TaskState.CANCELLED,
 }
 
+RUNNING_CANDIDATE_STATUSES = frozenset({"running"})
+
 
 ALLOWED_TRANSITIONS: dict[TaskState, set[TaskState]] = {
     TaskState.EXTERNAL_TASK_READY: {TaskState.CLAIMING},
@@ -134,6 +136,12 @@ class RunState:
         self.last_error = {"code": code, "message": message, "at": utc_now()}
         if self.state is not TaskState.TERMINAL_FAILURE:
             self.transition(TaskState.TERMINAL_FAILURE, reason=code)
+
+    def has_running_candidates(self) -> bool:
+        return any(candidate.status in RUNNING_CANDIDATE_STATUSES for candidate in self.candidate_states.values())
+
+    def candidates_quiescent(self) -> bool:
+        return not self.has_running_candidates()
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)

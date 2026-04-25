@@ -81,6 +81,10 @@ class RunStore:
             current = RunState.from_dict(json.loads(path.read_text(encoding="utf-8")))
             if current.state in TERMINAL_STATES and state.state is not current.state:
                 raise RuntimeError(f"refusing to overwrite terminal run state {current.state.value}")
+            if current.cancel_requested and not state.cancel_requested:
+                state.cancel_requested = True
+                if state.last_error is None:
+                    state.last_error = current.last_error
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(state.to_dict(), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         tmp.replace(path)

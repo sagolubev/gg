@@ -1317,6 +1317,64 @@ def test_publish_skips_duplicate_result_comment_when_marker_exists(tmp_path):
     assert platform.comments == []
 
 
+def test_publish_uses_integration_worktree_for_pr(monkeypatch, tmp_path):
+    init_repo(tmp_path)
+    pushed: list[tuple[str, str]] = []
+
+    def fake_push(worktree_path: str, branch: str) -> None:
+        pushed.append((worktree_path, branch))
+
+    monkeypatch.setattr("gg.orchestrator.pipeline.push_branch", fake_push)
+    platform = FakePlatform()
+
+    result = OrchestratorPipeline(tmp_path, platform=platform, agent=FakeAgent()).run_issue(42)
+
+    assert result["state"] == "Completed"
+    assert result["winner"] == "candidate-1"
+    state = OrchestratorPipeline(tmp_path, platform=platform, agent=FakeAgent()).store.load(result["run_id"])
+    integration = json.loads((tmp_path / state.artifacts["publishing_integration"]).read_text(encoding="utf-8"))
+    assert integration["candidate_id"] == "candidate-1"
+    assert integration["integration_branch"].startswith("gg/issue-42-")
+    assert platform.prs[0]["head"] == integration["integration_branch"]
+    assert pushed == [(integration["worktree_path"], integration["integration_branch"])]
+    assert not Path(integration["worktree_path"]).exists()
+
+
+def test_publish_records_patch_conflict_before_pr(monkeypatch, tmp_path):
+    init_repo(tmp_path)
+    monkeypatch.setattr("gg.orchestrator.pipeline.push_branch", lambda *_args, **_kwargs: None)
+    platform = FakePlatform()
+    pipeline = OrchestratorPipeline(tmp_path, platform=platform, agent=FakeAgent())
+    ready = pipeline.run_issue(42, dry_run=True)
+    state = pipeline.store.load(ready["run_id"])
+    state.recover_to(TaskState.OUTCOME_PUBLISHING, reason="test integration conflict")
+    state.publishing_step = "started"
+    pipeline.store.write(state)
+    patch_path = pipeline.store.write_text(state.run_id, "candidates/candidate-1/patch.diff", "not a patch")
+
+    result = pipeline._publish_winner(
+        state,
+        platform.issue,
+        {
+            "candidate_id": "candidate-1",
+            "worktree_path": str(tmp_path),
+            "branch": "gg/test",
+            "base_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True).strip(),
+            "patch_path": patch_path,
+            "summary": "done",
+            "verification_path": "verify.json",
+        },
+        no_pr=False,
+    )
+
+    failed = pipeline.store.load(ready["run_id"])
+    conflict = json.loads((tmp_path / failed.artifacts["patch_conflict"]).read_text(encoding="utf-8"))
+    assert result["state"] == "TerminalFailure"
+    assert result["error"]["code"] == "patch_conflict"
+    assert "patch" in conflict["message"].lower()
+    assert platform.prs == []
+
+
 def test_publish_fails_with_preflight_artifact_when_base_commit_missing(tmp_path):
     init_repo(tmp_path)
     platform = FakePlatform()

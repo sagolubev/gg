@@ -19,10 +19,13 @@ from gg.orchestrator.git import binary_changed_files as git_binary_changed_files
 from gg.orchestrator.git import changed_files as git_changed_files
 from gg.orchestrator.git import dependency_changed_files as git_dependency_changed_files
 from gg.orchestrator.git import commit_all, diff as git_diff, push_branch
+from gg.orchestrator.git import apply_patch as git_apply_patch
 from gg.orchestrator.git import commit_exists as git_commit_exists
 from gg.orchestrator.git import is_ancestor as git_is_ancestor
 from gg.orchestrator.git import lfs_changed_files as git_lfs_changed_files
+from gg.orchestrator.git import remove_worktree as git_remove_worktree
 from gg.orchestrator.git import resolve_ref as git_resolve_ref
+from gg.orchestrator.git import safe_branch_slug, WorktreeManager
 from gg.orchestrator.lock import LockManager
 from gg.orchestrator.plugins import create_agent_backend, create_platform
 from gg.orchestrator.rate_limit import RateLimitThrottleError
@@ -819,6 +822,12 @@ class OrchestratorPipeline:
                     )
                     self.store.write(state)
                     return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
+                target = self._prepare_integration_target(state, winner, preflight)
+                if target.get("error"):
+                    state.fail(code="patch_conflict", message=target["error"])
+                    self.store.write(state)
+                    return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
+                winner = {**winner, **target}
                 committed = commit_all(
                     winner["worktree_path"],
                     message=f"Implement issue #{issue.number}",
@@ -831,6 +840,8 @@ class OrchestratorPipeline:
                     return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
                 state.publishing_step = "committed"
                 self.store.write(state)
+            else:
+                winner = self._publishing_target(state, winner)
             cancelled = self._cancelled_response(state)
             if cancelled:
                 return cancelled
@@ -883,6 +894,7 @@ class OrchestratorPipeline:
         state.transition(TaskState.COMPLETED, reason="walking skeleton complete")
         state.publishing_step = "completed"
         self.store.write(state)
+        self._cleanup_integration_worktree(state)
         self._mark_issue_done(issue.number)
         return {
             "run_id": state.run_id,
@@ -951,6 +963,164 @@ class OrchestratorPipeline:
         )
         self.store.write(state)
         return payload
+
+    def _prepare_integration_target(self, state, winner: dict[str, Any], preflight: dict[str, Any]) -> dict[str, Any]:
+        existing = self._publishing_target(state, winner)
+        if existing.get("integration_ready"):
+            return existing
+        patch_path = self._winner_patch_path(state, winner)
+        if not patch_path:
+            self._write_patch_conflict(
+                state,
+                winner,
+                patch_path="",
+                integration_branch="",
+                worktree_path="",
+                message="selected candidate has no patch artifact",
+            )
+            return {"error": "selected candidate has no patch artifact"}
+        patch_text = (self.project_path / patch_path).read_text(encoding="utf-8")
+        if not patch_text.strip():
+            self._write_patch_conflict(
+                state,
+                winner,
+                patch_path=patch_path,
+                integration_branch="",
+                worktree_path="",
+                message="selected candidate patch is empty",
+            )
+            return {"error": "selected candidate patch is empty"}
+        issue_number = int(state.issue.get("number", 0))
+        run_hash = hashlib.sha256(state.run_id.encode("utf-8")).hexdigest()[:8]
+        title_slug = safe_branch_slug(str(state.issue.get("title", "task")))[:32]
+        integration_branch = f"gg/issue-{issue_number}-{title_slug}-publish-{run_hash}"
+        base_ref = preflight.get("default_commit") or preflight["base_commit"]
+        worktree = WorktreeManager(self.project_path).create(
+            run_id=state.run_id,
+            candidate_id="integration",
+            branch=integration_branch,
+            base_ref=base_ref,
+        )
+        state.publishing_step = "integration_created"
+        integration_artifact = self.store.write_json(
+            state.run_id,
+            "artifacts/publishing-integration.json",
+            {
+                "schema_version": 1,
+                "candidate_id": winner["candidate_id"],
+                "source_branch": winner["branch"],
+                "integration_branch": integration_branch,
+                "worktree_path": str(worktree),
+                "base_ref": base_ref,
+                "patch_path": patch_path,
+                "created_at": _now_placeholder(),
+            },
+        )
+        state.artifacts["publishing_integration"] = integration_artifact
+        self.store.write(state)
+        applied, message = git_apply_patch(worktree, patch_text)
+        if not applied:
+            self._write_patch_conflict(
+                state,
+                winner,
+                patch_path=patch_path,
+                integration_branch=integration_branch,
+                worktree_path=str(worktree),
+                message=message,
+            )
+            return {"error": message}
+        state.publishing_step = "patch_applied"
+        self.store.write(state)
+        verification = VerificationRunner(
+            self.config.verify.commands(),
+            timeout=self.config.runtime.command_timeout_seconds,
+            retry_count=self.config.verify.test_retry_count,
+        ).run(worktree)
+        verification_path = self.store.write_json(
+            state.run_id,
+            "artifacts/integration-verification.json",
+            {"schema_version": 1, "checks": [check.to_dict() for check in verification]},
+        )
+        if not _verification_passed(
+            verification,
+            [],
+            allow_known_baseline_failures=False,
+        ):
+            state.artifacts["integration_verification"] = verification_path
+            return {"error": "integration verification failed", "verification_path": verification_path}
+        state.artifacts["integration_verification"] = verification_path
+        state.publishing_step = "verified"
+        self.store.write(state)
+        return {
+            "integration_ready": True,
+            "worktree_path": str(worktree),
+            "branch": integration_branch,
+            "verification_path": verification_path,
+        }
+
+    def _publishing_target(self, state, winner: dict[str, Any]) -> dict[str, Any]:
+        artifact_path = state.artifacts.get("publishing_integration")
+        if not artifact_path:
+            return winner
+        try:
+            data = json.loads((self.project_path / artifact_path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return winner
+        return {
+            **winner,
+            "integration_ready": True,
+            "worktree_path": data.get("worktree_path", winner["worktree_path"]),
+            "branch": data.get("integration_branch", winner["branch"]),
+        }
+
+    def _winner_patch_path(self, state, winner: dict[str, Any]) -> str:
+        if winner.get("patch_path"):
+            return winner["patch_path"]
+        candidate = state.candidate_states.get(winner["candidate_id"])
+        if not candidate or not candidate.result_path:
+            return ""
+        try:
+            result = json.loads((self.project_path / candidate.result_path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return ""
+        return str(result.get("patch_path", ""))
+
+    def _write_patch_conflict(
+        self,
+        state,
+        winner: dict[str, Any],
+        *,
+        patch_path: str,
+        integration_branch: str,
+        worktree_path: str,
+        message: str,
+    ) -> None:
+        state.artifacts["patch_conflict"] = self.store.write_json(
+            state.run_id,
+            "artifacts/patch-conflict.json",
+            {
+                "schema_version": 1,
+                "candidate_id": winner["candidate_id"],
+                "patch_path": patch_path,
+                "integration_branch": integration_branch,
+                "worktree_path": worktree_path,
+                "message": message,
+                "changed_files": git_changed_files(worktree_path) if worktree_path else [],
+                "created_at": _now_placeholder(),
+            },
+        )
+
+    def _cleanup_integration_worktree(self, state) -> None:
+        artifact_path = state.artifacts.get("publishing_integration")
+        if not artifact_path:
+            return
+        try:
+            data = json.loads((self.project_path / artifact_path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        worktree_path = data.get("worktree_path")
+        if worktree_path:
+            git_remove_worktree(self.project_path, worktree_path)
 
     def _cancelled_response(self, state) -> dict[str, Any] | None:
         try:

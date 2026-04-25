@@ -422,6 +422,38 @@ class PublishingPreflightModel(CompatibleArtifactModel):
         return _validate_required_timestamp(value)
 
 
+class PublishingIntegrationModel(CompatibleArtifactModel):
+    schema_version: Literal[1] = 1
+    candidate_id: str
+    source_branch: str
+    integration_branch: str
+    worktree_path: str
+    base_ref: str
+    patch_path: str
+    created_at: str
+
+    @field_validator("created_at")
+    @classmethod
+    def _timestamp(cls, value: str) -> str:
+        return _validate_required_timestamp(value)
+
+
+class PatchConflictModel(CompatibleArtifactModel):
+    schema_version: Literal[1] = 1
+    candidate_id: str
+    patch_path: str
+    integration_branch: str
+    worktree_path: str
+    message: str
+    changed_files: list[str] = Field(default_factory=list)
+    created_at: str
+
+    @field_validator("created_at")
+    @classmethod
+    def _timestamp(cls, value: str) -> str:
+        return _validate_required_timestamp(value)
+
+
 class ContextSnapshotModel(CompatibleArtifactModel):
     schema_version: Literal[1] = 1
     created_at: str

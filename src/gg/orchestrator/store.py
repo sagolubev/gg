@@ -16,6 +16,8 @@ from gg.orchestrator.schemas import (
     EvaluationArtifactModel,
     InputArtifactModel,
     InputRequestModel,
+    PatchConflictModel,
+    PublishingIntegrationModel,
     PublishingPreflightModel,
     RateLimitArtifactModel,
     RunSummaryModel,
@@ -204,6 +206,9 @@ class RunStore:
             self._remove_worktree_path(path)
             if candidate.branch:
                 self._delete_branch(candidate.branch)
+        integration_path = self._integration_worktree_path(run)
+        if integration_path is not None:
+            self._remove_worktree_path(integration_path)
         subprocess.run(
             ["git", "worktree", "prune"],
             cwd=str(self.project_path),
@@ -240,6 +245,17 @@ class RunStore:
             text=True,
             timeout=60,
         )
+
+    def _integration_worktree_path(self, run: RunState) -> Path | None:
+        artifact_path = run.artifacts.get("publishing_integration")
+        if not artifact_path:
+            return None
+        try:
+            data = json.loads((self.project_path / artifact_path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        worktree_path = data.get("worktree_path")
+        return Path(worktree_path) if worktree_path else None
 
     def append_cost(self, run_id: str, payload: dict) -> None:
         append_jsonl(self.path_for(run_id) / "cost.jsonl", payload)
@@ -456,6 +472,10 @@ def _validate_json_artifact(relative_path: str, data: dict[str, Any]) -> None:
         schema = RateLimitArtifactModel
     elif relative_path == "artifacts/publishing-preflight.json":
         schema = PublishingPreflightModel
+    elif relative_path == "artifacts/publishing-integration.json":
+        schema = PublishingIntegrationModel
+    elif relative_path == "artifacts/patch-conflict.json":
+        schema = PatchConflictModel
     elif relative_path == "artifacts/baseline-verification.json" or relative_path.endswith("/verification.json"):
         schema = VerificationArtifactModel
     elif relative_path.startswith("inputs/input-v1-") and relative_path.endswith(".json"):

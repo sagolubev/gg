@@ -4,6 +4,7 @@ import re
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 
@@ -175,6 +176,40 @@ def commit_all(cwd: str | Path, *, message: str, author_name: str, author_email:
 
 def push_branch(cwd: str | Path, branch: str) -> None:
     run_git(["push", "-u", "origin", branch], cwd, timeout=180)
+
+
+def apply_patch(cwd: str | Path, patch_text: str) -> tuple[bool, str]:
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".diff", delete=False) as handle:
+        handle.write(patch_text)
+        patch_path = handle.name
+    try:
+        completed = subprocess.run(
+            ["git", "apply", "--3way", patch_path],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if completed.returncode == 0:
+            return True, completed.stderr.strip() or completed.stdout.strip()
+        return False, completed.stderr.strip() or completed.stdout.strip() or "git apply --3way failed"
+    finally:
+        Path(patch_path).unlink(missing_ok=True)
+
+
+def remove_worktree(repo_path: str | Path, path: str | Path) -> None:
+    worktree = Path(path)
+    if not worktree.exists():
+        return
+    result = subprocess.run(
+        ["git", "worktree", "remove", "--force", str(worktree)],
+        cwd=str(repo_path),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if result.returncode != 0:
+        shutil.rmtree(worktree, ignore_errors=True)
 
 
 class WorktreeManager:

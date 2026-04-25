@@ -1387,6 +1387,23 @@ def test_cli_status_reads_runs(tmp_path):
     assert "ReadyForExecution" in result.output
 
 
+def test_cli_doctor_reports_machine_readable_checks(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        "verify:\n  tests: ''\nruntime:\n  agent_backend: fake-agent\n",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(cli, ["doctor", "--path", str(tmp_path), "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    check_names = {check["name"] for check in payload["checks"]}
+    assert payload["schema_version"] == 1
+    assert "params" in check_names
+    assert "git_worktree" in check_names
+
+
 def test_clean_dry_run_lists_only_terminal_runs(tmp_path):
     init_repo(tmp_path)
     pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())

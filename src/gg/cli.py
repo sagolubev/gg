@@ -390,6 +390,32 @@ def provide(run_id, message, path, as_json):
 
 
 @cli.command()
+@click.option("--path", type=click.Path(exists=True), default=".", help="Project path.")
+@click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
+def doctor(path, as_json):
+    """Check local orchestrator prerequisites."""
+    import json
+
+    from rich.console import Console
+    from rich.table import Table
+
+    from gg.orchestrator.doctor import run_doctor
+
+    result = run_doctor(path)
+    if as_json:
+        click.echo(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    console = Console()
+    table = Table(title=f"gg doctor: {result['status']}")
+    table.add_column("Check")
+    table.add_column("Status")
+    table.add_column("Message")
+    for check in result["checks"]:
+        table.add_row(check["name"], check["status"], check["message"])
+    console.print(table)
+
+
+@cli.command()
 @click.argument("pr_number", type=int)
 def review(pr_number):
     """Run agentic code review on a PR."""

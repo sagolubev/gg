@@ -6,6 +6,7 @@ import hashlib
 import os
 import re
 import signal
+import shutil
 import tempfile
 import threading
 import time
@@ -631,6 +632,21 @@ class OrchestratorPipeline:
             self._mark_issue_blocked(issue.number, state.run_id, sandbox_error)
             return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
 
+        initial_candidate_count = self.config.runtime.candidates
+        resource_preflight = self._resource_preflight(state, initial_candidate_count)
+        if not resource_preflight["passed"]:
+            state.transition(TaskState.BLOCKED, reason="insufficient disk for candidate execution")
+            state.blocked_resume_state = TaskState.AGENT_SELECTION
+            state.blocked_until = None
+            message = (
+                f"insufficient disk for run: {resource_preflight['available_mb']}MB available, "
+                f"{resource_preflight['required_mb']}MB required"
+            )
+            state.last_error = {"code": "insufficient_disk", "message": message, "at": _now_placeholder()}
+            self.store.write(state)
+            self._mark_issue_blocked(issue.number, state.run_id, message)
+            return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
+
         baseline = self._run_baseline_verification(state)
 
         state.transition(TaskState.AGENT_RUNNING, reason="run candidates")
@@ -645,6 +661,8 @@ class OrchestratorPipeline:
             candidate_count = (
                 self.config.runtime.candidates if state.attempt == 1 else self.config.runtime.repair_candidates
             )
+            if state.attempt == 1:
+                candidate_count = min(candidate_count, int(resource_preflight["allowed_candidates"]))
             strategies = _candidate_strategies(candidate_count)
             if state.attempt > 1:
                 strategies = [f"repair:{strategy}" for strategy in strategies]
@@ -824,6 +842,36 @@ class OrchestratorPipeline:
             ]
             results = [future.result() for future in futures]
         return sorted(results, key=lambda item: item["index"])
+
+    def _resource_preflight(self, state, requested_candidates: int) -> dict[str, Any]:
+        resource = self.config.runtime.resource
+        available_mb = _available_disk_mb(self.project_path)
+        required_mb = max(1, requested_candidates) * resource.max_disk_mb
+        allowed_candidates = requested_candidates
+        downscaled = False
+        passed = available_mb >= required_mb
+        if not passed and resource.allow_candidate_downscale:
+            allowed_candidates = max(1, available_mb // resource.max_disk_mb)
+            downscaled = allowed_candidates < requested_candidates
+            passed = allowed_candidates >= 1
+        payload = {
+            "schema_version": 1,
+            "available_mb": available_mb,
+            "required_mb": required_mb,
+            "max_disk_mb": resource.max_disk_mb,
+            "requested_candidates": requested_candidates,
+            "allowed_candidates": allowed_candidates if passed else 0,
+            "downscaled": downscaled,
+            "passed": passed,
+            "checked_at": _now_placeholder(),
+        }
+        state.artifacts["resource_preflight"] = self.store.write_json(
+            state.run_id,
+            "artifacts/resource-preflight.json",
+            payload,
+        )
+        self.store.write(state)
+        return payload
 
     def _update_candidate_runtime_state(
         self,
@@ -2029,6 +2077,11 @@ def _terminate_process_group(pid: int) -> bool:
             return False
         except OSError:
             return False
+
+
+def _available_disk_mb(path: Path) -> int:
+    usage = shutil.disk_usage(path)
+    return usage.free // (1024 * 1024)
 
 
 def _verification_passed(checks, baseline, *, allow_known_baseline_failures: bool) -> bool:

@@ -1219,6 +1219,50 @@ def test_pipeline_fanout_selects_first_passing_candidate(tmp_path):
     assert (run_dir / "candidates" / "candidate-2" / "candidate-result.json").exists()
 
 
+def test_resource_preflight_blocks_when_disk_budget_unavailable(monkeypatch, tmp_path):
+    init_repo(tmp_path)
+    monkeypatch.setattr("gg.orchestrator.pipeline._available_disk_mb", lambda path: 1)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        "verify:\n  tests: ''\nruntime:\n  candidates: 2\n  resource:\n    max_disk_mb: 4096\n",
+        encoding="utf-8",
+    )
+
+    result = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent()).run_issue(42, no_pr=True)
+
+    state = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent()).store.load(result["run_id"])
+    artifact = json.loads((tmp_path / state.artifacts["resource_preflight"]).read_text(encoding="utf-8"))
+    assert result["state"] == "Blocked"
+    assert result["error"]["code"] == "insufficient_disk"
+    assert artifact["passed"] is False
+    assert artifact["allowed_candidates"] == 0
+
+
+def test_resource_preflight_downscales_initial_candidates(monkeypatch, tmp_path):
+    init_repo(tmp_path)
+    monkeypatch.setattr("gg.orchestrator.pipeline._available_disk_mb", lambda path: 4096)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        """verify:
+  tests: ''
+runtime:
+  candidates: 3
+  resource:
+    max_disk_mb: 4096
+    allow_candidate_downscale: true
+""",
+        encoding="utf-8",
+    )
+
+    result = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent()).run_issue(42, no_pr=True)
+
+    state = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent()).store.load(result["run_id"])
+    artifact = json.loads((tmp_path / state.artifacts["resource_preflight"]).read_text(encoding="utf-8"))
+    assert result["state"] == "Completed"
+    assert artifact["passed"] is True
+    assert artifact["downscaled"] is True
+    assert artifact["allowed_candidates"] == 1
+    assert list(state.candidate_states) == ["candidate-1"]
+
+
 def test_pipeline_evaluator_can_choose_later_more_focused_candidate(tmp_path):
     init_repo(tmp_path)
     (tmp_path / ".gg" / "params.yaml").write_text(

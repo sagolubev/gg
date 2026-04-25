@@ -26,6 +26,7 @@ from gg.orchestrator.schemas import (
     PublishingPreflightModel,
     RateLimitArtifactModel,
     RawIssueArtifactModel,
+    ResourcePreflightModel,
     RunOutcomeModel,
     RunSummaryModel,
     TaskBriefModel,
@@ -639,6 +640,8 @@ def _validate_json_artifact(relative_path: str, data: dict[str, Any]) -> None:
         schema = InputRequestModel
     elif relative_path == "artifacts/rate-limit.json":
         schema = RateLimitArtifactModel
+    elif relative_path == "artifacts/resource-preflight.json":
+        schema = ResourcePreflightModel
     elif relative_path == "artifacts/publishing-preflight.json":
         schema = PublishingPreflightModel
     elif relative_path == "artifacts/publishing-integration.json":

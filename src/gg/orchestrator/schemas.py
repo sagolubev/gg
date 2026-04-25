@@ -704,6 +704,23 @@ class RateLimitArtifactModel(CompatibleArtifactModel):
         return _validate_required_timestamp(value)
 
 
+class ResourcePreflightModel(CompatibleArtifactModel):
+    schema_version: Literal[1] = 1
+    available_mb: int = Field(ge=0)
+    required_mb: int = Field(ge=0)
+    max_disk_mb: int = Field(ge=1)
+    requested_candidates: int = Field(ge=0)
+    allowed_candidates: int = Field(ge=0)
+    downscaled: bool = False
+    passed: bool = True
+    checked_at: str
+
+    @field_validator("checked_at")
+    @classmethod
+    def _checked_timestamp(cls, value: str) -> str:
+        return _validate_required_timestamp(value)
+
+
 class PublishingPreflightModel(CompatibleArtifactModel):
     schema_version: Literal[1] = 1
     candidate_id: str

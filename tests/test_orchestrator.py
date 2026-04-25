@@ -986,6 +986,33 @@ def test_run_store_atomic_writes_do_not_leave_temp_files(tmp_path):
     assert (run_dir / "state.json.bak").exists()
 
 
+def test_run_store_reconciles_missing_transition_events_on_load(tmp_path):
+    init_repo(tmp_path)
+    store = RunStore(tmp_path)
+    state = store.create(Issue(number=1, title="Reconcile events", body="", labels=["ai-ready"]), dry_run=True)
+    state.transition(TaskState.CLAIMING, reason="simulate crash after state write")
+    run_dir = tmp_path / ".gg" / "runs" / state.run_id
+    (run_dir / "state.json").write_text(json.dumps(state.to_dict(), indent=2) + "\n", encoding="utf-8")
+    pipeline_log = run_dir / "pipeline.jsonl"
+    existing = [
+        line
+        for line in pipeline_log.read_text(encoding="utf-8").splitlines()
+        if '"event": "state_transition"' not in line
+    ]
+    pipeline_log.write_text("\n".join(existing) + "\n", encoding="utf-8")
+
+    loaded = store.load(state.run_id)
+
+    events = read_jsonl(pipeline_log)
+    assert loaded.state is TaskState.CLAIMING
+    assert any(
+        event["event"] == "state_transition"
+        and event["to_state"] == "Claiming"
+        and event["reconciled"] is True
+        for event in events
+    )
+
+
 def test_run_store_validates_top_level_verification_artifacts(tmp_path):
     init_repo(tmp_path)
     store = RunStore(tmp_path)

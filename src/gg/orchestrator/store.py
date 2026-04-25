@@ -135,7 +135,9 @@ class RunStore:
 
     def load(self, run_id: str) -> RunState:
         path = self.path_for(run_id) / "state.json"
-        return self._load_state_file(path)
+        state = self._load_state_file(path)
+        self._reconcile_event_log(state)
+        return state
 
     def list_runs(self) -> list[RunState]:
         runs: list[RunState] = []
@@ -394,6 +396,40 @@ class RunStore:
 
     def append_error(self, run_id: str, payload: dict) -> None:
         append_jsonl(self.path_for(run_id) / "errors.jsonl", payload)
+
+    def _reconcile_event_log(self, state: RunState) -> None:
+        log_path = self.path_for(state.run_id) / "pipeline.jsonl"
+        logged_transitions = _count_logged_events(log_path, "state_transition")
+        if not log_path.exists() or not _has_logged_event(log_path, "run_created"):
+            self.append_event(
+                state.run_id,
+                {
+                    "event": "run_created",
+                    "at": state.created_at,
+                    "run_id": state.run_id,
+                    "state": state.state.value,
+                    "issue": state.issue,
+                    "dry_run": state.dry_run,
+                    "attempt": state.attempt,
+                    "reconciled": True,
+                },
+            )
+        for transition in state.transitions[logged_transitions:]:
+            self.append_event(
+                state.run_id,
+                {
+                    "event": "state_transition",
+                    "at": transition["at"],
+                    "run_id": state.run_id,
+                    "from_state": transition["from"],
+                    "to_state": transition["to"],
+                    "reason": transition.get("reason", ""),
+                    "attempt": state.attempt,
+                    "publishing_step": state.publishing_step,
+                    "cancel_requested": state.cancel_requested,
+                    "reconciled": True,
+                },
+            )
 
     def _write_logs(self, run_dir: Path, state: RunState, current: RunState | None) -> None:
         if current is None:
@@ -707,6 +743,30 @@ def _validation_relative_path(relative_path: str) -> str:
     if runs_index + 2 >= len(parts):
         return relative_path
     return str(Path(*parts[runs_index + 2:]))
+
+
+def _iter_jsonl_events(path: Path):
+    if not path.exists():
+        return
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            yield json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+
+def _count_logged_events(path: Path, event_name: str) -> int:
+    return sum(1 for event in _iter_jsonl_events(path) or () if event.get("event") == event_name)
+
+
+def _has_logged_event(path: Path, event_name: str) -> bool:
+    return any(event.get("event") == event_name for event in _iter_jsonl_events(path) or ())
 
 
 def _parse_utc(value: str) -> datetime:

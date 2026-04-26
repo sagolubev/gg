@@ -123,7 +123,7 @@ class GitHubPlatform(GitPlatform):
                 break
         if not saw_scopes:
             raise RuntimeError("GitHub token scopes could not be determined from gh auth status output")
-        if token_scopes and not token_scopes.issuperset(self.REQUIRED_SCOPES):
+        if not token_scopes.issuperset(self.REQUIRED_SCOPES):
             missing = self.REQUIRED_SCOPES - token_scopes
             raise RuntimeError(
                 f"GitHub token is missing required scopes: {', '.join(sorted(missing))}. "

@@ -2,11 +2,32 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
 from pathlib import Path
 
 from gg.orchestrator.schemas import ContextSnapshotModel, validation_error_message
 from gg.orchestrator.state import utc_now
 from gg.orchestrator.task_analysis import TaskBrief
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        Path(tmp).replace(path)
+        dir_fd = os.open(str(path.parent), os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def _comments_text(comments: list[dict]) -> str:
@@ -82,10 +103,7 @@ class ContextSnapshotStore:
                 validation_error_message(f"artifacts/context-snapshot-v{version}.json", exc)
             ) from exc
         path = run_artifacts / f"context-snapshot-v{version}.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(snapshot, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        tmp.replace(path)
+        _atomic_write_text(path, json.dumps(snapshot, indent=2, ensure_ascii=False) + "\n")
         if self.hash_artifacts:
             _write_snapshot_hash(path)
         return str(path.relative_to(self.project_path))
@@ -98,9 +116,7 @@ class ContextSnapshotStore:
         path = self.objects_dir / digest[:2] / digest
         path.parent.mkdir(parents=True, exist_ok=True)
         if not path.exists():
-            tmp = path.with_suffix(".tmp")
-            tmp.write_text(text, encoding="utf-8")
-            tmp.replace(path)
+            _atomic_write_text(path, text)
         return digest
 
 
@@ -163,7 +179,5 @@ def _write_snapshot_hash(path: Path) -> None:
         "algorithm": "sha256",
         "hash": hashlib.sha256(path.read_bytes()).hexdigest(),
     }
-    tmp = path.with_name(f"{path.name}.sha256.tmp")
     target = path.with_name(f"{path.name}.sha256")
-    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(target)
+    _atomic_write_text(target, json.dumps(payload, indent=2) + "\n")

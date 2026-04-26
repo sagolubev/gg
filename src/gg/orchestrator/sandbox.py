@@ -49,11 +49,20 @@ class SandboxRunResult:
         return asdict(self)
 
 
+def _resolve_srt_py(name: str = "srt-py") -> str:
+    """Find srt-py: check current venv bin first, then PATH."""
+    import sys
+    venv_candidate = Path(sys.executable).parent / name
+    if venv_candidate.exists():
+        return str(venv_candidate)
+    return name
+
+
 class SandboxRuntime:
     """Narrow adapter around sandbox-runtime's `srt-py` CLI."""
 
     def __init__(self, executable: str = "srt-py"):
-        self.executable = executable
+        self.executable = _resolve_srt_py(executable)
         self.last_pid: int | None = None
 
     def is_available(self) -> bool:

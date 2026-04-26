@@ -296,6 +296,7 @@ def default_params(project_path: str | Path) -> dict[str, Any]:
         "selection": {
             "include_labels": ["ai-ready"],
             "exclude_labels": ["gg:in-progress", "gg:blocked", "gg:done"],
+            "board_status": "",
         },
         "verify": {
             "setup": "",
@@ -511,6 +512,7 @@ def load_config(project_path: str | Path, *, profile: str | None = None) -> GGCo
                         ["gg:in-progress", "gg:blocked", "gg:done"],
                     ),
                     "order": selection.get("order", "priority_then_oldest"),
+                    "board_status": selection.get("board_status", ""),
                 },
                 "verify": {
                     "setup": verify.get("setup", ""),
@@ -871,7 +873,7 @@ def _reject_unknown_config_keys(raw: dict[str, Any], location: str) -> None:
         "project": {"default_branch"},
         "git": {"default_branch", "author_name", "author_email", "committer_name", "committer_email"},
         "task_system": {"platform", "kind", "work_label", "done_label", "blocked_label"},
-        "selection": {"include_labels", "exclude_labels", "order"},
+        "selection": {"include_labels", "exclude_labels", "order", "board_status"},
         "verify": {
             "setup",
             "tests",

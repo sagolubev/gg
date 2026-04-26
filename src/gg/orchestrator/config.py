@@ -15,6 +15,7 @@ from gg.utils.git_ops import get_main_branch
 class TaskSystemConfig:
     platform: str = "auto"
     work_label: str = "gg:in-progress"
+    in_review_label: str = "gg:in-review"
     done_label: str = "gg:done"
     blocked_label: str = "gg:blocked"
 
@@ -290,6 +291,7 @@ def default_params(project_path: str | Path) -> dict[str, Any]:
         "task_system": {
             "platform": "auto",
             "work_label": "gg:in-progress",
+            "in_review_label": "gg:in-review",
             "done_label": "gg:done",
             "blocked_label": "gg:blocked",
         },
@@ -502,6 +504,7 @@ def load_config(project_path: str | Path, *, profile: str | None = None) -> GGCo
                 "task_system": {
                     "platform": task_system.get("kind", task_system.get("platform", raw.get("platform", "auto"))),
                     "work_label": task_system.get("work_label", "gg:in-progress"),
+                    "in_review_label": task_system.get("in_review_label", "gg:in-review"),
                     "done_label": task_system.get("done_label", "gg:done"),
                     "blocked_label": task_system.get("blocked_label", "gg:blocked"),
                 },
@@ -701,6 +704,7 @@ def load_config(project_path: str | Path, *, profile: str | None = None) -> GGCo
         task_system=TaskSystemConfig(
             platform=model.task_system.platform,
             work_label=model.task_system.work_label,
+            in_review_label=model.task_system.in_review_label,
             done_label=model.task_system.done_label,
             blocked_label=model.task_system.blocked_label,
         ),
@@ -872,7 +876,7 @@ def _reject_unknown_config_keys(raw: dict[str, Any], location: str) -> None:
         "schema_version": None,
         "project": {"default_branch"},
         "git": {"default_branch", "author_name", "author_email", "committer_name", "committer_email"},
-        "task_system": {"platform", "kind", "work_label", "done_label", "blocked_label"},
+        "task_system": {"platform", "kind", "work_label", "in_review_label", "done_label", "blocked_label"},
         "selection": {"include_labels", "exclude_labels", "order", "board_status"},
         "verify": {
             "setup",

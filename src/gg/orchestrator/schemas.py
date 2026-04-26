@@ -74,6 +74,7 @@ class GitConfigModel(StrictArtifactModel):
 class TaskSystemConfigModel(StrictArtifactModel):
     platform: str = "auto"
     work_label: str = "gg:in-progress"
+    in_review_label: str = "gg:in-review"
     done_label: str = "gg:done"
     blocked_label: str = "gg:blocked"
 

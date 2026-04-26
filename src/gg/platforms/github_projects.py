@@ -45,22 +45,27 @@ class GitHubProjectsClient:
             num = content.get("number")
             if num is None:
                 continue
-            field_values = item.get("fieldValues") or {}
-            # gh project item-list --format json returns fieldValues as a dict or list
-            status_val = ""
-            if isinstance(field_values, dict):
-                for key, val in field_values.items():
-                    if isinstance(val, dict) and "name" in val:
-                        status_val = val["name"]
-                        break
-            elif isinstance(field_values, list):
-                for fv in field_values:
-                    if isinstance(fv, dict) and fv.get("field", {}).get("name", "").lower() == self.status_field.lower():
-                        status_val = fv.get("value", {}).get("name", "")
-                        break
+            status_val = self._extract_status(item)
             if status_val.lower() == status_name.lower():
                 result.add(num)
         return result
+
+    def _extract_status(self, item: dict) -> str:
+        # gh project item-list --format json exposes status as a top-level "status" string
+        top = item.get("status")
+        if isinstance(top, str) and top:
+            return top
+        # fallback: fieldValues dict {"Status": {"name": "..."}} or list of field-value objects
+        field_values = item.get("fieldValues") or {}
+        if isinstance(field_values, dict):
+            for val in field_values.values():
+                if isinstance(val, dict) and "name" in val:
+                    return val["name"]
+        elif isinstance(field_values, list):
+            for fv in field_values:
+                if isinstance(fv, dict) and fv.get("field", {}).get("name", "").lower() == self.status_field.lower():
+                    return fv.get("value", {}).get("name", "")
+        return ""
 
     def move_issue(self, issue_number: int, status_name: str) -> bool:
         """Move issue to status_name. Returns True on success, False on any error."""

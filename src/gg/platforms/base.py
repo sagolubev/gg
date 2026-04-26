@@ -183,6 +183,16 @@ class GitPlatform(ABC):
         self.apply_labels(issue_number, add=[], remove=[work_label, blocked_label])
         self.add_stage_comment_once(issue_number, run_id, "failed", message)
 
+    def publish_in_review(
+        self,
+        issue_number: int,
+        *,
+        work_label: str,
+        in_review_label: str,
+    ) -> None:
+        """Swap work_label -> in_review_label when a PR is created."""
+        self.apply_labels(issue_number, add=[in_review_label], remove=[work_label])
+
     def publish_done(
         self,
         issue_number: int,
@@ -190,9 +200,13 @@ class GitPlatform(ABC):
         work_label: str,
         blocked_label: str,
         done_label: str,
+        in_review_label: str = "",
     ) -> None:
         """Publish successful completion labels to the external tracker."""
-        self.apply_labels(issue_number, add=[done_label], remove=[work_label, blocked_label])
+        remove = [work_label, blocked_label]
+        if in_review_label:
+            remove.append(in_review_label)
+        self.apply_labels(issue_number, add=[done_label], remove=remove)
 
     def publish_outcome(
         self,

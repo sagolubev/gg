@@ -4401,8 +4401,12 @@ runtime:
     assert result.status == "success"
     assert result.sandbox_pid == 43210
     assert sandbox.commands
-    assert sandbox.commands[0][0:3] == ["codex", "exec", "-o"]
-    assert sandbox.policies == [config.runtime.sandbox_policy]
+    assert sandbox.commands[0][:2] == ["codex", "exec"]
+    assert "--dangerously-bypass-approvals-and-sandbox" in sandbox.commands[0]
+    assert "-o" in sandbox.commands[0]
+    # LM API hosts are automatically added; verify configured domains are present
+    assert set(config.runtime.sandbox_policy.allowed_domains).issubset(set(sandbox.policies[0].allowed_domains))
+    assert str(Path.home() / ".codex") in sandbox.policies[0].allow_write
     assert any(event.get("worktree_path") for event in status_events)
     assert {"sandbox_pid": 43210} in status_events
 
@@ -4430,7 +4434,9 @@ agent:
     result = executor.run(run_id="run-custom-codex", issue_number=42, brief=task_brief)
 
     assert result.status == "success"
-    assert sandbox.commands[0][:5] == ["python", "-m", "codex_cli", "exec", "-o"]
+    assert sandbox.commands[0][:4] == ["python", "-m", "codex_cli", "exec"]
+    assert "--dangerously-bypass-approvals-and-sandbox" in sandbox.commands[0]
+    assert "-o" in sandbox.commands[0]
 
 
 def test_candidate_executor_merges_runtime_network_policy_into_sandbox(tmp_path):
@@ -4462,7 +4468,8 @@ runtime:
     result = executor.run(run_id="run-network-policy", issue_number=42, brief=brief)
 
     assert result.status == "success"
-    assert sandbox.policies[0].allowed_domains == ["registry.npmjs.org", "pypi.org"]
+    # LM API hosts are automatically added; verify configured domains are present
+    assert {"registry.npmjs.org", "pypi.org"}.issubset(set(sandbox.policies[0].allowed_domains))
 
 
 def test_candidate_setup_failure_is_persisted_without_running_agent(tmp_path):

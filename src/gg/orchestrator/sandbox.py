@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import signal
 import shutil
 import subprocess
@@ -95,12 +96,13 @@ class SandboxRuntime:
         with tempfile.NamedTemporaryFile("w", suffix="-srt-settings.json", encoding="utf-8") as settings_file:
             json.dump(settings, settings_file)
             settings_file.flush()
-            sandboxed = [self.executable, "--settings", settings_file.name, *command]
+            sandboxed = [self.executable, "-s", settings_file.name, "-c", shlex.join(command)]
             proc: subprocess.Popen[str] | None = None
             try:
                 proc = subprocess.Popen(
                     sandboxed,
                     cwd=str(cwd),
+                    stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,

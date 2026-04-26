@@ -34,6 +34,14 @@ HOST_ENV_ALLOWLIST = frozenset(
         "LANG",
         "TERM",
         "OPENAI_API_KEY",
+        "OPENAI_API_BASE",
+        "OPENAI_API_TYPE",
+        "OPENAI_API_VERSION",
+        "OPENAI_BASE_URL",
+        "AZURE_OPENAI_API_KEY",
+        "AZURE_OPENAI_ENDPOINT",
+        "AZURE_OPENAI_API_VERSION",
+        "ANTHROPIC_API_KEY",
         "GITHUB_TOKEN",
         "GH_TOKEN",
     }
@@ -198,7 +206,11 @@ class CandidateExecutor:
             return None
         if self.sandbox.is_available():
             return None
-        return "sandbox-runtime is required but unavailable"
+        return (
+            "sandbox-runtime (srt-py) is required but not found in PATH. "
+            "Install: pip install sandbox-runtime  "
+            "Or disable: set runtime.use_sandbox_runtime=false in .gg/params.yaml"
+        )
 
     def sandbox_preflight(self) -> dict[str, Any]:
         required = self._requires_sandbox_preflight()
@@ -394,7 +406,7 @@ class CandidateExecutor:
         out_path = Path(tempfile.mktemp(prefix="gg-candidate-", suffix=".md", dir=str(worktree)))
         codex_command = shlex.split(self.config.agent.codex_command.strip() or "codex")
         result = self.sandbox.run(
-            [*codex_command, "exec", "-o", str(out_path), prompt],
+            [*codex_command, "exec", "--dangerously-bypass-approvals-and-sandbox", "-o", str(out_path), prompt],
             cwd=worktree,
             timeout=self.config.runtime.candidate_timeout_seconds,
             policy=self._sandbox_policy(),
@@ -419,11 +431,18 @@ class CandidateExecutor:
             for host in network.allowed_hosts:
                 if host not in allowed:
                     allowed.append(host)
+            for host in _lm_api_hosts():
+                if host not in allowed:
+                    allowed.append(host)
+        allow_write = list(policy.allow_write)
+        codex_home = str(Path.home() / ".codex")
+        if codex_home not in allow_write:
+            allow_write.append(codex_home)
         return SandboxPolicy(
             allowed_domains=allowed,
             denied_domains=list(policy.denied_domains),
             deny_read=list(policy.deny_read),
-            allow_write=list(policy.allow_write),
+            allow_write=allow_write,
             deny_write=list(policy.deny_write),
         )
 
@@ -600,3 +619,21 @@ def _call_optional(target: Any, method_name: str) -> Any:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _lm_api_hosts() -> list[str]:
+    """Return LLM API hosts that should be reachable from the sandbox."""
+    from urllib.parse import urlparse
+    hosts: list[str] = [
+        "api.openai.com",
+        "api.anthropic.com",
+    ]
+    for var in ("AZURE_OPENAI_ENDPOINT", "OPENAI_API_BASE", "OPENAI_BASE_URL"):
+        val = os.environ.get(var, "").strip()
+        if val:
+            parsed = urlparse(val)
+            host = parsed.netloc or parsed.path
+            host = host.split(":")[0].strip()
+            if host and host not in hosts:
+                hosts.append(host)
+    return hosts

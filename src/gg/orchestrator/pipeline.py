@@ -71,10 +71,12 @@ class OrchestratorPipeline:
         platform: GitPlatform | None = None,
         agent: AgentBackend | None = None,
         profile: str | None = None,
+        debug: bool = False,
     ):
         root = find_repo_root(project_path) or Path(project_path).resolve()
         self.project_path = Path(root).resolve()
         self.config: GGConfig = load_config(self.project_path, profile=profile)
+        self._debug = debug
         self.store = RunStore(
             self.project_path,
             audit_hash_events=self.config.audit.hash_events,
@@ -83,9 +85,12 @@ class OrchestratorPipeline:
             keep_state_backup=self.config.recovery.keep_state_backup,
         )
         self.locks = LockManager(self.project_path)
-        self.platform = platform or create_platform(self.config.task_system.platform, self.project_path)
+        self.platform = platform or create_platform(
+            self.config.task_system.platform, self.project_path, debug=debug,
+        )
         self.agent = agent or create_agent_backend(self.config.runtime.agent_backend)
         self.knowledge = KnowledgeEngine(self.project_path)
+        self._projects = self._build_projects_client()
         self._state_update_lock = threading.Lock()
         self._shutdown_requested = False
         self._port_allocations: dict[str, int] = {}
@@ -171,6 +176,7 @@ class OrchestratorPipeline:
                     return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
                 if not dry_run:
                     self.platform.validate_auth()
+                    self._ensure_gg_labels()
                 if not dry_run:
                     external_side_effect_started = True
                     self.platform.claim_task(
@@ -178,6 +184,7 @@ class OrchestratorPipeline:
                         run_id=state.run_id,
                         work_label=self.config.task_system.work_label,
                     )
+                    self._move_to_project_status(issue.number, self.config.project_board.status_in_progress)
                 state.transition(TaskState.QUEUED, reason="claim complete")
                 state.transition(TaskState.RUN_STARTED, reason="start pipeline")
                 state.transition(TaskState.TASK_ANALYSIS, reason="create task brief")
@@ -220,6 +227,45 @@ class OrchestratorPipeline:
                 raise
         finally:
             self._active_run_id = None
+
+    def _build_projects_client(self):
+        cfg = self.config.project_board
+        if not cfg.enabled or not cfg.project_number:
+            return None
+        from gg.platforms.github_projects import GitHubProjectsClient
+        owner = cfg.owner or self.config.git.default_branch  # fallback; real owner resolved later
+        # Try to derive owner from git remote
+        try:
+            from gg.utils.git_ops import get_remote_url, parse_remote_url
+            url = get_remote_url(str(self.project_path))
+            parsed_owner, _ = parse_remote_url(url)
+            owner = parsed_owner or cfg.owner
+        except Exception:
+            owner = cfg.owner
+        return GitHubProjectsClient(
+            owner=owner,
+            project_number=cfg.project_number,
+            status_field=cfg.status_field,
+            cwd=str(self.project_path),
+        )
+
+    def _move_to_project_status(self, issue_number: int, status: str) -> None:
+        if self._projects is None:
+            return
+        self._projects.move_issue(issue_number, status)
+
+    def _ensure_gg_labels(self) -> None:
+        if getattr(self, "_labels_ensured", False):
+            return
+        labels = {
+            self.config.task_system.work_label: "fbca04",
+            self.config.task_system.done_label: "0e8a16",
+            self.config.task_system.blocked_label: "d93f0b",
+        }
+        labels = {k: v for k, v in labels.items() if k}
+        if labels:
+            self.platform.ensure_labels(labels)
+        self._labels_ensured = True
 
     def _dirty_workspace_preflight(self, state) -> str | None:
         changes = git_workspace_changes(self.project_path)
@@ -1504,6 +1550,7 @@ class OrchestratorPipeline:
                 state.pr_url = pr_url
                 state.publishing_step = "pr_created"
                 self.store.write(state)
+                self._move_to_project_status(issue.number, self.config.project_board.status_in_review)
                 cancelled = self._cancelled_response(state)
                 if cancelled:
                     return cancelled
@@ -2018,6 +2065,7 @@ class OrchestratorPipeline:
             )
         except Exception:
             return
+        self._move_to_project_status(issue_number, self.config.project_board.status_backlog)
 
     def _mark_issue_needs_input(self, issue_number: int, run_id: str, message: str) -> None:
         try:
@@ -2045,6 +2093,7 @@ class OrchestratorPipeline:
             return
 
     def _mark_issue_done(self, issue_number: int) -> str | None:
+        self._move_to_project_status(issue_number, self.config.project_board.status_done)
         try:
             self.platform.publish_done(
                 issue_number,

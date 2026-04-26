@@ -9,13 +9,13 @@ from gg.platforms.base import GitPlatform, detect_platform
 from gg.platforms.github import GitHubPlatform
 from gg.platforms.gitlab import GitLabPlatform
 
-PlatformFactory = Callable[[str | Path], GitPlatform]
+PlatformFactory = Callable[..., GitPlatform]
 AgentFactory = Callable[[], AgentBackend]
 
 
 _PLATFORM_FACTORIES: dict[str, PlatformFactory] = {
-    "github": lambda project_path: GitHubPlatform(str(project_path)),
-    "gitlab": lambda project_path: GitLabPlatform(str(project_path)),
+    "github": lambda project_path, **kw: GitHubPlatform(str(project_path), **kw),
+    "gitlab": lambda project_path, **kw: GitLabPlatform(str(project_path), **kw),
 }
 
 _AGENT_FACTORIES: dict[str, AgentFactory] = {
@@ -42,16 +42,20 @@ def available_agent_backends() -> tuple[str, ...]:
     return tuple(sorted(_AGENT_FACTORIES))
 
 
-def create_platform(name: str, project_path: str | Path) -> GitPlatform:
+def create_platform(name: str, project_path: str | Path, *, debug: bool = False) -> GitPlatform:
     selected = _normalize_name(name)
     if selected == "auto":
         detected = detect_platform(project_path)
         selected = detected if detected in _PLATFORM_FACTORIES else "github"
     try:
-        return _PLATFORM_FACTORIES[selected](project_path)
+        factory = _PLATFORM_FACTORIES[selected]
     except KeyError as exc:
         supported = ", ".join(("auto", *available_platforms()))
         raise ValueError(f"Unsupported task platform '{name}'. Supported: {supported}") from exc
+    try:
+        return factory(project_path, debug=debug)
+    except TypeError:
+        return factory(project_path)
 
 
 def create_agent_backend(name: str) -> AgentBackend:

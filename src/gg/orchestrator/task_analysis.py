@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import tempfile
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -271,7 +270,7 @@ class TaskAnalyzer:
         try:
             raw = self.agent.generate(
                 prompt,
-                cwd=tempfile.gettempdir(),
+                cwd=str(self.project_path),
                 timeout=self.timeout,
                 context="Task analysis only. Return exactly one JSON object and do not edit files.",
             )

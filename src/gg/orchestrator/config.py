@@ -24,6 +24,19 @@ class TaskSystemConfig:
 
 
 @dataclass(frozen=True)
+class ProjectBoardConfig:
+    enabled: bool = False
+    project_number: int = 0
+    owner: str = ""
+    status_field: str = "Status"
+    status_todo: str = "Todo"
+    status_in_progress: str = "In Progress"
+    status_in_review: str = "In Review"
+    status_done: str = "Done"
+    status_backlog: str = "Backlog"
+
+
+@dataclass(frozen=True)
 class SelectionConfig:
     include_labels: tuple[str, ...] = ("ai-ready",)
     exclude_labels: tuple[str, ...] = ("gg:in-progress", "gg:blocked", "gg:done")
@@ -254,6 +267,7 @@ class GGConfig:
     polling: PollingConfig = field(default_factory=PollingConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     secrets: SecretsConfig = field(default_factory=SecretsConfig)
+    project_board: ProjectBoardConfig = field(default_factory=ProjectBoardConfig)
     profiles: dict[str, dict] = field(default_factory=dict)
 
 
@@ -467,6 +481,7 @@ def load_config(project_path: str | Path, *, profile: str | None = None) -> GGCo
     polling = _mapping(raw.get("polling"))
     agent = _mapping(raw.get("agent"))
     secrets = _mapping(raw.get("secrets"))
+    project_board = _mapping(raw.get("project_board"))
     profiles: dict[str, dict] = raw.get("profiles") or {}
     sandbox_policy = _mapping(runtime.get("sandbox_policy"))
     resource = _mapping(runtime.get("resource"))
@@ -656,6 +671,17 @@ def load_config(project_path: str | Path, *, profile: str | None = None) -> GGCo
                     "allow_from_keyring": secrets.get("allow_from_keyring", False),
                     "forbid_in_project_config": secrets.get("forbid_in_project_config", True),
                 },
+                "project_board": {
+                    "enabled": project_board.get("enabled", False),
+                    "project_number": project_board.get("project_number", 0),
+                    "owner": project_board.get("owner", ""),
+                    "status_field": project_board.get("status_field", "Status"),
+                    "status_todo": project_board.get("status_todo", "Todo"),
+                    "status_in_progress": project_board.get("status_in_progress", "In Progress"),
+                    "status_in_review": project_board.get("status_in_review", "In Review"),
+                    "status_done": project_board.get("status_done", "Done"),
+                    "status_backlog": project_board.get("status_backlog", "Backlog"),
+                },
                 "profiles": profiles,
             }
         )
@@ -814,6 +840,17 @@ def load_config(project_path: str | Path, *, profile: str | None = None) -> GGCo
             allow_from_keyring=model.secrets.allow_from_keyring,
             forbid_in_project_config=model.secrets.forbid_in_project_config,
         ),
+        project_board=ProjectBoardConfig(
+            enabled=model.project_board.enabled,
+            project_number=model.project_board.project_number,
+            owner=model.project_board.owner,
+            status_field=model.project_board.status_field,
+            status_todo=model.project_board.status_todo,
+            status_in_progress=model.project_board.status_in_progress,
+            status_in_review=model.project_board.status_in_review,
+            status_done=model.project_board.status_done,
+            status_backlog=model.project_board.status_backlog,
+        ),
         profiles=model.profiles,
     )
 
@@ -932,6 +969,11 @@ def _reject_unknown_config_keys(raw: dict[str, Any], location: str) -> None:
             "circuit_breaker_cooldown_seconds",
         },
         "secrets": {"allow_from_env", "allow_from_keyring", "forbid_in_project_config"},
+        "project_board": {
+            "enabled", "project_number", "owner", "status_field",
+            "status_todo", "status_in_progress", "status_in_review",
+            "status_done", "status_backlog",
+        },
         "profiles": None,
         # Backward-compatible root-level aliases.
         "platform": None,

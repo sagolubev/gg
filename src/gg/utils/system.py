@@ -70,6 +70,16 @@ def check_grepai() -> CheckResult:
     return CheckResult("grepai", ok, out if ok else "installed", required=False)
 
 
+def check_sandbox_runtime() -> CheckResult:
+    if not shutil.which("srt-py"):
+        return CheckResult(
+            "sandbox-runtime", False, "not found (srt-py)",
+            required=False, install_hint="pip install sandbox-runtime",
+        )
+    ok, out = _run_silent(["srt-py", "--version"])
+    return CheckResult("sandbox-runtime", ok, out if ok else "installed", required=False)
+
+
 def check_openspec() -> CheckResult:
     if not shutil.which("openspec"):
         return CheckResult("openspec", False, "not found", required=False, install_hint="npm install -g openspec")
@@ -85,7 +95,7 @@ def check_python_version() -> CheckResult:
     return CheckResult("python", False, f"{version_str} (need >=3.10)", required=True)
 
 
-ALL_CHECKS = [check_python_version, check_git, check_gh, check_glab, check_codex, check_openspec, check_grepai]
+ALL_CHECKS = [check_python_version, check_git, check_gh, check_glab, check_codex, check_sandbox_runtime, check_openspec, check_grepai]
 
 
 def run_all_checks(*, offer_install: bool = True) -> list[CheckResult]:

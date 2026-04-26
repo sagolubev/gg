@@ -245,6 +245,18 @@ class SecretsConfigModel(StrictArtifactModel):
     forbid_in_project_config: bool = True
 
 
+class ProjectBoardConfigModel(StrictArtifactModel):
+    enabled: bool = False
+    project_number: int = 0
+    owner: str = ""
+    status_field: str = "Status"
+    status_todo: str = "Todo"
+    status_in_progress: str = "In Progress"
+    status_in_review: str = "In Review"
+    status_done: str = "Done"
+    status_backlog: str = "Backlog"
+
+
 class GGConfigModel(StrictArtifactModel):
     git: GitConfigModel
     task_system: TaskSystemConfigModel = Field(default_factory=TaskSystemConfigModel)
@@ -263,6 +275,7 @@ class GGConfigModel(StrictArtifactModel):
     polling: PollingConfigModel = Field(default_factory=PollingConfigModel)
     agent: AgentConfigModel = Field(default_factory=AgentConfigModel)
     secrets: SecretsConfigModel = Field(default_factory=SecretsConfigModel)
+    project_board: ProjectBoardConfigModel = Field(default_factory=ProjectBoardConfigModel)
     profiles: dict[str, Any] = Field(default_factory=dict)
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -13,6 +14,28 @@ from gg.orchestrator.rate_limit import (
     extract_retry_after_seconds,
 )
 from gg.utils.git_ops import get_remote_url, parse_remote_url
+
+
+_GH_DEBUG_LINE = re.compile(
+    r"^("
+    r"\* Request |"
+    r"> [A-Z]+ |"
+    r"< HTTP|"
+    r"< [A-Z][-A-Za-z]+:|"
+    r"\{|"
+    r"GraphQL |"
+    r"\[git "
+    r")",
+)
+
+
+def _extract_error_summary(stderr: str, *, max_chars: int = 500) -> str:
+    lines = stderr.strip().splitlines()
+    meaningful = [ln for ln in lines if not _GH_DEBUG_LINE.match(ln.strip())]
+    summary = "\n".join(meaningful).strip() or stderr.strip()
+    if len(summary) > max_chars:
+        summary = summary[:max_chars] + "..."
+    return summary
 
 
 @dataclass(frozen=True)
@@ -56,8 +79,9 @@ class PlatformCapabilities:
 
 
 class GitPlatform(ABC):
-    def __init__(self, cwd: str = ".", *, rate_limit_store: RateLimitStore | None = None):
+    def __init__(self, cwd: str = ".", *, rate_limit_store: RateLimitStore | None = None, debug: bool = False):
         self._cwd = str(cwd)
+        self._debug = debug
         self._rate_limit_store = rate_limit_store or RateLimitStore(cwd)
         remote_url = get_remote_url(cwd)
         owner, repo = parse_remote_url(remote_url)
@@ -82,6 +106,10 @@ class GitPlatform(ABC):
     def capabilities(self) -> PlatformCapabilities:
         """Describe mutation/read features the adapter supports."""
         return PlatformCapabilities()
+
+    def ensure_labels(self, labels: dict[str, str]) -> list[str]:
+        """Create missing labels in the remote tracker. Returns list of created label names."""
+        return []
 
     def validate_auth(self) -> None:
         """Validate tracker CLI authentication before mutating external state."""
@@ -110,7 +138,17 @@ class GitPlatform(ABC):
     def claim_task(self, issue: Issue, *, run_id: str, work_label: str) -> None:
         """Mark a tracker task as claimed for this orchestrator run."""
         if work_label:
-            self.add_labels(issue.number, [work_label])
+            try:
+                self.add_labels(issue.number, [work_label])
+            except RuntimeError as exc:
+                if "not found" in str(exc).lower():
+                    import logging
+                    logging.getLogger("gg.platform").warning(
+                        "label %r not found in repo -- skipping; create it to enable progress tracking",
+                        work_label,
+                    )
+                else:
+                    raise
         self.add_stage_comment_once(
             issue.number,
             run_id,
@@ -270,7 +308,9 @@ class GitPlatform(ABC):
             if self._looks_rate_limited(result.stderr) or self._looks_rate_limited(result.stdout):
                 snapshot = snapshot or self._backoff(bucket, header_text)
                 raise RateLimitThrottleError(snapshot)
-            raise RuntimeError(f"{self.cli_name()} {' '.join(args)} failed: {result.stderr.strip()}")
+            raise RuntimeError(
+                f"{self.cli_name()} {' '.join(args)} failed: {_extract_error_summary(result.stderr)}"
+            )
         return result.stdout.strip()
 
     def _bucket(self, scope: str) -> str:

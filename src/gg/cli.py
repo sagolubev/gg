@@ -187,7 +187,9 @@ def _build_pipeline(path, *, debug: bool = False, profile: str | None = None):
 
     from gg.agents.codex import CodexAgent
 
-    return OrchestratorPipeline(path, agent=CodexAgent(console=Console(), debug=True), profile=profile)
+    return OrchestratorPipeline(
+        path, agent=CodexAgent(console=Console(), debug=True), profile=profile, debug=True,
+    )
 
 
 @cli.command()

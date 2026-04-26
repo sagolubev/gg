@@ -254,8 +254,9 @@ def push_branch(cwd: str | Path, branch: str) -> None:
 
 
 def apply_patch(cwd: str | Path, patch_text: str) -> tuple[bool, str]:
+    text = patch_text if patch_text.endswith("\n") else patch_text + "\n"
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".diff", delete=False) as handle:
-        handle.write(patch_text)
+        handle.write(text)
         patch_path = handle.name
     try:
         completed = subprocess.run(

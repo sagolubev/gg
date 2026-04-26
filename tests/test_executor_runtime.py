@@ -53,7 +53,7 @@ def test_required_missing_sandbox_runtime_fails_before_agent_generate(tmp_path):
     try:
         executor.run(run_id="run-fail-closed", issue_number=42, brief=task_brief())
     except RuntimeError as exc:
-        assert "sandbox-runtime is required but unavailable" in str(exc)
+        assert "sandbox-runtime" in str(exc) and "not found" in str(exc)
     else:
         raise AssertionError("missing required sandbox should fail before worktree creation")
 

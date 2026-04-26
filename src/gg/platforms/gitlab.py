@@ -40,8 +40,8 @@ def _parse_comments(payload: dict) -> list[IssueComment]:
 
 
 class GitLabPlatform(GitPlatform):
-    def __init__(self, cwd: str = ".", *, rate_limit_store=None):
-        super().__init__(cwd, rate_limit_store=rate_limit_store)
+    def __init__(self, cwd: str = ".", *, rate_limit_store=None, debug: bool = False):
+        super().__init__(cwd, rate_limit_store=rate_limit_store, debug=debug)
 
     def _run(self, args: list[str], *, bucket: str) -> str:
         return self._run_command(args, bucket=bucket)

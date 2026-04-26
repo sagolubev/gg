@@ -35,15 +35,16 @@ def _parse_comments(payload: dict) -> list[IssueComment]:
 
 
 class GitHubPlatform(GitPlatform):
-    def __init__(self, cwd: str = ".", *, rate_limit_store=None):
-        super().__init__(cwd, rate_limit_store=rate_limit_store)
+    def __init__(self, cwd: str = ".", *, rate_limit_store=None, debug: bool = False):
+        super().__init__(cwd, rate_limit_store=rate_limit_store, debug=debug)
 
     def _run(self, args: list[str], *, bucket: str) -> str:
         return self._run_command(args, bucket=bucket)
 
     def _command_env(self) -> dict[str, str]:
         env = super()._command_env()
-        env.setdefault("GH_DEBUG", "api")
+        if self._debug:
+            env.setdefault("GH_DEBUG", "api")
         return env
 
     def capabilities(self) -> PlatformCapabilities:
@@ -129,6 +130,22 @@ class GitHubPlatform(GitPlatform):
                 f"GitHub token is missing required scopes: {', '.join(sorted(missing))}. "
                 f"Token has: {', '.join(sorted(token_scopes))}"
             )
+
+    def ensure_labels(self, labels: dict[str, str]) -> list[str]:
+        existing_raw = self._run(
+            ["label", "list", "--json", "name", "--limit", "200"],
+            bucket=self._bucket("labels:read"),
+        )
+        existing = {item["name"] for item in json.loads(existing_raw)} if existing_raw else set()
+        created: list[str] = []
+        for name, color in labels.items():
+            if name not in existing:
+                self._run(
+                    ["label", "create", name, "--color", color, "--force"],
+                    bucket=self._bucket("labels:write"),
+                )
+                created.append(name)
+        return created
 
     def add_comment(self, issue_number: int, body: str) -> None:
         self._run(["issue", "comment", str(issue_number), "--body", body], bucket=self._bucket("issues:comment"))

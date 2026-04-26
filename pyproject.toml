@@ -18,6 +18,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+sandbox = [
+    "sandbox-runtime>=0.2.0; python_version>='3.11'",
+]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",

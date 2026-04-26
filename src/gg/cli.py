@@ -177,17 +177,17 @@ def constitution(path, debug):
         console.print("Local constitution in .gg/constitution.md is still valid.")
 
 
-def _build_pipeline(path, *, debug: bool = False):
+def _build_pipeline(path, *, debug: bool = False, profile: str | None = None):
     from gg.orchestrator.pipeline import OrchestratorPipeline
 
     if not debug:
-        return OrchestratorPipeline(path)
+        return OrchestratorPipeline(path, profile=profile)
 
     from rich.console import Console
 
     from gg.agents.codex import CodexAgent
 
-    return OrchestratorPipeline(path, agent=CodexAgent(console=Console(), debug=True))
+    return OrchestratorPipeline(path, agent=CodexAgent(console=Console(), debug=True), profile=profile)
 
 
 @cli.command()
@@ -202,6 +202,7 @@ def _build_pipeline(path, *, debug: bool = False):
 @click.option("--timeout", type=int, default=None, help="Override candidate timeout in seconds.")
 @click.option("--base", default=None, help="Override target default branch for publishing.")
 @click.option("--debug", is_flag=True, help="Show Codex output and verbose agent progress.")
+@click.option("--profile", default=None, help="Apply a named config profile from params.yaml profiles section.")
 @click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
 def run(
     path,
@@ -215,6 +216,7 @@ def run(
     timeout,
     base,
     debug,
+    profile,
     as_json,
 ):
     """Supervisor loop: pick issues and orchestrate agents."""
@@ -222,7 +224,7 @@ def run(
 
     from rich.console import Console
 
-    pipeline = _build_pipeline(path, debug=debug).configure_runtime(
+    pipeline = _build_pipeline(path, debug=debug, profile=profile).configure_runtime(
         max_attempts=max_attempts,
         candidates=candidates,
         max_parallel_candidates=max_parallel_candidates,
@@ -268,6 +270,7 @@ def run(
 @click.option("--base", default=None, help="Override target default branch for publishing.")
 @click.option("--label", "labels", multiple=True, help="Additional label to apply to the issue.")
 @click.option("--debug", is_flag=True, help="Show Codex output and verbose agent progress.")
+@click.option("--profile", default=None, help="Apply a named config profile from params.yaml profiles section.")
 @click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
 def issue(
     issue_number,
@@ -282,6 +285,7 @@ def issue(
     base,
     labels,
     debug,
+    profile,
     as_json,
 ):
     """Process a single GitHub issue."""
@@ -289,7 +293,7 @@ def issue(
 
     from rich.console import Console
 
-    result = _build_pipeline(path, debug=debug).configure_runtime(
+    result = _build_pipeline(path, debug=debug, profile=profile).configure_runtime(
         max_attempts=max_attempts,
         candidates=candidates,
         max_parallel_candidates=max_parallel_candidates,

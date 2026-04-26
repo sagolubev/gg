@@ -217,6 +217,8 @@ def _build_pipeline(path, *, debug: bool = False, profile: str | None = None):
 @click.option("--debug", is_flag=True, help="Show Codex output and verbose agent progress.")
 @click.option("--profile", default=None, help="Apply a named config profile from params.yaml profiles section.")
 @click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
+@click.option("--watch", is_flag=True, help="Poll continuously; retry every --poll-interval seconds when no issue found.")
+@click.option("--poll-interval", type=int, default=None, help="Seconds between polls in --watch mode (default: params.yaml polling.poll_interval_seconds).")
 def run(
     path,
     dry_run,
@@ -231,9 +233,12 @@ def run(
     debug,
     profile,
     as_json,
+    watch,
+    poll_interval,
 ):
     """Supervisor loop: pick issues and orchestrate agents."""
     import json
+    import time
 
     from rich.console import Console
 
@@ -246,29 +251,60 @@ def run(
         timeout=timeout,
         base=base,
     )
-    result = (
-        pipeline.run_batch(batch_size=batch_size, dry_run=dry_run, no_pr=no_pr)
-        if batch_size > 1
-        else pipeline.run_next(dry_run=dry_run, no_pr=no_pr)
-    )
-    if as_json:
-        click.echo(json.dumps(result, indent=2, ensure_ascii=False))
-        return
-    console = Console()
-    console.print(f"[bold]{result.get('state')}[/bold] {result.get('message', '')}")
-    if result.get("issue"):
-        issue_data = result["issue"]
-        console.print(f"Next issue: #{issue_data['number']} {issue_data['title']}")
-    if result.get("issues"):
-        for issue_data in result["issues"]:
+
+    def _run_once():
+        return (
+            pipeline.run_batch(batch_size=batch_size, dry_run=dry_run, no_pr=no_pr)
+            if batch_size > 1
+            else pipeline.run_next(dry_run=dry_run, no_pr=no_pr)
+        )
+
+    def _print_result(result):
+        if as_json:
+            click.echo(json.dumps(result, indent=2, ensure_ascii=False))
+            return
+        console = Console()
+        state = result.get("state", "")
+        if state != "NoEligibleIssue":
+            console.print(f"[bold]{state}[/bold] {result.get('message', '')}")
+        if result.get("issue"):
+            issue_data = result["issue"]
             console.print(f"Next issue: #{issue_data['number']} {issue_data['title']}")
-    if result.get("results"):
-        for item in result["results"]:
-            console.print(f"Run: {item.get('run_id')} state={item.get('state')}")
-    if result.get("run_id"):
-        console.print(f"Run: {result['run_id']}")
-    if result.get("pr_url"):
-        console.print(f"PR: {result['pr_url']}")
+        if result.get("issues"):
+            for issue_data in result["issues"]:
+                console.print(f"Next issue: #{issue_data['number']} {issue_data['title']}")
+        if result.get("results"):
+            for item in result["results"]:
+                console.print(f"Run: {item.get('run_id')} state={item.get('state')}")
+        if result.get("run_id"):
+            console.print(f"Run: {result['run_id']}")
+        if result.get("pr_url"):
+            console.print(f"PR: {result['pr_url']}")
+
+    if not watch:
+        result = _run_once()
+        _print_result(result)
+        if as_json and result.get("state") == "NoEligibleIssue":
+            return
+        if result.get("state") == "NoEligibleIssue":
+            console = Console()
+            console.print(f"[bold]NoEligibleIssue[/bold] {result.get('message', '')}")
+        return
+
+    interval = poll_interval if poll_interval is not None else pipeline.config.polling.poll_interval_seconds
+    log = logging.getLogger("gg.watch")
+    log.info("watch mode: polling every %ds (Ctrl+C to stop)", interval)
+    try:
+        while True:
+            result = _run_once()
+            state = result.get("state", "")
+            if state == "NoEligibleIssue":
+                log.info("no eligible issue -- next check in %ds", interval)
+            else:
+                _print_result(result)
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        log.info("watch stopped")
 
 
 @cli.command()

@@ -70,10 +70,11 @@ class OrchestratorPipeline:
         *,
         platform: GitPlatform | None = None,
         agent: AgentBackend | None = None,
+        profile: str | None = None,
     ):
         root = find_repo_root(project_path) or Path(project_path).resolve()
         self.project_path = Path(root).resolve()
-        self.config: GGConfig = load_config(self.project_path)
+        self.config: GGConfig = load_config(self.project_path, profile=profile)
         self.store = RunStore(
             self.project_path,
             audit_hash_events=self.config.audit.hash_events,
@@ -420,6 +421,13 @@ class OrchestratorPipeline:
                 brief = TaskBrief.from_dict(brief_data)
                 issue = self.platform.get_issue(issue_number)
                 if state.state in {TaskState.BLOCKED, TaskState.NEEDS_INPUT}:
+                    if state.blocked_until and not self._timestamp_is_elapsed(state.blocked_until, 0):
+                        return {
+                            "run_id": run_id,
+                            "state": state.state.value,
+                            "resumed": False,
+                            "message": f"Blocked until {state.blocked_until} (clock skew tolerance: {self.config.ci.clock_skew_tolerance_seconds}s).",
+                        }
                     self._ingest_issue_comment_input(state, issue)
                     state = self.store.load(run_id)
                     if _waiting_for_input(state) and not self._has_current_input(state):
@@ -505,6 +513,7 @@ class OrchestratorPipeline:
             )
             stale_runs = self.store.clean_stale_waiting_runs(
                 blocked_timeout_days=self.config.cleanup.blocked_timeout_days,
+                clock_skew_tolerance_seconds=self.config.ci.clock_skew_tolerance_seconds,
                 dry_run=True,
             )
             excluding_runs = set(target_runs + stale_runs)
@@ -525,6 +534,7 @@ class OrchestratorPipeline:
                 )
                 stale_targets = self.store.clean_stale_waiting_runs(
                     blocked_timeout_days=self.config.cleanup.blocked_timeout_days,
+                    clock_skew_tolerance_seconds=self.config.ci.clock_skew_tolerance_seconds,
                     dry_run=False,
                 )
                 orphans = self.store.clean_orphan_worktrees(dry_run=False)

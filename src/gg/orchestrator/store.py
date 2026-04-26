@@ -232,11 +232,14 @@ class RunStore:
         self,
         *,
         blocked_timeout_days: int | None,
+        clock_skew_tolerance_seconds: int = 0,
         dry_run: bool = True,
     ) -> list[str]:
         if blocked_timeout_days is None:
             return []
-        cutoff = datetime.now(timezone.utc) - timedelta(days=blocked_timeout_days)
+        cutoff = datetime.now(timezone.utc) - timedelta(
+            days=blocked_timeout_days, seconds=-clock_skew_tolerance_seconds
+        )
         target_runs = [
             run
             for run in self.list_runs()

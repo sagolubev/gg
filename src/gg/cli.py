@@ -291,12 +291,16 @@ def run(
             console.print(f"[bold]NoEligibleIssue[/bold] {result.get('message', '')}")
         return
 
+    import signal as _signal
+
     interval = poll_interval if poll_interval is not None else pipeline.config.polling.poll_interval_seconds
     log = logging.getLogger("gg.watch")
     log.info("watch mode: polling every %ds (Ctrl+C to stop)", interval)
     try:
         while True:
             result = _run_once()
+            # pipeline may replace SIGINT handler; restore default so sleep is interruptible
+            _signal.signal(_signal.SIGINT, _signal.default_int_handler)
             state = result.get("state", "")
             if state == "NoEligibleIssue":
                 log.info("no eligible issue -- next check in %ds", interval)

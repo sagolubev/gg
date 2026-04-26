@@ -5267,3 +5267,476 @@ def test_agent_config_circuit_breaker_defaults(tmp_path):
     assert config.agent.circuit_breaker_failures == 5
     assert config.agent.circuit_breaker_window_seconds == 600
     assert config.agent.circuit_breaker_cooldown_seconds == 900
+
+
+# ---------------------------------------------------------------------------
+# _resolve_srt_py
+# ---------------------------------------------------------------------------
+
+def test_resolve_srt_py_prefers_venv_bin(tmp_path, monkeypatch):
+    from gg.orchestrator.sandbox import _resolve_srt_py
+
+    fake_bin = tmp_path / "srt-py"
+    fake_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+    fake_bin.chmod(0o755)
+    monkeypatch.setattr("sys.executable", str(tmp_path / "python"))
+
+    result = _resolve_srt_py()
+
+    assert result == str(fake_bin)
+
+
+def test_resolve_srt_py_falls_back_to_path_when_venv_bin_missing(tmp_path, monkeypatch):
+    from gg.orchestrator.sandbox import _resolve_srt_py
+
+    monkeypatch.setattr("sys.executable", str(tmp_path / "python"))
+
+    result = _resolve_srt_py()
+
+    assert result == "srt-py"
+
+
+# ---------------------------------------------------------------------------
+# _lm_api_hosts
+# ---------------------------------------------------------------------------
+
+def test_lm_api_hosts_returns_defaults(monkeypatch):
+    from gg.orchestrator.executor import _lm_api_hosts
+
+    for var in ("AZURE_OPENAI_ENDPOINT", "OPENAI_API_BASE", "OPENAI_BASE_URL"):
+        monkeypatch.delenv(var, raising=False)
+
+    hosts = _lm_api_hosts()
+
+    assert "api.openai.com" in hosts
+    assert "api.anthropic.com" in hosts
+
+
+def test_lm_api_hosts_extracts_azure_endpoint(monkeypatch):
+    from gg.orchestrator.executor import _lm_api_hosts
+
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://my-org.openai.azure.com/")
+    monkeypatch.delenv("OPENAI_API_BASE", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+
+    hosts = _lm_api_hosts()
+
+    assert "my-org.openai.azure.com" in hosts
+
+
+def test_lm_api_hosts_extracts_openai_api_base(monkeypatch):
+    from gg.orchestrator.executor import _lm_api_hosts
+
+    monkeypatch.setenv("OPENAI_API_BASE", "https://proxy.example.com/v1")
+    monkeypatch.delenv("AZURE_OPENAI_ENDPOINT", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+
+    hosts = _lm_api_hosts()
+
+    assert "proxy.example.com" in hosts
+
+
+def test_lm_api_hosts_deduplicates(monkeypatch):
+    from gg.orchestrator.executor import _lm_api_hosts
+
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://api.openai.com/")
+    monkeypatch.delenv("OPENAI_API_BASE", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+
+    hosts = _lm_api_hosts()
+
+    assert hosts.count("api.openai.com") == 1
+
+
+# ---------------------------------------------------------------------------
+# board_status config field
+# ---------------------------------------------------------------------------
+
+def test_board_status_config_loads_from_params(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        "verify:\n  tests: ''\nselection:\n  board_status: Ready\n",
+        encoding="utf-8",
+    )
+
+    config = load_config(tmp_path)
+
+    assert config.selection.board_status == "Ready"
+
+
+def test_board_status_config_defaults_to_empty(tmp_path):
+    init_repo(tmp_path)
+
+    config = load_config(tmp_path)
+
+    assert config.selection.board_status == ""
+
+
+# ---------------------------------------------------------------------------
+# _eligible_issues with board_status filtering
+# ---------------------------------------------------------------------------
+
+class FakeProjectsClient:
+    def __init__(self, issue_numbers: set[int]):
+        self._numbers = issue_numbers
+        self.calls: list[str] = []
+
+    def get_issues_in_status(self, status_name: str) -> set[int]:
+        self.calls.append(status_name)
+        return self._numbers
+
+    def move_issue(self, issue_number: int, status_name: str) -> bool:
+        return True
+
+
+class ErroringProjectsClient:
+    def get_issues_in_status(self, status_name: str) -> set[int]:
+        raise RuntimeError("gh project item-list failed")
+
+    def move_issue(self, issue_number: int, status_name: str) -> bool:
+        return False
+
+
+def test_eligible_issues_filtered_by_board_status(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        "verify:\n  tests: ''\nselection:\n  board_status: Ready\n",
+        encoding="utf-8",
+    )
+    issues = [
+        Issue(number=1, title="One", body="", labels=["ai-ready"]),
+        Issue(number=2, title="Two", body="", labels=["ai-ready"]),
+        Issue(number=3, title="Three", body="", labels=["ai-ready"]),
+    ]
+    projects = FakeProjectsClient({1, 3})
+    platform = MultiIssuePlatform(issues)
+    pipeline = OrchestratorPipeline(tmp_path, platform=platform, agent=FakeAgent())
+    pipeline._projects = projects
+
+    eligible = pipeline._eligible_issues(issues)
+
+    assert [i.number for i in eligible] == [1, 3]
+    assert projects.calls == ["Ready"]
+
+
+def test_eligible_issues_no_filter_when_board_status_empty(tmp_path):
+    init_repo(tmp_path)
+    issues = [
+        Issue(number=1, title="One", body="", labels=["ai-ready"]),
+        Issue(number=2, title="Two", body="", labels=["ai-ready"]),
+    ]
+    pipeline = OrchestratorPipeline(tmp_path, platform=MultiIssuePlatform(issues), agent=FakeAgent())
+
+    eligible = pipeline._eligible_issues(issues)
+
+    assert {i.number for i in eligible} == {1, 2}
+
+
+def test_eligible_issues_board_status_filter_gracefully_skipped_on_error(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        "verify:\n  tests: ''\nselection:\n  board_status: Ready\n",
+        encoding="utf-8",
+    )
+    issues = [Issue(number=42, title="X", body="", labels=["ai-ready"])]
+    pipeline = OrchestratorPipeline(tmp_path, platform=MultiIssuePlatform(issues), agent=FakeAgent())
+    pipeline._projects = ErroringProjectsClient()
+
+    eligible = pipeline._eligible_issues(issues)
+
+    assert len(eligible) == 1
+    assert eligible[0].number == 42
+
+
+# ---------------------------------------------------------------------------
+# get_issues_in_status (GitHubProjectsClient)
+# ---------------------------------------------------------------------------
+
+def _make_projects_client(monkeypatch, output: str, *, owner: str = "acme", project_number: int = 1):
+    from gg.platforms.github_projects import GitHubProjectsClient
+
+    def fake_run(cmd, **kwargs):
+        import subprocess
+        result = subprocess.CompletedProcess(cmd, 0, output, "")
+        return result
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    return GitHubProjectsClient(owner=owner, project_number=project_number)
+
+
+def test_get_issues_in_status_top_level_status_field(monkeypatch):
+    from gg.platforms.github_projects import GitHubProjectsClient
+
+    gh_output = json.dumps({
+        "items": [
+            {"id": "PVTI_1", "content": {"number": 10}, "status": "Ready"},
+            {"id": "PVTI_2", "content": {"number": 20}, "status": "Backlog"},
+        ]
+    })
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, gh_output, "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    client = GitHubProjectsClient(owner="acme", project_number=1)
+    result = client.get_issues_in_status("Ready")
+
+    assert result == {10}
+    assert 20 not in result
+
+
+def test_get_issues_in_status_dict_field_values(monkeypatch, tmp_path):
+    from gg.platforms.github_projects import GitHubProjectsClient
+
+    gh_output = json.dumps({
+        "items": [
+            {"id": "PVTI_1", "content": {"number": 10}, "fieldValues": {"Status": {"name": "Ready"}}},
+            {"id": "PVTI_2", "content": {"number": 20}, "fieldValues": {"Status": {"name": "Backlog"}}},
+        ]
+    })
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, gh_output, "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    client = GitHubProjectsClient(owner="acme", project_number=1)
+    result = client.get_issues_in_status("Ready")
+
+    assert result == {10}
+    assert 20 not in result
+
+
+def test_get_issues_in_status_list_field_values(monkeypatch):
+    from gg.platforms.github_projects import GitHubProjectsClient
+
+    gh_output = json.dumps({
+        "items": [
+            {
+                "id": "PVTI_1",
+                "content": {"number": 5},
+                "fieldValues": [
+                    {"field": {"name": "Status"}, "value": {"name": "Ready"}},
+                ],
+            },
+            {
+                "id": "PVTI_2",
+                "content": {"number": 6},
+                "fieldValues": [
+                    {"field": {"name": "Status"}, "value": {"name": "In Progress"}},
+                ],
+            },
+        ]
+    })
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, gh_output, "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    client = GitHubProjectsClient(owner="acme", project_number=1)
+    result = client.get_issues_in_status("Ready")
+
+    assert result == {5}
+
+
+def test_get_issues_in_status_case_insensitive(monkeypatch):
+    from gg.platforms.github_projects import GitHubProjectsClient
+
+    gh_output = json.dumps({
+        "items": [
+            {"id": "PVTI_1", "content": {"number": 7}, "fieldValues": {"Status": {"name": "READY"}}},
+        ]
+    })
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, gh_output, "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    client = GitHubProjectsClient(owner="acme", project_number=1)
+    result = client.get_issues_in_status("ready")
+
+    assert 7 in result
+
+
+# ---------------------------------------------------------------------------
+# _extract_error_summary
+# ---------------------------------------------------------------------------
+
+def test_extract_error_summary_strips_gh_debug_lines():
+    from gg.platforms.base import _extract_error_summary
+
+    stderr = (
+        "* Request at 2024-01-01\n"
+        "* Request to https://api.github.com\n"
+        "gh: not found\n"
+    )
+    result = _extract_error_summary(stderr)
+
+    assert "gh: not found" in result
+    assert "Request at" not in result
+
+
+def test_extract_error_summary_falls_back_to_raw_when_all_debug():
+    from gg.platforms.base import _extract_error_summary
+
+    stderr = "* Request at 2024-01-01\n* Response took 12ms\n"
+    result = _extract_error_summary(stderr)
+
+    assert len(result) > 0
+
+
+def test_extract_error_summary_truncates_long_output():
+    from gg.platforms.base import _extract_error_summary
+
+    stderr = "error: " + "x" * 600
+    result = _extract_error_summary(stderr, max_chars=100)
+
+    assert len(result) <= 103  # 100 chars + "..."
+    assert result.endswith("...")
+
+
+# ---------------------------------------------------------------------------
+# _setup_logging
+# ---------------------------------------------------------------------------
+
+def test_setup_logging_adds_handler_to_gg_logger():
+    import logging as _logging
+    from gg.cli import _setup_logging
+
+    gg_root = _logging.getLogger("gg")
+    original_handlers = gg_root.handlers[:]
+    gg_root.handlers.clear()
+
+    try:
+        _setup_logging(debug=False)
+        assert len(gg_root.handlers) == 1
+        assert gg_root.level == _logging.INFO
+    finally:
+        gg_root.handlers[:] = original_handlers
+
+
+def test_setup_logging_debug_sets_debug_level():
+    import logging as _logging
+    from gg.cli import _setup_logging
+
+    gg_root = _logging.getLogger("gg")
+    original_handlers = gg_root.handlers[:]
+    gg_root.handlers.clear()
+
+    try:
+        _setup_logging(debug=True)
+        assert gg_root.level == _logging.DEBUG
+    finally:
+        gg_root.handlers[:] = original_handlers
+
+
+def test_setup_logging_does_not_add_duplicate_handlers():
+    import logging as _logging
+    from gg.cli import _setup_logging
+
+    gg_root = _logging.getLogger("gg")
+    original_handlers = gg_root.handlers[:]
+    gg_root.handlers.clear()
+
+    try:
+        _setup_logging()
+        _setup_logging()
+        assert len(gg_root.handlers) == 1
+    finally:
+        gg_root.handlers[:] = original_handlers
+
+
+# ---------------------------------------------------------------------------
+# --watch mode in CLI
+# ---------------------------------------------------------------------------
+
+def test_watch_mode_polls_and_stops_on_keyboard_interrupt(tmp_path):
+    init_repo(tmp_path)
+    runner = CliRunner()
+
+    call_count = 0
+
+    def fake_run_next(*, dry_run, no_pr):
+        nonlocal call_count
+        call_count += 1
+        if call_count >= 2:
+            raise KeyboardInterrupt
+        return {"state": "NoEligibleIssue", "message": "none"}
+
+    with runner.isolated_filesystem():
+        pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
+        pipeline.run_next = fake_run_next
+
+        import gg.cli as cli_module
+        original_build = cli_module._build_pipeline
+
+        def fake_build(path, **kwargs):
+            return pipeline
+
+        cli_module._build_pipeline = fake_build
+        try:
+            result = runner.invoke(
+                cli,
+                ["run", "--path", str(tmp_path), "--watch", "--poll-interval", "0"],
+                catch_exceptions=False,
+            )
+        except KeyboardInterrupt:
+            pass
+        finally:
+            cli_module._build_pipeline = original_build
+
+    assert call_count >= 1
+
+
+def test_watch_mode_uses_poll_interval_from_config(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        "verify:\n  tests: ''\npolling:\n  poll_interval_seconds: 99\n  jitter_seconds: 0\n",
+        encoding="utf-8",
+    )
+
+    config = load_config(tmp_path)
+
+    assert config.polling.poll_interval_seconds == 99
+
+
+# ---------------------------------------------------------------------------
+# ensure_labels (GitHubPlatform)
+# ---------------------------------------------------------------------------
+
+def test_github_ensure_labels_creates_missing_labels(monkeypatch, tmp_path):
+    init_repo(tmp_path)
+    existing_json = json.dumps([{"name": "gg:in-progress"}])
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if "label" in cmd and "list" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, existing_json, "")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    platform = GitHubPlatform(str(tmp_path))
+
+    created = platform.ensure_labels({"gg:done": "0e8a16", "gg:in-progress": "fbca04"})
+
+    assert "gg:done" in created
+    assert "gg:in-progress" not in created
+
+
+def test_github_ensure_labels_skips_existing_labels(monkeypatch, tmp_path):
+    init_repo(tmp_path)
+    existing_json = json.dumps([{"name": "gg:done"}, {"name": "gg:in-progress"}])
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, existing_json, "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    platform = GitHubPlatform(str(tmp_path))
+
+    created = platform.ensure_labels({"gg:done": "0e8a16", "gg:in-progress": "fbca04"})
+
+    assert created == []

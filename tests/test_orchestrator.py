@@ -1304,7 +1304,8 @@ def test_pipeline_no_pr_completes_with_one_candidate(tmp_path):
     assert result["pr_url"] is None
     assert platform.comments
     assert platform.labels == [(42, ["gg:in-progress"]), (42, ["gg:done"])]
-    assert platform.removed_labels == [(42, ["gg:in-progress", "gg:blocked"])]
+    # in_review_label is removed as best-effort even if never set (no-op on real GitHub)
+    assert platform.removed_labels == [(42, ["gg:in-progress", "gg:blocked", "gg:in-review"])]
     runs = list((tmp_path / ".gg" / "runs").glob("*/state.json"))
     assert len(runs) == 1
     run_dir = runs[0].parent

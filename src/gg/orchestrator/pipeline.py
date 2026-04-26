@@ -266,6 +266,7 @@ class OrchestratorPipeline:
             return
         labels = {
             self.config.task_system.work_label: "fbca04",
+            self.config.task_system.in_review_label: "0075ca",
             self.config.task_system.done_label: "0e8a16",
             self.config.task_system.blocked_label: "d93f0b",
         }
@@ -1600,11 +1601,16 @@ class OrchestratorPipeline:
             if cancelled:
                 return cancelled
         self._cleanup_integration_worktree(state)
-        done_error = self._mark_issue_done(issue.number)
-        if done_error:
-            state.fail(code="publish_done_failed", message=done_error)
-            self.store.write(state)
-            return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
+        if no_pr:
+            done_error = self._mark_issue_done(issue.number)
+            if done_error:
+                state.fail(code="publish_done_failed", message=done_error)
+                self.store.write(state)
+                return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
+        else:
+            in_review_error = self._mark_issue_in_review(issue.number)
+            if in_review_error:
+                log.warning("[%s] in-review label swap failed (non-fatal): %s", state.run_id, in_review_error)
         state.publishing_step = "done_marked"
         self.store.write(state)
         state.transition(TaskState.COMPLETED, reason="all publish side effects complete")
@@ -2108,12 +2114,24 @@ class OrchestratorPipeline:
         except Exception:
             return
 
+    def _mark_issue_in_review(self, issue_number: int) -> str | None:
+        try:
+            self.platform.publish_in_review(
+                issue_number,
+                work_label=self.config.task_system.work_label,
+                in_review_label=self.config.task_system.in_review_label,
+            )
+        except Exception as exc:
+            return str(exc)
+        return None
+
     def _mark_issue_done(self, issue_number: int) -> str | None:
         self._move_to_project_status(issue_number, self.config.project_board.status_done)
         try:
             self.platform.publish_done(
                 issue_number,
                 work_label=self.config.task_system.work_label,
+                in_review_label=self.config.task_system.in_review_label,
                 blocked_label=self.config.task_system.blocked_label,
                 done_label=self.config.task_system.done_label,
             )

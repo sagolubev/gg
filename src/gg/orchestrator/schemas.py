@@ -82,6 +82,7 @@ class SelectionConfigModel(StrictArtifactModel):
     include_labels: tuple[str, ...] = ("ai-ready",)
     exclude_labels: tuple[str, ...] = ("gg:in-progress", "gg:blocked", "gg:done")
     order: str = "priority_then_oldest"
+    board_status: str = ""
 
 
 class RuntimeResourceConfigModel(StrictArtifactModel):

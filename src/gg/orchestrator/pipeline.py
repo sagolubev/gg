@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 import hashlib
 import json
+import logging
 import os
 import re
 import signal
@@ -13,6 +14,8 @@ import threading
 import time
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger("gg.pipeline")
 
 from gg.agents.base import AgentBackend
 from gg.agents.codex import CodexAgent
@@ -166,9 +169,11 @@ class OrchestratorPipeline:
                 state = self.store.create(issue, dry_run=dry_run)
                 self._active_run_id = state.run_id
                 state.max_attempts = self.config.runtime.max_attempts
+                log.info("[%s] issue #%d: %s", state.run_id, issue.number, issue.title)
                 self.knowledge.record_issue_picked(issue_number=issue.number, title=issue.title, labels=issue.labels)
                 state.transition(TaskState.CLAIMING, reason="issue selected")
                 self.store.write(state)
+                log.info("[%s] claiming issue #%d", state.run_id, issue.number)
                 dirty_error = self._dirty_workspace_preflight(state)
                 if dirty_error is not None:
                     state.fail(code="dirty_workspace", message=dirty_error)
@@ -189,6 +194,7 @@ class OrchestratorPipeline:
                 state.transition(TaskState.RUN_STARTED, reason="start pipeline")
                 state.transition(TaskState.TASK_ANALYSIS, reason="create task brief")
                 self.store.write(state)
+                log.info("[%s] analyzing task brief for issue #%d", state.run_id, issue.number)
 
                 brief = self._refresh_task_analysis(state, issue)
                 if brief.blocked:
@@ -198,6 +204,7 @@ class OrchestratorPipeline:
                     return self._handle_context_too_large(state, budget_error)
                 state.transition(TaskState.READY_FOR_EXECUTION, reason="task brief ready")
                 self.store.write(state)
+                log.info("[%s] task brief ready, starting execution", state.run_id)
 
                 return self._execute_ready_state(state, issue, brief, no_pr=no_pr)
         except RateLimitThrottleError as exc:
@@ -808,6 +815,7 @@ class OrchestratorPipeline:
         no_pr: bool,
         initial_repair_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        log.info("[%s] selecting agent backend", state.run_id)
         state.transition(TaskState.AGENT_SELECTION, reason="select codex backend")
         if not self.agent.is_available():
             state.transition(TaskState.BLOCKED, reason="agent backend unavailable")
@@ -865,6 +873,7 @@ class OrchestratorPipeline:
 
         baseline = self._run_baseline_verification(state) if self.config.verify.baseline_check else []
 
+        log.info("[%s] launching %d candidate(s)", state.run_id, self.config.runtime.candidates)
         state.transition(TaskState.AGENT_RUNNING, reason="run candidates")
         self.store.write(state)
 
@@ -942,6 +951,7 @@ class OrchestratorPipeline:
             cancelled = self._cancelled_response(state)
             if cancelled:
                 return cancelled
+            log.info("[%s] evaluating candidate results", state.run_id)
             state.transition(TaskState.RESULT_EVALUATION, reason="candidate set quiescent")
             _increment_stage_attempt(state, "evaluation")
             evaluation = evaluator.evaluate(
@@ -1006,12 +1016,14 @@ class OrchestratorPipeline:
                 break
 
         if selected is None:
+            log.info("[%s] all candidates failed", state.run_id)
             state.fail(code="candidate_failed", message="no candidate passed execution and verification")
             self.store.write(state)
             self._mark_issue_failed(issue.number, state.run_id, "no candidate passed execution and verification")
             return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
         winner = selected["candidate"]
         verification_path = selected["verification_path"]
+        log.info("[%s] winner: %s (files: %s)", state.run_id, winner.candidate_id, winner.changed_files)
 
         return self._publish_winner(
             state,
@@ -1145,6 +1157,7 @@ class OrchestratorPipeline:
         port: int | None = None,
     ) -> dict[str, Any]:
         candidate_dir = f"candidates/{candidate_id}"
+        log.info("[%s] running %s (strategy=%s)", state.run_id, candidate_id, strategy)
         handoff_artifact: dict[str, str] = {}
 
         def persist_handoff(handoff) -> str:
@@ -1233,6 +1246,7 @@ class OrchestratorPipeline:
         policy_violations = self._candidate_policy_violations(candidate.worktree_path, final_files)
         effective_status = candidate.status
         error = candidate.error
+        log.info("[%s] %s finished: status=%s files=%s", state.run_id, candidate_id, candidate.status, candidate.changed_files)
         if candidate.status == "success" and not verification_passed:
             effective_status = "failed"
             error = "verification failed"
@@ -1447,6 +1461,7 @@ class OrchestratorPipeline:
         *,
         no_pr: bool,
     ) -> dict[str, Any]:
+        log.info("[%s] publishing results", state.run_id)
         if state.state is not TaskState.OUTCOME_PUBLISHING:
             state.transition(TaskState.OUTCOME_PUBLISHING, reason="publish selected candidate")
         cancelled = self._cancelled_response(state)
@@ -1596,6 +1611,7 @@ class OrchestratorPipeline:
         state.publishing_step = "completed"
         state.artifacts["run_outcome"] = self._write_run_outcome(state, winner)
         self.store.write(state)
+        log.info("[%s] completed -- PR: %s", state.run_id, state.pr_url or "(no PR)")
         return {
             "run_id": state.run_id,
             "state": state.state.value,
@@ -2200,10 +2216,17 @@ class OrchestratorPipeline:
         }
 
     def _eligible_issues(self, issues: list[Issue]) -> list[Issue]:
-        return sorted(
-            [issue for issue in issues if self._issue_eligibility_reason(issue) == "eligible"],
-            key=lambda issue: (_priority_rank(issue.labels), issue.number),
-        )
+        eligible = [issue for issue in issues if self._issue_eligibility_reason(issue) == "eligible"]
+        board_status = self.config.selection.board_status.strip()
+        if board_status and self._projects is not None:
+            try:
+                allowed = self._projects.get_issues_in_status(board_status)
+                before = len(eligible)
+                eligible = [i for i in eligible if i.number in allowed]
+                log.info("board_status filter %r: %d -> %d eligible issues", board_status, before, len(eligible))
+            except Exception as exc:
+                log.warning("board_status filter failed, skipping: %s", exc)
+        return sorted(eligible, key=lambda issue: (_priority_rank(issue.labels), issue.number))
 
     def _issue_selection_summary(self, issue: Issue, *, override_reason: str | None = None) -> dict[str, Any]:
         return {

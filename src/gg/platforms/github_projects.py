@@ -36,6 +36,32 @@ class GitHubProjectsClient:
 
     # ------------------------------------------------------------------ public
 
+    def get_issues_in_status(self, status_name: str) -> set[int]:
+        """Return issue numbers whose project status matches status_name (case-insensitive)."""
+        items = self._paginate_items()
+        result: set[int] = set()
+        for item in items:
+            content = item.get("content") or {}
+            num = content.get("number")
+            if num is None:
+                continue
+            field_values = item.get("fieldValues") or {}
+            # gh project item-list --format json returns fieldValues as a dict or list
+            status_val = ""
+            if isinstance(field_values, dict):
+                for key, val in field_values.items():
+                    if isinstance(val, dict) and "name" in val:
+                        status_val = val["name"]
+                        break
+            elif isinstance(field_values, list):
+                for fv in field_values:
+                    if isinstance(fv, dict) and fv.get("field", {}).get("name", "").lower() == self.status_field.lower():
+                        status_val = fv.get("value", {}).get("name", "")
+                        break
+            if status_val.lower() == status_name.lower():
+                result.add(num)
+        return result
+
     def move_issue(self, issue_number: int, status_name: str) -> bool:
         """Move issue to status_name. Returns True on success, False on any error."""
         try:

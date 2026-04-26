@@ -1,8 +1,19 @@
+import logging
 from pathlib import Path
 
 import click
 
 from gg import __version__
+
+
+def _setup_logging(debug: bool = False) -> None:
+    level = logging.DEBUG if debug else logging.INFO
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(asctime)s  %(message)s", datefmt="%H:%M:%S"))
+    root = logging.getLogger("gg")
+    root.setLevel(level)
+    if not root.handlers:
+        root.addHandler(handler)
 
 
 @click.group()
@@ -226,6 +237,7 @@ def run(
 
     from rich.console import Console
 
+    _setup_logging(debug)
     pipeline = _build_pipeline(path, debug=debug, profile=profile).configure_runtime(
         max_attempts=max_attempts,
         candidates=candidates,
@@ -295,6 +307,7 @@ def issue(
 
     from rich.console import Console
 
+    _setup_logging(debug)
     result = _build_pipeline(path, debug=debug, profile=profile).configure_runtime(
         max_attempts=max_attempts,
         candidates=candidates,

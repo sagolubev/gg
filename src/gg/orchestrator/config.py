@@ -41,6 +41,7 @@ class SelectionConfig:
     include_labels: tuple[str, ...] = ("ai-ready",)
     exclude_labels: tuple[str, ...] = ("gg:in-progress", "gg:blocked", "gg:done")
     order: str = "priority_then_oldest"
+    board_status: str = ""
 
 
 @dataclass(frozen=True)
@@ -705,6 +706,7 @@ def load_config(project_path: str | Path, *, profile: str | None = None) -> GGCo
             include_labels=model.selection.include_labels,
             exclude_labels=model.selection.exclude_labels,
             order=model.selection.order,
+            board_status=model.selection.board_status,
         ),
         verify=VerifyConfig(
             setup=model.verify.setup,

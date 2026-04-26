@@ -2234,16 +2234,29 @@ class OrchestratorPipeline:
         }
 
     def _eligible_issues(self, issues: list[Issue]) -> list[Issue]:
-        eligible = [issue for issue in issues if self._issue_eligibility_reason(issue) == "eligible"]
         board_status = self.config.selection.board_status.strip()
         if board_status and self._projects is not None:
             try:
                 allowed = self._projects.get_issues_in_status(board_status)
+                # The initial list_issues fetch uses a low limit and may miss older issues.
+                # Supplement with any board-listed issue not already present.
+                by_number = {i.number: i for i in issues}
+                for num in allowed:
+                    if num not in by_number:
+                        try:
+                            by_number[num] = self.platform.get_issue(num)
+                        except Exception:
+                            pass
+                issues = list(by_number.values())
+                eligible = [i for i in issues if self._issue_eligibility_reason(i) == "eligible"]
                 before = len(eligible)
                 eligible = [i for i in eligible if i.number in allowed]
                 log.info("board_status filter %r: %d -> %d eligible issues", board_status, before, len(eligible))
             except Exception as exc:
                 log.warning("board_status filter failed, skipping: %s", exc)
+                eligible = [i for i in issues if self._issue_eligibility_reason(i) == "eligible"]
+        else:
+            eligible = [issue for issue in issues if self._issue_eligibility_reason(issue) == "eligible"]
         return sorted(eligible, key=lambda issue: (_priority_rank(issue.labels), issue.number))
 
     def _issue_selection_summary(self, issue: Issue, *, override_reason: str | None = None) -> dict[str, Any]:

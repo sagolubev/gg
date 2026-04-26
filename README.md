@@ -1,147 +1,150 @@
 # gg -- Agent Orchestrator
 
-Оркестратор AI-агентов: берет задачу из бэклога, прогоняет через пайплайн и доводит до PR.
+`gg` is a local orchestrator that turns backlog work into a durable execution pipeline:
 
+- picks an issue from GitHub or GitLab,
+- claims it,
+- analyzes the task against repo context,
+- fans out candidates in isolated worktrees,
+- verifies them with tests and other checks,
+- evaluates the results,
+- publishes the outcome as a comment and optional PR,
+- moves PR-backed work into review instead of marking it done immediately,
+- persists the whole run under `.gg/runs/<run_id>/`.
+
+The current implementation is centered around a durable state machine, resumable artifacts, sandbox-aware execution, and operator recovery commands.
+
+**How It Works**
+
+1. `gg init` creates `.gg/params.yaml`, operational `.gitignore` entries, and repo-local runtime defaults.
+2. `gg issue <n>` or `gg run` creates a run record, claims the task, and writes state transitions into `.gg/runs/<run_id>/state.json`.
+3. Task analysis builds a `task-brief` from the issue, comments, local inputs, and repo context from the knowledge engine.
+4. The orchestrator allocates candidate worktrees, runs agents, captures patches and artifacts, and executes verification commands.
+5. Deterministic evaluation selects a winner or requests repair / input.
+6. Publishing applies the winning patch in an integration worktree, optionally pushes a branch, creates or reuses a PR, posts result comments, and:
+   for `--no-pr` marks the issue done, for PR mode swaps `work_label` to `in_review_label`.
+7. Selection can also filter by project-board status and will fetch board-listed issues that were missed by the initial `list_issues` limit.
+8. `gg resume`, `gg retry`, `gg provide`, `gg cancel`, `gg clean`, and `gg status` operate entirely from durable state.
+
+**State Graph**
+
+```mermaid
+flowchart TD
+    ExternalTaskReady["ExternalTaskReady"] --> Claiming["Claiming"]
+    Claiming --> Queued["Queued"]
+    Queued --> RunStarted["RunStarted"]
+    RunStarted --> TaskAnalysis["TaskAnalysis"]
+    TaskAnalysis -->|missing info| Blocked["Blocked"]
+    TaskAnalysis -->|ready brief| ReadyForExecution["ReadyForExecution"]
+    Blocked --> TaskAnalysis
+    Blocked --> AgentSelection
+    ReadyForExecution --> AgentSelection["AgentSelection"]
+    AgentSelection --> AgentRunning["AgentRunning"]
+    AgentSelection --> TerminalFailure["TerminalFailure"]
+    AgentRunning --> ResultEvaluation["ResultEvaluation"]
+    AgentRunning --> NeedsInput["NeedsInput"]
+    ResultEvaluation -->|winner| OutcomePublishing["OutcomePublishing"]
+    ResultEvaluation -->|repair| AgentRunning
+    ResultEvaluation -->|input needed| NeedsInput
+    ResultEvaluation -->|failed| TerminalFailure
+    NeedsInput --> AgentRunning
+    NeedsInput --> TerminalFailure
+    OutcomePublishing --> Completed["Completed"]
+    OutcomePublishing --> TerminalFailure
 ```
-GitHub/GitLab Issue --> gg run --> Research --> Plan --> Implement --> Test --> PR --> Review
-                                    |                                           |
-                                    +--- knowledge update                       +--- rework if needed
-```
 
-## Pipeline
+**Runtime Model**
 
-### Full cycle (what `gg run` does)
+- **Durable state**: each run has `state.json`, `pipeline.jsonl`, `errors.jsonl`, `cost.jsonl`, versioned task briefs, context snapshots, candidate artifacts, evaluation artifacts, and run summaries.
+- **Worktree isolation**: every candidate runs in its own git worktree under `.gg-worktrees/`.
+- **Sandbox-aware execution**: Codex execution can run through `sandbox-runtime`; preflight artifacts record whether the sandbox is required and available.
+- **Verification-first evaluation**: candidates are scored only after verification results, policy checks, mutation checks, and baseline comparison.
+- **Idempotent publish flow**: publishing stays in `OutcomePublishing` until all side effects are complete.
+- **Tracker semantics**: PR-backed runs move issues into `in review`; local / no-PR runs mark them done directly.
+- **Recovery**: interrupted runs can be resumed from durable state; blocked and needs-input runs can be reactivated with issue comments or `gg provide`.
 
-1. **Pick issue** -- берёт issue из GitHub/GitLab (по приоритету, assignee, labels)
-2. **Research** -- Codex анализирует issue, находит релевантные файлы через knowledge base
-3. **Plan** -- формирует план изменений с учётом constitution и risk register
-4. **Implement** -- Codex пишет код в изолированном worktree
-5. **Test** -- запускает тесты, lint, typecheck
-6. **PR** -- создаёт pull request с описанием
-7. **Review** -- agentic code review по PR checklist
-8. **Rework** -- если review/тесты не прошли, возвращается на шаг 3
-
-Каждый шаг записывает события в knowledge system. Агент учится на ошибках.
-
-### What works now
-
-- **`gg init`** -- полная подготовка проекта для автономной работы агента
-- **`gg constitution`** -- генерация конституции через Codex
-- **`gg knowledge`** -- поиск, rebuild, stats по knowledge base
-- **`gg run`**, **`gg issue`**, **`gg review`** -- pipeline (в разработке)
-
-## Install
+**Key Commands**
 
 ```bash
-pip install git+https://github.com/sagolubev/gg.git
-```
-
-Python >= 3.10.
-
-## Prerequisites
-
-**Required:** `git`
-
-**Optional (detected at init, install suggested):**
-
-| Tool | Purpose | Install |
-|------|---------|---------|
-| `codex` | AI-generated constitution, code implementation | `npm install -g @openai/codex` |
-| `gh` | GitHub issues/PRs | `brew install gh` |
-| `glab` | GitLab issues/MRs | `brew install glab` |
-| `openspec` | Spec-as-code artifacts | `npm install -g openspec` |
-| `grepai` | Semantic code search | `brew install yoanbernabeu/tap/grepai` |
-
-## Quick Start
-
-```bash
-cd your-project
-
-# Initialize (local analysis + Codex constitution, ~1 min)
 gg init
-
-# Or without Codex (purely local, ~30s)
-gg init --skip-codex
-
-# See what was generated
-cat .gg/constitution.md
-cat .gg/knowledge/risk-register.md
-cat .gg/knowledge/intel/api-inventory.md
+gg doctor --json
+gg issue 42
+gg issue 42 --dry-run
+gg issue 42 --no-pr
+gg run
+gg run --debug
+gg resume <run-id>
+gg retry <run-id>
+gg provide <run-id> --message "Use Spanish"
+gg cancel <run-id> --abandon-worktrees
+gg clean --dry-run
+gg status --json
 ```
 
-## What `gg init` Produces
+**Configuration**
 
-### For the agent (how to work)
+Main runtime policy lives in `.gg/params.yaml`.
 
-| File | Content |
-|------|---------|
-| `.gg/constitution.md` | Coding rules specific to this project (Codex or local) |
-| `AGENTS.md` | Instructions for Codex (existing preserved, gaps filled) |
-| `CLAUDE.md` | Instructions for Claude Code |
-| `.gg/goals.md` | Project goals -- edit to guide agent priorities |
-| `.gg/knowledge/intel/pr-checklist.md` | What to check before creating PR |
-| `.gg/knowledge/intel/style-exemplars.md` | "Golden" files to copy patterns from |
-| `.gg/knowledge/intel/test-examples.md` | How tests look in this project |
+Important sections:
 
-### For understanding the project (what exists)
+- `task_system`: platform selection, labels, claim / in-review / done semantics.
+- `selection`: include / exclude labels plus optional `board_status`.
+- `runtime`: candidate fanout, timeouts, sandbox/runtime settings, network policy, disk policy, port range.
+- `verify`: setup/test/lint/typecheck/security/custom commands, baseline policy, advisory vs required checks.
+- `analysis`: issue/comment/context limits and context budget policy.
+- `audit`: event hashing, artifact hashing, external audit sink.
+- `cost`: optional budgets for exact token / USD metrics.
+- `cleanup`: `blocked_timeout_days`, `keep_last`, `ttl_days`.
+- `agent`: Codex command and backend retry / breaker settings.
 
-| File | Content |
-|------|---------|
-| `.gg/knowledge/intel/api-inventory.md` | All API endpoints with file:line |
-| `.gg/knowledge/intel/db-schema.md` | Tables, columns, relations |
-| `.gg/knowledge/intel/components.md` | React/Vue component tree |
-| `.gg/knowledge/fact-registry.md` | Contributors, hot files, ownership, velocity |
-| `.gg/knowledge/codebase-insights.md` | Env vars, TODO markers, top imports |
+**Artifacts**
 
-### For risk awareness (what to be careful with)
+Typical run layout:
 
-| File | Content |
-|------|---------|
-| `.gg/knowledge/risk-register.md` | Bus factor, missing tests, high-risk files |
-| `.gg/knowledge/decisions/` | Auto-generated ADRs from architectural commits |
-| `openspec/` | OpenSpec-compatible project specs |
+```text
+.gg/
+  params.yaml
+  runs/<run_id>/
+    state.json
+    pipeline.jsonl
+    errors.jsonl
+    cost.jsonl
+    artifacts/
+      task-brief-vN.json
+      raw-issue-vN.json
+      context-snapshot-vN.json
+      candidate-selection.json
+      evaluation.json
+      run-outcome.json
+      run-summary.json
+    candidates/<candidate_id>/
+      agent-handoff.json
+      agent-result.json
+      candidate-result.json
+      patch.diff
+      verification.json
+```
 
-### Knowledge system (grows automatically)
+**Execution Semantics**
 
-Event-sourced: every pipeline action writes to JSONL log. Compiled views (markdown) rebuild automatically after PR merge or every 10 events.
+- Dry-run uses a shadow store and does not create durable run artifacts in the repo.
+- Dirty non-`.gg` workspaces are blocked unless an explicit base is provided.
+- Context budgets are enforced after task analysis.
+- Cleanup respects terminal retention policy and reports reclaimable bytes.
+- Cost budgets activate only when exact `token_usage` or `total_usd` metrics are present.
+- Artifact checksums validate persisted sanitized bytes when `audit.hash_artifacts: true`.
+- Board-based selection can supplement the initial issue list with older board-listed issues missing from the first fetch window.
+
+**Testing**
+
+Run the current suite with:
 
 ```bash
-gg knowledge search "authentication"     # search across all knowledge
-gg knowledge context "Add OAuth login"   # build agent context for an issue
-gg knowledge rebuild                     # full recompile from events + git
-gg knowledge stats                       # event counts and types
+uv run --extra dev pytest -q
 ```
 
-## Commands
+If sandbox integration is needed on Python 3.11+, install the optional extra:
 
 ```bash
-# Project setup
-gg init                          # full init (~1 min with Codex)
-gg init --skip-codex             # local only (~30s)
-gg init --skip-knowledge         # skip knowledge build (large repos)
-gg init --deep                   # + Codex audit (security, quality, errors, config)
-gg init --debug                  # show Codex output
-gg constitution                  # regenerate constitution via Codex
-
-# Knowledge
-gg knowledge search <query>      # keyword search
-gg knowledge context <title>     # build context for issue
-gg knowledge rebuild             # full rebuild
-gg knowledge stats               # statistics
-
-# Pipeline (coming soon)
-gg run                           # supervisor loop
-gg issue <N>                     # process single issue
-gg review <N>                    # agentic code review
-gg status                        # show active tasks
+uv sync --extra sandbox --extra dev
 ```
-
-## Platforms
-
-Auto-detected from git remote URL:
-- **GitHub** -- issues and PRs via `gh` CLI
-- **GitLab** -- issues and MRs via `glab` CLI
-
-## License
-
-MIT

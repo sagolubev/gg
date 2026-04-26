@@ -1,24 +1,54 @@
 from __future__ import annotations
 
 import json
-import subprocess
 
-from gg.platforms.base import GitPlatform, Issue
+from gg.platforms.base import GitPlatform, Issue, IssueComment, PlatformCapabilities
+
+MAX_COMMENTS = 20
+MAX_COMMENT_CHARS = 4000
+
+
+def _parse_comments(payload: dict) -> list[IssueComment]:
+    raw_comments = payload.get("comments") or []
+    if isinstance(raw_comments, dict):
+        raw_comments = raw_comments.get("nodes") or raw_comments.get("edges") or raw_comments.get("items") or []
+    if not isinstance(raw_comments, list):
+        return []
+    comments: list[IssueComment] = []
+    for item in raw_comments:
+        node = item.get("node", item) if isinstance(item, dict) else {}
+        body = str(node.get("body") or node.get("bodyText") or "").strip()
+        if not body:
+            continue
+        author = node.get("author") or {}
+        if isinstance(author, dict):
+            author = author.get("login") or author.get("name") or ""
+        comments.append(
+            IssueComment(
+                body=body[:MAX_COMMENT_CHARS],
+                author=str(author or ""),
+                created_at=str(node.get("createdAt") or ""),
+                url=str(node.get("url") or ""),
+            )
+        )
+    return comments[-MAX_COMMENTS:]
 
 
 class GitHubPlatform(GitPlatform):
-    def __init__(self, cwd: str = "."):
-        self._cwd = cwd
+    def __init__(self, cwd: str = ".", *, rate_limit_store=None, debug: bool = False):
+        super().__init__(cwd, rate_limit_store=rate_limit_store, debug=debug)
 
-    def _run(self, args: list[str]) -> str:
-        result = subprocess.run(
-            ["gh", *args],
-            capture_output=True, text=True, timeout=30,
-            cwd=self._cwd,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"gh {' '.join(args)} failed: {result.stderr.strip()}")
-        return result.stdout.strip()
+    def _run(self, args: list[str], *, bucket: str) -> str:
+        return self._run_command(args, bucket=bucket)
+
+    def _command_env(self) -> dict[str, str]:
+        env = super()._command_env()
+        if self._debug:
+            env.setdefault("GH_DEBUG", "api")
+        return env
+
+    def capabilities(self) -> PlatformCapabilities:
+        return PlatformCapabilities(labels=True, find_pr=True)
 
     def list_issues(self, state: str = "open", limit: int = 30) -> list[Issue]:
         raw = self._run([
@@ -26,7 +56,7 @@ class GitHubPlatform(GitPlatform):
             "--state", state,
             "--limit", str(limit),
             "--json", "number,title,body,labels,assignees,state,url",
-        ])
+        ], bucket=self._bucket("issues:read"))
         items = json.loads(raw) if raw else []
         return [
             Issue(
@@ -44,8 +74,8 @@ class GitHubPlatform(GitPlatform):
     def get_issue(self, number: int) -> Issue:
         raw = self._run([
             "issue", "view", str(number),
-            "--json", "number,title,body,labels,assignees,state,url",
-        ])
+            "--json", "number,title,body,labels,assignees,state,url,comments",
+        ], bucket=self._bucket("issues:read"))
         i = json.loads(raw)
         return Issue(
             number=i["number"],
@@ -55,6 +85,7 @@ class GitHubPlatform(GitPlatform):
             assignees=[a["login"] for a in i.get("assignees", [])],
             state=i.get("state", "open"),
             url=i.get("url", ""),
+            comments=_parse_comments(i),
         )
 
     def create_pr(self, *, title: str, body: str, head: str, base: str) -> str:
@@ -64,11 +95,74 @@ class GitHubPlatform(GitPlatform):
             "--body", body,
             "--head", head,
             "--base", base,
-        ])
+        ], bucket=self._bucket("pull-requests:write"))
         return raw
 
+    def find_pr(self, *, head: str) -> str | None:
+        raw = self._run([
+            "pr", "list",
+            "--state", "open",
+            "--head", head,
+            "--limit", "1",
+            "--json", "url",
+        ], bucket=self._bucket("pull-requests:read"))
+        items = json.loads(raw) if raw else []
+        return items[0]["url"] if items else None
+
+    REQUIRED_SCOPES = frozenset({"repo", "read:org"})
+
+    def validate_auth(self) -> None:
+        output = self._run(["auth", "status"], bucket=self._bucket("auth"))
+        token_scopes: set[str] = set()
+        saw_scopes = False
+        for line in output.splitlines():
+            line = line.strip().lower()
+            if "token scopes:" in line or "oauth scopes:" in line:
+                saw_scopes = True
+                scopes_part = line.split(":", 1)[1] if ":" in line else ""
+                token_scopes = {s.strip().strip("'\"") for s in scopes_part.split(",") if s.strip()}
+                break
+        if not saw_scopes:
+            raise RuntimeError("GitHub token scopes could not be determined from gh auth status output")
+        if not token_scopes.issuperset(self.REQUIRED_SCOPES):
+            missing = self.REQUIRED_SCOPES - token_scopes
+            raise RuntimeError(
+                f"GitHub token is missing required scopes: {', '.join(sorted(missing))}. "
+                f"Token has: {', '.join(sorted(token_scopes))}"
+            )
+
+    def ensure_labels(self, labels: dict[str, str]) -> list[str]:
+        existing_raw = self._run(
+            ["label", "list", "--json", "name", "--limit", "200"],
+            bucket=self._bucket("labels:read"),
+        )
+        existing = {item["name"] for item in json.loads(existing_raw)} if existing_raw else set()
+        created: list[str] = []
+        for name, color in labels.items():
+            if name not in existing:
+                self._run(
+                    ["label", "create", name, "--color", color, "--force"],
+                    bucket=self._bucket("labels:write"),
+                )
+                created.append(name)
+        return created
+
     def add_comment(self, issue_number: int, body: str) -> None:
-        self._run(["issue", "comment", str(issue_number), "--body", body])
+        self._run(["issue", "comment", str(issue_number), "--body", body], bucket=self._bucket("issues:comment"))
+
+    def add_labels(self, issue_number: int, labels: list[str]) -> None:
+        if labels:
+            self._run(
+                ["issue", "edit", str(issue_number), "--add-label", ",".join(labels)],
+                bucket=self._bucket("issues:labels"),
+            )
+
+    def remove_labels(self, issue_number: int, labels: list[str]) -> None:
+        if labels:
+            self._run(
+                ["issue", "edit", str(issue_number), "--remove-label", ",".join(labels)],
+                bucket=self._bucket("issues:labels"),
+            )
 
     def cli_name(self) -> str:
         return "gh"

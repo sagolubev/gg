@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 
 from gg.knowledge.events import Event, EventLog, EventType

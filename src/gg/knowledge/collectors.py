@@ -6,7 +6,6 @@ entities, or decisions that the compiler writes to disk.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from gg.knowledge.events import Event, EventType
 

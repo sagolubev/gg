@@ -1,6 +1,4 @@
 import json
-import os
-import tempfile
 from pathlib import Path
 
 from gg.analyzers.dependencies import analyze_dependencies

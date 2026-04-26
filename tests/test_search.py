@@ -2,7 +2,7 @@ import subprocess
 from pathlib import Path
 
 from gg.knowledge.engine import KnowledgeEngine
-from gg.knowledge.search import KnowledgeSearch, _score, _tokenize
+from gg.knowledge.search import _score, _tokenize
 
 
 class TestTokenize:

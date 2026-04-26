@@ -118,7 +118,7 @@ def _init_openspec(project_path: Path, console: Console) -> bool:
         if result.returncode == 0:
             console.print("  [green]openspec initialized[/green]")
             return True
-        console.print(f"  [yellow]openspec init failed, creating manually[/yellow]")
+        console.print("  [yellow]openspec init failed, creating manually[/yellow]")
     return False
 
 

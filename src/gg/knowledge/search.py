@@ -17,9 +17,6 @@ from gg.knowledge.collectors import (
     collect_entities_from_events,
     collect_error_patterns,
     collect_facts_from_events,
-    Decision,
-    Entity,
-    Fact,
 )
 from gg.knowledge.events import Event, EventLog, EventType
 
@@ -143,7 +140,7 @@ class KnowledgeSearch:
         risk_path = self._knowledge / "risk-register.md"
         if risk_path.exists():
             risk_content = risk_path.read_text(encoding="utf-8")
-            high_risks = [l for l in risk_content.splitlines() if "| High |" in l]
+            high_risks = [line for line in risk_content.splitlines() if "| High |" in line]
             if high_risks:
                 sections.append("\n## High-Priority Risks\n")
                 for line in high_risks[:5]:

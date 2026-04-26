@@ -1,6 +1,19 @@
+import logging
+from pathlib import Path
+
 import click
 
 from gg import __version__
+
+
+def _setup_logging(debug: bool = False) -> None:
+    level = logging.DEBUG if debug else logging.INFO
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(asctime)s  %(message)s", datefmt="%H:%M:%S"))
+    root = logging.getLogger("gg")
+    root.setLevel(level)
+    if not root.handlers:
+        root.addHandler(handler)
 
 
 @click.group()
@@ -175,23 +188,369 @@ def constitution(path, debug):
         console.print("Local constitution in .gg/constitution.md is still valid.")
 
 
+def _build_pipeline(path, *, debug: bool = False, profile: str | None = None):
+    from gg.orchestrator.pipeline import OrchestratorPipeline
+
+    if not debug:
+        return OrchestratorPipeline(path, profile=profile)
+
+    from rich.console import Console
+
+    from gg.agents.codex import CodexAgent
+
+    return OrchestratorPipeline(
+        path, agent=CodexAgent(console=Console(), debug=True), profile=profile, debug=True,
+    )
+
+
 @cli.command()
-def run():
+@click.option("--path", type=click.Path(exists=True), default=".", help="Project path.")
+@click.option("--dry-run", is_flag=True, help="Show the next eligible issue without side effects.")
+@click.option("--no-pr", is_flag=True, help="Run locally without creating a pull request.")
+@click.option("--batch", "batch_size", default=1, show_default=True, help="Process up to N eligible issues.")
+@click.option("--max-attempts", type=int, default=None, help="Override execution/evaluation attempt limit.")
+@click.option("--candidates", type=int, default=None, help="Override initial candidate fanout.")
+@click.option("--max-parallel-candidates", type=int, default=None, help="Override parallel candidate limit.")
+@click.option("--repair-fanout", type=int, default=None, help="Override repair candidate fanout.")
+@click.option("--timeout", type=int, default=None, help="Override candidate timeout in seconds.")
+@click.option("--base", default=None, help="Override target default branch for publishing.")
+@click.option("--debug", is_flag=True, help="Show Codex output and verbose agent progress.")
+@click.option("--profile", default=None, help="Apply a named config profile from params.yaml profiles section.")
+@click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
+@click.option("--watch", is_flag=True, help="Poll continuously; retry every --poll-interval seconds when no issue found.")
+@click.option("--poll-interval", type=int, default=None, help="Seconds between polls in --watch mode (default: params.yaml polling.poll_interval_seconds).")
+def run(
+    path,
+    dry_run,
+    no_pr,
+    batch_size,
+    max_attempts,
+    candidates,
+    max_parallel_candidates,
+    repair_fanout,
+    timeout,
+    base,
+    debug,
+    profile,
+    as_json,
+    watch,
+    poll_interval,
+):
     """Supervisor loop: pick issues and orchestrate agents."""
-    click.echo("Not implemented yet.")
+    import json
+    import time
+
+    from rich.console import Console
+
+    _setup_logging(debug)
+    pipeline = _build_pipeline(path, debug=debug, profile=profile).configure_runtime(
+        max_attempts=max_attempts,
+        candidates=candidates,
+        max_parallel_candidates=max_parallel_candidates,
+        repair_fanout=repair_fanout,
+        timeout=timeout,
+        base=base,
+    )
+
+    def _run_once():
+        return (
+            pipeline.run_batch(batch_size=batch_size, dry_run=dry_run, no_pr=no_pr)
+            if batch_size > 1
+            else pipeline.run_next(dry_run=dry_run, no_pr=no_pr)
+        )
+
+    def _print_result(result):
+        if as_json:
+            click.echo(json.dumps(result, indent=2, ensure_ascii=False))
+            return
+        console = Console()
+        state = result.get("state", "")
+        if state != "NoEligibleIssue":
+            console.print(f"[bold]{state}[/bold] {result.get('message', '')}")
+        if result.get("issue"):
+            issue_data = result["issue"]
+            console.print(f"Next issue: #{issue_data['number']} {issue_data['title']}")
+        if result.get("issues"):
+            for issue_data in result["issues"]:
+                console.print(f"Next issue: #{issue_data['number']} {issue_data['title']}")
+        if result.get("results"):
+            for item in result["results"]:
+                console.print(f"Run: {item.get('run_id')} state={item.get('state')}")
+        if result.get("run_id"):
+            console.print(f"Run: {result['run_id']}")
+        if result.get("pr_url"):
+            console.print(f"PR: {result['pr_url']}")
+
+    if not watch:
+        result = _run_once()
+        _print_result(result)
+        if as_json and result.get("state") == "NoEligibleIssue":
+            return
+        if result.get("state") == "NoEligibleIssue":
+            console = Console()
+            console.print(f"[bold]NoEligibleIssue[/bold] {result.get('message', '')}")
+        return
+
+    import signal as _signal
+
+    interval = poll_interval if poll_interval is not None else pipeline.config.polling.poll_interval_seconds
+    log = logging.getLogger("gg.watch")
+    log.info("watch mode: polling every %ds (Ctrl+C to stop)", interval)
+    try:
+        while True:
+            result = _run_once()
+            # pipeline may replace SIGINT handler; restore default so sleep is interruptible
+            _signal.signal(_signal.SIGINT, _signal.default_int_handler)
+            state = result.get("state", "")
+            if state == "NoEligibleIssue":
+                log.info("no eligible issue -- next check in %ds", interval)
+            else:
+                _print_result(result)
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        log.info("watch stopped")
 
 
 @cli.command()
 @click.argument("issue_number", type=int)
-def issue(issue_number):
+@click.option("--path", type=click.Path(exists=True), default=".", help="Project path.")
+@click.option("--dry-run", is_flag=True, help="Analyze only; do not call agent or mutate GitHub.")
+@click.option("--no-pr", is_flag=True, help="Run locally without creating a pull request.")
+@click.option("--max-attempts", type=int, default=None, help="Override execution/evaluation attempt limit.")
+@click.option("--candidates", type=int, default=None, help="Override initial candidate fanout.")
+@click.option("--max-parallel-candidates", type=int, default=None, help="Override parallel candidate limit.")
+@click.option("--repair-fanout", type=int, default=None, help="Override repair candidate fanout.")
+@click.option("--timeout", type=int, default=None, help="Override candidate timeout in seconds.")
+@click.option("--base", default=None, help="Override target default branch for publishing.")
+@click.option("--label", "labels", multiple=True, help="Additional label to apply to the issue.")
+@click.option("--debug", is_flag=True, help="Show Codex output and verbose agent progress.")
+@click.option("--profile", default=None, help="Apply a named config profile from params.yaml profiles section.")
+@click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
+def issue(
+    issue_number,
+    path,
+    dry_run,
+    no_pr,
+    max_attempts,
+    candidates,
+    max_parallel_candidates,
+    repair_fanout,
+    timeout,
+    base,
+    labels,
+    debug,
+    profile,
+    as_json,
+):
     """Process a single GitHub issue."""
-    click.echo(f"Not implemented yet: issue #{issue_number}")
+    import json
+
+    from rich.console import Console
+
+    _setup_logging(debug)
+    result = _build_pipeline(path, debug=debug, profile=profile).configure_runtime(
+        max_attempts=max_attempts,
+        candidates=candidates,
+        max_parallel_candidates=max_parallel_candidates,
+        repair_fanout=repair_fanout,
+        timeout=timeout,
+        base=base,
+    ).run_issue(issue_number, dry_run=dry_run, no_pr=no_pr)
+    if as_json:
+        click.echo(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    console = Console()
+    console.print(f"[bold]{result.get('state')}[/bold] run={result.get('run_id')}")
+    if result.get("pr_url"):
+        console.print(f"PR: {result['pr_url']}")
+    if result.get("error"):
+        console.print(f"[red]{result['error']['code']}:[/red] {result['error']['message']}")
 
 
 @cli.command()
-def status():
+@click.argument("run_id", required=False)
+@click.option("--path", type=click.Path(exists=True), default=".", help="Project path.")
+@click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
+def status(run_id, path, as_json):
     """Show status of active tasks."""
-    click.echo("Not implemented yet.")
+    import json
+
+    from rich.console import Console
+    from rich.table import Table
+
+    from gg.orchestrator.pipeline import OrchestratorPipeline
+
+    pipeline = OrchestratorPipeline(path)
+    rows = pipeline.status()
+    if run_id:
+        rows = [row for row in rows if row["run_id"] == run_id]
+    if as_json:
+        click.echo(json.dumps(rows, indent=2, ensure_ascii=False))
+        return
+
+    console = Console()
+    if not rows:
+        console.print("[yellow]No runs found.[/yellow]")
+        return
+    table = Table(title="gg runs")
+    table.add_column("Run")
+    table.add_column("Issue")
+    table.add_column("State")
+    table.add_column("Updated")
+    table.add_column("PR")
+    for row in rows:
+        issue_data = row.get("issue", {})
+        table.add_row(
+            row["run_id"],
+            f"#{issue_data.get('number', '')}",
+            row["state"],
+            row["updated_at"],
+            row.get("pr_url") or "",
+        )
+    console.print(table)
+
+
+@cli.command()
+@click.argument("run_id", required=False, default=None)
+@click.option("--path", type=click.Path(exists=True), default=".", help="Project path.")
+@click.option("--dry-run/--execute", default=True, help="Preview cleanup unless --execute is used.")
+@click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
+def clean(run_id, path, dry_run, as_json):
+    """Prune terminal run metadata. Pass RUN_ID to clean a specific run."""
+    import json
+
+    from rich.console import Console
+
+    from gg.orchestrator.pipeline import OrchestratorPipeline
+
+    result = OrchestratorPipeline(path).clean(dry_run=dry_run, run_id=run_id)
+    if as_json:
+        click.echo(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    console = Console()
+    mode = "would remove" if dry_run else "removed"
+    console.print(f"{mode} {result['count']} runs")
+    for run_id in result["runs"]:
+        console.print(f"  {run_id}")
+    for run_id in result.get("stale_runs", []):
+        console.print(f"  stale: {run_id}")
+
+
+@cli.command()
+@click.argument("run_id")
+@click.option("--path", type=click.Path(exists=True), default=".", help="Project path.")
+@click.option("--reason", default="operator requested cancellation", help="Cancellation reason.")
+@click.option("--abandon-worktrees", is_flag=True, help="Remove worktrees even if candidate still running.")
+@click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
+def cancel(run_id, path, reason, abandon_worktrees, as_json):
+    """Cancel a non-terminal run."""
+    import json
+
+    from rich.console import Console
+
+    from gg.orchestrator.pipeline import OrchestratorPipeline
+
+    result = OrchestratorPipeline(path).cancel(
+        run_id,
+        reason=reason,
+        abandon_worktrees=abandon_worktrees,
+    )
+    if as_json:
+        click.echo(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    Console().print(f"{result['state']} run={result['run_id']}")
+
+
+@cli.command()
+@click.argument("run_id")
+@click.option("--path", type=click.Path(exists=True), default=".", help="Project path.")
+@click.option("--no-pr", is_flag=True, help="Resume locally without creating a pull request.")
+@click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
+def resume(run_id, path, no_pr, as_json):
+    """Resume a run from durable state."""
+    import json
+
+    from rich.console import Console
+
+    from gg.orchestrator.pipeline import OrchestratorPipeline
+
+    result = OrchestratorPipeline(path).resume(run_id, no_pr=no_pr)
+    if as_json:
+        click.echo(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    Console().print(f"{result['state']} run={result['run_id']}")
+
+
+@cli.command()
+@click.argument("run_id")
+@click.option("--path", type=click.Path(exists=True), default=".", help="Project path.")
+@click.option("--no-pr", is_flag=True, help="Retry locally without creating a pull request.")
+@click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
+def retry(run_id, path, no_pr, as_json):
+    """Retry a recoverable run from durable state."""
+    import json
+
+    from rich.console import Console
+
+    from gg.orchestrator.pipeline import OrchestratorPipeline
+
+    result = OrchestratorPipeline(path).retry(run_id, no_pr=no_pr)
+    if as_json:
+        click.echo(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    Console().print(f"{result['state']} run={result['run_id']}")
+
+
+@cli.command()
+@click.argument("run_id")
+@click.option("--message", default=None, help="Answer or clarification for a blocked run.")
+@click.option("--file", "input_file", type=click.Path(exists=True), default=None, help="Read input from file.")
+@click.option("--path", type=click.Path(exists=True), default=".", help="Project path.")
+@click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
+def provide(run_id, message, input_file, path, as_json):
+    """Provide local input for a Blocked or NeedsInput run."""
+    import json
+
+    from rich.console import Console
+
+    from gg.orchestrator.pipeline import OrchestratorPipeline
+
+    if input_file:
+        from pathlib import Path as _Path
+        message = (message or "") + _Path(input_file).read_text(encoding="utf-8")
+    if not message:
+        raise click.UsageError("Provide --message or --file")
+    result = OrchestratorPipeline(path).provide(run_id, message=message)
+    if as_json:
+        click.echo(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    Console().print(f"{result['state']} run={result['run_id']} accepted={result['accepted']}")
+
+
+@cli.command()
+@click.option("--path", type=click.Path(exists=True), default=".", help="Project path.")
+@click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
+def doctor(path, as_json):
+    """Check local orchestrator prerequisites."""
+    import json
+
+    from rich.console import Console
+    from rich.table import Table
+
+    from gg.orchestrator.doctor import run_doctor
+
+    result = run_doctor(path)
+    if as_json:
+        click.echo(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    console = Console()
+    table = Table(title=f"gg doctor: {result['status']}")
+    table.add_column("Check")
+    table.add_column("Status")
+    table.add_column("Message")
+    for check in result["checks"]:
+        table.add_row(check["name"], check["status"], check["message"])
+    console.print(table)
 
 
 @cli.command()

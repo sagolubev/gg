@@ -15,6 +15,7 @@ from gg.analyzers.structure import StructureMap, analyze_structure
 from gg.generators.agent_files import generate_agent_files
 from gg.generators.specs import UserContext, generate_specs
 from gg.knowledge.engine import KnowledgeEngine
+from gg.orchestrator.config import default_params
 from gg.platforms.base import detect_platform
 from gg.utils.git_ops import find_repo_root, get_main_branch, get_remote_url, parse_remote_url
 from gg.utils.system import run_all_checks
@@ -35,6 +36,15 @@ TEST_SUGGESTIONS: dict[str, dict[str, str]] = {
     "Go": {"tool": "go test", "install": ""},
     "Rust": {"tool": "cargo test", "install": ""},
 }
+
+OPERATIONAL_GITIGNORE_ENTRIES = (
+    ".gg/runs/",
+    ".gg/runs-archive/",
+    ".gg/objects/",
+    ".gg/rate-limits.sqlite3*",
+    ".gg-worktrees/",
+    ".omx/",
+)
 
 
 def run_init(
@@ -195,6 +205,8 @@ def run_init(
 
     # 10. Write config
     _write_config(project_path, platform, console)
+    _write_params(project_path, console)
+    _write_operational_gitignore(project_path, console)
 
     # 11. Summary
     _print_final(project_path, console)
@@ -395,6 +407,59 @@ def _write_config(project_path: Path, platform: str, console: Console) -> None:
         yaml.dump(config, default_flow_style=False, allow_unicode=True),
         encoding="utf-8",
     )
+
+
+def _write_params(project_path: Path, console: Console) -> None:
+    params_path = project_path / ".gg" / "params.yaml"
+    params = default_params(project_path)
+    if params_path.exists():
+        existing = yaml.safe_load(params_path.read_text(encoding="utf-8")) or {}
+        if not isinstance(existing, dict):
+            raise ValueError(f"{params_path}: expected YAML mapping")
+        changed = _merge_missing_params(existing, params)
+        if changed:
+            params_path.write_text(
+                yaml.dump(existing, default_flow_style=False, sort_keys=False, allow_unicode=True),
+                encoding="utf-8",
+            )
+            console.print("  [green]  -> .gg/params.yaml merged missing defaults[/green]")
+        else:
+            console.print("  [dim].gg/params.yaml already up to date[/dim]")
+        return
+
+    params_path.write_text(
+        yaml.dump(params, default_flow_style=False, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+    console.print("  [green]  -> .gg/params.yaml[/green]")
+
+
+def _merge_missing_params(target: dict, defaults: dict) -> bool:
+    changed = False
+    for key, value in defaults.items():
+        if key not in target:
+            target[key] = value
+            changed = True
+            continue
+        if isinstance(target[key], dict) and isinstance(value, dict):
+            changed = _merge_missing_params(target[key], value) or changed
+    return changed
+
+
+def _write_operational_gitignore(project_path: Path, console: Console) -> None:
+    path = project_path / ".gitignore"
+    existing = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    existing_set = set(existing)
+    missing = [entry for entry in OPERATIONAL_GITIGNORE_ENTRIES if entry not in existing_set]
+    if not missing:
+        console.print("  [dim].gitignore already has gg operational entries[/dim]")
+        return
+    lines = [*existing]
+    if lines and lines[-1].strip():
+        lines.append("")
+    lines.extend(missing)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    console.print("  [green]  -> .gitignore gg operational entries[/green]")
 
 
 def _print_final(project_path: Path, console: Console) -> None:

@@ -18,6 +18,10 @@ class TaskSystemConfig:
     done_label: str = "gg:done"
     blocked_label: str = "gg:blocked"
 
+    @property
+    def kind(self) -> str:
+        return self.platform
+
 
 @dataclass(frozen=True)
 class SelectionConfig:
@@ -418,7 +422,23 @@ def default_params(project_path: str | Path) -> dict[str, Any]:
     }
 
 
-def load_config(project_path: str | Path) -> GGConfig:
+def _merge_profile(raw: dict[str, Any], profile_name: str) -> dict[str, Any]:
+    profiles = raw.get("profiles") or {}
+    overrides = profiles.get(profile_name)
+    if not overrides or not isinstance(overrides, dict):
+        raise ValueError(f"profile '{profile_name}' not found in params.yaml profiles section")
+    merged = dict(raw)
+    for section, values in overrides.items():
+        if section == "profiles":
+            continue
+        if isinstance(values, dict) and isinstance(merged.get(section), dict):
+            merged[section] = {**merged[section], **values}
+        else:
+            merged[section] = values
+    return merged
+
+
+def load_config(project_path: str | Path, *, profile: str | None = None) -> GGConfig:
     root = Path(project_path).resolve()
     params_path = root / ".gg" / "params.yaml"
     raw: dict[str, Any] = {}
@@ -427,6 +447,8 @@ def load_config(project_path: str | Path) -> GGConfig:
         if not isinstance(raw, dict):
             raise ValueError(f"{params_path}: expected YAML mapping")
         _reject_unknown_config_keys(raw, str(params_path))
+    if profile:
+        raw = _merge_profile(raw, profile)
     project = _mapping(raw.get("project"))
     git = _mapping(raw.get("git"))
     task_system = _mapping(raw.get("task_system"))
@@ -461,7 +483,7 @@ def load_config(project_path: str | Path) -> GGConfig:
                     "committer_email": git.get("committer_email", "gg-orchestrator@users.noreply.local"),
                 },
                 "task_system": {
-                    "platform": task_system.get("platform", raw.get("platform", "auto")),
+                    "platform": task_system.get("kind", task_system.get("platform", raw.get("platform", "auto"))),
                     "work_label": task_system.get("work_label", "gg:in-progress"),
                     "done_label": task_system.get("done_label", "gg:done"),
                     "blocked_label": task_system.get("blocked_label", "gg:blocked"),
@@ -809,7 +831,7 @@ def _reject_unknown_config_keys(raw: dict[str, Any], location: str) -> None:
         "schema_version": None,
         "project": {"default_branch"},
         "git": {"default_branch", "author_name", "author_email", "committer_name", "committer_email"},
-        "task_system": {"platform", "work_label", "done_label", "blocked_label"},
+        "task_system": {"platform", "kind", "work_label", "done_label", "blocked_label"},
         "selection": {"include_labels", "exclude_labels", "order"},
         "verify": {
             "setup",

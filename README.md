@@ -16,7 +16,7 @@ The current implementation is centered around a durable state machine, resumable
 
 **How It Works**
 
-1. `gg init` creates `.gg/params.yaml`, operational `.gitignore` entries, and repo-local runtime defaults. It can use either Codex or Claude for constitution/spec generation.
+1. `gg init` creates `.gg/params.yaml`, operational `.gitignore` entries, and repo-local runtime defaults. It can use either Codex or Claude for constitution/spec generation, and `--agent-backend auto` picks the available backend automatically.
 2. `gg issue <n>` or `gg run` creates a run record, claims the task, and writes state transitions into `.gg/runs/<run_id>/state.json`.
 3. Task analysis builds a `task-brief` from the issue, comments, local inputs, and repo context from the knowledge engine.
 4. The orchestrator allocates candidate worktrees, runs agents, captures patches and artifacts, and executes verification commands.
@@ -67,6 +67,7 @@ flowchart TD
 
 ```bash
 gg init
+gg init --agent-backend auto
 gg init --agent-backend claude
 gg doctor --json
 gg issue 42
@@ -98,6 +99,7 @@ Important sections:
 - `cost`: optional budgets for exact token / USD metrics.
 - `cleanup`: `blocked_timeout_days`, `keep_last`, `ttl_days`.
 - `agent`: backend commands (`codex_command`, `claude_command`) and retry / breaker settings.
+- `gg init --agent-backend auto`: choose the available authoring backend automatically, preferring Codex when both Codex and Claude are installed in non-interactive mode.
 
 **Artifacts**
 

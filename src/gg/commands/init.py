@@ -57,7 +57,7 @@ def run_init(
     non_interactive: bool,
     deep: bool = False,
     debug: bool = False,
-    agent_backend: str = "codex",
+    agent_backend: str = "auto",
 ) -> None:
     console = Console()
     project_path = Path(path).resolve()
@@ -68,8 +68,14 @@ def run_init(
     checks = run_all_checks(offer_install=not non_interactive)
 
     check_map = {c.name: c for c in checks}
-    selected_backend = agent_backend.strip().lower()
-    selected_backend_available = check_map.get(selected_backend, type("", (), {"ok": False})).ok and not skip_codex
+    selected_backend = _select_init_backend(
+        requested=agent_backend,
+        check_map=check_map,
+        skip_agent=skip_codex,
+        non_interactive=non_interactive,
+        console=console,
+    )
+    selected_backend_available = bool(selected_backend)
 
     # 2. Find repo root
     repo_root = find_repo_root(project_path)
@@ -104,6 +110,7 @@ def run_init(
         if selected_backend_available
         else None
     )
+    console.print(f"  Init backend: [bold]{selected_backend or 'local-only'}[/bold]")
 
     # Quick backend description if local one is weak
     if agent and agent.is_available() and len(user_ctx.description) < 30:
@@ -250,6 +257,43 @@ def _detect_and_confirm_platform(
         console.print(f"  [yellow]Warning: {cli_tool} is not available. Some features will be limited.[/yellow]")
 
     return detected
+
+
+def _select_init_backend(
+    *,
+    requested: str,
+    check_map: dict[str, object],
+    skip_agent: bool,
+    non_interactive: bool,
+    console: Console,
+) -> str:
+    if skip_agent:
+        return ""
+    normalized = requested.strip().lower()
+    available = [
+        name
+        for name in ("codex", "claude")
+        if getattr(check_map.get(name), "ok", False)
+    ]
+    if normalized in {"codex", "claude"}:
+        if normalized not in available:
+            raise SystemExit(f"Requested init backend '{normalized}' is not available.")
+        return normalized
+    if normalized not in {"", "auto"}:
+        raise SystemExit(f"Unsupported init backend '{requested}'.")
+    if not available:
+        return ""
+    if len(available) == 1:
+        return available[0]
+    if non_interactive:
+        return "codex" if "codex" in available else available[0]
+    choice = Prompt.ask(
+        "  Multiple init backends available. Which one should be used?",
+        choices=available,
+        default="codex" if "codex" in available else available[0],
+        console=console,
+    )
+    return choice
 
 
 def _run_analyzers(

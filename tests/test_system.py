@@ -1,5 +1,8 @@
 from unittest.mock import patch
 
+from rich.console import Console
+
+from gg.commands.init import _select_init_backend
 from gg.utils.system import (
     CheckResult,
     check_claude,
@@ -54,3 +57,48 @@ def test_check_result_frozen():
         assert False, "Should be frozen"
     except AttributeError:
         pass
+
+
+def test_select_init_backend_prefers_only_available_backend():
+    backend = _select_init_backend(
+        requested="auto",
+        check_map={
+            "codex": CheckResult("codex", False, "missing", required=False),
+            "claude": CheckResult("claude", True, "ok", required=False),
+        },
+        skip_agent=False,
+        non_interactive=True,
+        console=Console(),
+    )
+
+    assert backend == "claude"
+
+
+def test_select_init_backend_prefers_codex_when_both_available_non_interactive():
+    backend = _select_init_backend(
+        requested="auto",
+        check_map={
+            "codex": CheckResult("codex", True, "ok", required=False),
+            "claude": CheckResult("claude", True, "ok", required=False),
+        },
+        skip_agent=False,
+        non_interactive=True,
+        console=Console(),
+    )
+
+    assert backend == "codex"
+
+
+def test_select_init_backend_returns_local_only_when_skipped():
+    backend = _select_init_backend(
+        requested="auto",
+        check_map={
+            "codex": CheckResult("codex", True, "ok", required=False),
+            "claude": CheckResult("claude", True, "ok", required=False),
+        },
+        skip_agent=True,
+        non_interactive=True,
+        console=Console(),
+    )
+
+    assert backend == ""

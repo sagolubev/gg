@@ -26,7 +26,7 @@ def cli():
 @click.option("--path", type=click.Path(exists=True), default=".", help="Target project path.")
 @click.option("--force", is_flag=True, help="Overwrite existing .gg/ directory.")
 @click.option("--skip-codex", is_flag=True, help="Skip agent-backed analysis, use local-only.")
-@click.option("--agent-backend", type=click.Choice(["codex", "claude"]), default="codex", show_default=True, help="LLM backend to use for init-time constitution/spec generation.")
+@click.option("--agent-backend", type=click.Choice(["auto", "codex", "claude"]), default="auto", show_default=True, help="LLM backend to use for init-time constitution/spec generation.")
 @click.option("--skip-knowledge", is_flag=True, help="Skip knowledge system build (faster for large repos).")
 @click.option("--non-interactive", is_flag=True, help="No interactive prompts.")
 @click.option("--deep", is_flag=True, help="Run deep code audit (security, quality, error handling).")

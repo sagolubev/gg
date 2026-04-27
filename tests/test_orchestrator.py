@@ -3182,6 +3182,23 @@ def test_cli_init_passes_agent_backend(monkeypatch, tmp_path):
     assert captured["skip_codex"] is True
 
 
+def test_cli_init_defaults_to_auto_backend(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run_init(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr("gg.commands.init.run_init", fake_run_init)
+
+    result = CliRunner().invoke(
+        cli,
+        ["init", "--path", str(tmp_path)],
+    )
+
+    assert result.exit_code == 0
+    assert captured["agent_backend"] == "auto"
+
+
 def test_cli_constitution_accepts_agent_backend(monkeypatch, tmp_path):
     class FakeClaude:
         def is_available(self):

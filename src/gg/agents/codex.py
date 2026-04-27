@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from typing import Callable
 
 from gg.agents.base import AgentBackend
 
@@ -27,13 +28,17 @@ def _stream_stderr_debug(proc: subprocess.Popen, console, stop_event: threading.
             console.print(Text(f"    {line}", style="dim"))
 
 
-def _progress_ticker(console, stop_event: threading.Event) -> None:
+def _progress_ticker(console, stop_event: threading.Event, progress_callback: Callable[[str], None] | None = None) -> None:
     start = time.monotonic()
     while not stop_event.is_set():
         stop_event.wait(15)
         if not stop_event.is_set():
             elapsed = int(time.monotonic() - start)
-            console.print(f"    [dim]... Codex working ({elapsed}s elapsed)[/dim]")
+            message = f"Codex working ({elapsed}s elapsed)"
+            if console is not None:
+                console.print(f"    [dim]... {message}[/dim]")
+            if progress_callback is not None:
+                progress_callback(message)
 
 
 def _get_fast_mode_flags() -> list[str]:
@@ -56,10 +61,11 @@ def _get_fast_mode_flags() -> list[str]:
 class CodexAgent(AgentBackend):
     supports_task_analysis = True
 
-    def __init__(self, console=None, debug: bool = False, command: str = "codex"):
+    def __init__(self, console=None, debug: bool = False, command: str = "codex", progress_callback: Callable[[str], None] | None = None):
         self._console = console
         self._debug = debug
         self._command = command
+        self._progress_callback = progress_callback
 
     def generate(self, prompt: str, *, cwd: str | None = None, timeout: int | None = None,
                  context: str | None = None) -> str:
@@ -69,6 +75,10 @@ class CodexAgent(AgentBackend):
 
         for attempt in range(retries + 1):
             try:
+                self._emit_progress(
+                    f"starting {'fast' if context else 'full'} Codex run"
+                    + (f" (attempt {attempt + 1}/{retries + 1})" if retries else "")
+                )
                 if context:
                     output = self._run_fast(prompt, context, out_path, cwd, effective_timeout)
                 elif self._console:
@@ -77,10 +87,12 @@ class CodexAgent(AgentBackend):
                     output = self._run_silent(prompt, out_path, cwd, effective_timeout)
 
                 if output:
+                    self._emit_progress("Codex produced output")
                     return output
                 if attempt < retries:
                     if self._console:
                         self._console.print("    [yellow]Empty response, retrying...[/yellow]")
+                    self._emit_progress("Codex returned empty output; retrying")
                     continue
                 return ""
             except subprocess.TimeoutExpired:
@@ -88,6 +100,7 @@ class CodexAgent(AgentBackend):
                 if attempt < retries:
                     if self._console:
                         self._console.print(f"    [yellow]Timeout after {effective_timeout}s, retrying...[/yellow]")
+                    self._emit_progress(f"Codex timed out after {effective_timeout}s; retrying")
                     continue
                 raise RuntimeError(f"Codex timed out after {effective_timeout}s")
             except RuntimeError:
@@ -162,7 +175,7 @@ class CodexAgent(AgentBackend):
         else:
             worker = threading.Thread(
                 target=_progress_ticker,
-                args=(self._console, stop_event),
+                args=(self._console, stop_event, self._progress_callback),
                 daemon=True,
             )
         worker.start()
@@ -228,3 +241,7 @@ class CodexAgent(AgentBackend):
 
     def _command_args(self) -> list[str]:
         return shlex.split(self._command.strip() or "codex")
+
+    def _emit_progress(self, message: str) -> None:
+        if self._progress_callback is not None:
+            self._progress_callback(message)

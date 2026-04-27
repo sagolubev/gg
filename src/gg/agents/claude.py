@@ -3,8 +3,7 @@ from __future__ import annotations
 import shlex
 import shutil
 import subprocess
-import tempfile
-from pathlib import Path
+from typing import Callable
 
 from gg.agents.base import AgentBackend
 
@@ -15,10 +14,11 @@ CLAUDE_CONTEXT_WINDOW_TOKENS = 200_000
 class ClaudeAgent(AgentBackend):
     supports_task_analysis = True
 
-    def __init__(self, console=None, debug: bool = False, command: str = "claude"):
+    def __init__(self, console=None, debug: bool = False, command: str = "claude", progress_callback: Callable[[str], None] | None = None):
         self._console = console
         self._debug = debug
         self._command = command
+        self._progress_callback = progress_callback
 
     def generate(
         self,
@@ -31,6 +31,7 @@ class ClaudeAgent(AgentBackend):
         effective_timeout = timeout or CLAUDE_TIMEOUT
         full_prompt = _merge_context(context, prompt)
         cmd = self._fast_command(full_prompt) if context else self._full_command(full_prompt)
+        self._emit_progress(f"starting {'fast' if context else 'full'} Claude run")
         result = subprocess.run(
             cmd,
             capture_output=True,
@@ -44,6 +45,8 @@ class ClaudeAgent(AgentBackend):
         output = result.stdout.strip()
         if not output and result.returncode != 0:
             raise RuntimeError(f"Claude failed (rc={result.returncode}): {result.stderr.strip()[:200]}")
+        if output:
+            self._emit_progress("Claude produced output")
         return output
 
     def is_available(self) -> bool:
@@ -85,6 +88,10 @@ class ClaudeAgent(AgentBackend):
 
     def _command_args(self) -> list[str]:
         return shlex.split(self._command.strip() or "claude")
+
+    def _emit_progress(self, message: str) -> None:
+        if self._progress_callback is not None:
+            self._progress_callback(message)
 
 
 def _merge_context(context: str | None, prompt: str) -> str:

@@ -280,6 +280,7 @@ class CandidateExecutor:
         )
         if on_status is not None:
             on_status({"worktree_path": str(worktree), "branch": branch})
+            on_status({"message": f"candidate worktree ready: {worktree} ({branch})"})
         if on_handoff is not None:
             on_handoff(
                 self.build_agent_handoff(
@@ -301,7 +302,12 @@ class CandidateExecutor:
         runtime: dict[str, Any] = {}
         runtime_callback = _merge_status_callbacks(runtime, on_status)
         try:
+            if on_status is not None:
+                setup_command = self.config.verify.setup.strip()
+                on_status({"message": f"setup starting{f': {setup_command}' if setup_command else ' (no setup command)'}"})
             setup = self._run_setup(worktree, port=port)
+            if on_status is not None:
+                on_status({"message": f"setup finished: status={setup.status} exit={setup.exit_code}"})
             if setup.status not in {"passed", "skipped", "flaky"}:
                 return CandidateResult(
                     schema_version=1,
@@ -323,6 +329,8 @@ class CandidateExecutor:
             needs_input = _extract_needs_input(summary)
             files = changed_files(worktree)
             patch = diff(worktree) if files else ""
+            if on_status is not None:
+                on_status({"message": f"agent output received: changed_files={len(files)} needs_input={'yes' if needs_input else 'no'}"})
             quota_error = self._disk_quota_error(worktree)
             if quota_error:
                 status = "failed"
@@ -384,12 +392,26 @@ class CandidateExecutor:
         port: int | None = None,
         on_status: CandidateStatusCallback | None = None,
     ) -> str:
-        if self.config.runtime.use_sandbox_runtime and self.agent.supports_sandbox_execution():
+        backend_agent = _with_progress_callback(
+            self.agent,
+            (lambda message: on_status({"message": message}) if on_status is not None else None),
+        )
+        if self.config.runtime.use_sandbox_runtime and backend_agent.supports_sandbox_execution():
             if self.sandbox.is_available():
-                return self._generate_in_sandbox(prompt, worktree, port=port, on_status=on_status)
+                if on_status is not None:
+                    on_status({"message": f"starting backend {backend_agent.backend_name()} via sandbox"})
+                return self._generate_in_sandbox(
+                    prompt,
+                    worktree,
+                    port=port,
+                    on_status=on_status,
+                    agent=backend_agent,
+                )
         if self.sandbox_preflight_error() is not None:
             raise RuntimeError("sandbox-runtime is required but unavailable")
-        return self.agent.generate(
+        if on_status is not None:
+            on_status({"message": f"starting backend {backend_agent.backend_name()} via direct execution"})
+        return backend_agent.generate(
             prompt,
             cwd=str(worktree),
             timeout=self.config.runtime.candidate_timeout_seconds,
@@ -402,9 +424,11 @@ class CandidateExecutor:
         *,
         port: int | None = None,
         on_status: CandidateStatusCallback | None = None,
+        agent: AgentBackend | None = None,
     ) -> str:
         out_path = Path(tempfile.mktemp(prefix="gg-candidate-", suffix=".md", dir=str(worktree)))
-        command = list(self.agent.build_sandbox_command(prompt, output_path=str(out_path)))
+        backend_agent = agent or self.agent
+        command = list(backend_agent.build_sandbox_command(prompt, output_path=str(out_path)))
         result = self.sandbox.run(
             command,
             cwd=worktree,
@@ -412,7 +436,9 @@ class CandidateExecutor:
             policy=self._sandbox_policy(),
             env=self._candidate_env(worktree, port=port),
             on_process_start=(
-                (lambda pid: on_status({"sandbox_pid": pid})) if on_status is not None else None
+                (lambda pid: on_status({"sandbox_pid": pid, "message": f"sandbox started: pid={pid}"}))
+                if on_status is not None
+                else None
             ),
         )
         output = out_path.read_text(encoding="utf-8").strip() if out_path.exists() else result.stdout.strip()
@@ -629,6 +655,27 @@ def _configured_agent(agent: AgentBackend, config: GGConfig) -> AgentBackend:
             console=getattr(agent, "_console", None),
             debug=getattr(agent, "_debug", False),
             command=config.agent.claude_command,
+        )
+    return agent
+
+
+def _with_progress_callback(
+    agent: AgentBackend,
+    progress_callback: Callable[[str], None] | None,
+) -> AgentBackend:
+    if isinstance(agent, CodexAgent):
+        return CodexAgent(
+            console=getattr(agent, "_console", None),
+            debug=getattr(agent, "_debug", False),
+            command=" ".join(agent._command_args()),
+            progress_callback=progress_callback,
+        )
+    if isinstance(agent, ClaudeAgent):
+        return ClaudeAgent(
+            console=getattr(agent, "_console", None),
+            debug=getattr(agent, "_debug", False),
+            command=" ".join(agent._command_args()),
+            progress_callback=progress_callback,
         )
     return agent
 

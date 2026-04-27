@@ -1137,6 +1137,9 @@ class OrchestratorPipeline:
     ) -> None:
         allowed = {"worktree_path", "branch", "agent_pid", "sandbox_pid", "port"}
         updates = {key: value for key, value in payload.items() if key in allowed and value}
+        message = str(payload.get("message", "")).strip()
+        if message:
+            log.info("[%s] %s: %s", run_id, candidate_id, message)
         if not updates:
             return
         with self._state_update_lock:

@@ -4515,7 +4515,7 @@ runtime:
     assert set(config.runtime.sandbox_policy.allowed_domains).issubset(set(sandbox.policies[0].allowed_domains))
     assert str(Path.home() / ".codex") in sandbox.policies[0].allow_write
     assert any(event.get("worktree_path") for event in status_events)
-    assert {"sandbox_pid": 43210} in status_events
+    assert any(event.get("sandbox_pid") == 43210 for event in status_events)
 
 
 def test_candidate_executor_uses_configured_codex_command_in_sandbox(tmp_path):

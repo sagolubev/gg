@@ -128,6 +128,32 @@ def test_candidate_executor_runs_claude_via_sandbox_stdout(tmp_path):
     assert sandbox.commands[0][:2] == ["claude", "--dangerously-skip-permissions"]
 
 
+def test_candidate_executor_emits_progress_messages(tmp_path):
+    init_repo(tmp_path)
+    sandbox = FakeSandbox()
+    messages: list[str] = []
+    executor = CandidateExecutor(
+        tmp_path,
+        ClaudeAgent(command="claude"),
+        runtime_config(),
+        sandbox=sandbox,
+    )
+
+    result = executor.run(
+        run_id="run-progress",
+        issue_number=42,
+        brief=task_brief(),
+        on_status=lambda payload: messages.append(str(payload["message"])) if "message" in payload else None,
+    )
+
+    assert result.status == "success"
+    assert any("candidate worktree ready:" in message for message in messages)
+    assert any("setup starting" in message for message in messages)
+    assert any("starting backend claude via sandbox" in message for message in messages)
+    assert any("sandbox started: pid=999" in message for message in messages)
+    assert any("agent output received:" in message for message in messages)
+
+
 def test_agent_handoff_and_result_helpers_validate_with_schemas(tmp_path):
     init_repo(tmp_path)
     executor = CandidateExecutor(tmp_path, FakeAgent(), runtime_config())

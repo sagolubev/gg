@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -301,6 +302,8 @@ class CandidateExecutor:
         started = time.monotonic()
         runtime: dict[str, Any] = {}
         runtime_callback = _merge_status_callbacks(runtime, on_status)
+        heartbeat_stop = threading.Event()
+        heartbeat_thread: threading.Thread | None = None
         try:
             if on_status is not None:
                 setup_command = self.config.verify.setup.strip()
@@ -325,7 +328,21 @@ class CandidateExecutor:
                     agent_pid=runtime.get("agent_pid"),
                     sandbox_pid=runtime.get("sandbox_pid"),
                 )
+            if on_status is not None:
+                heartbeat_thread = threading.Thread(
+                    target=_progress_heartbeat,
+                    args=(
+                        heartbeat_stop,
+                        self.config.runtime.progress_heartbeat_seconds,
+                        lambda message: on_status({"message": message}),
+                    ),
+                    daemon=True,
+                )
+                heartbeat_thread.start()
             summary = self._generate(prompt, worktree, port=port, on_status=runtime_callback)
+            heartbeat_stop.set()
+            if heartbeat_thread is not None:
+                heartbeat_thread.join(timeout=1)
             needs_input = _extract_needs_input(summary)
             files = changed_files(worktree)
             patch = diff(worktree) if files else ""
@@ -358,6 +375,9 @@ class CandidateExecutor:
                 sandbox_pid=runtime.get("sandbox_pid"),
             )
         except Exception as exc:
+            heartbeat_stop.set()
+            if heartbeat_thread is not None:
+                heartbeat_thread.join(timeout=1)
             return CandidateResult(
                 schema_version=1,
                 candidate_id=candidate_id,
@@ -615,6 +635,17 @@ def _repair_context_summary(repair_context: dict[str, Any] | None) -> str:
     parent = repair_context.get("parent_candidate_id") or "unknown"
     feedback = str(repair_context.get("feedback") or "").strip()
     return f"repair parent={parent}; feedback={feedback[:500]}"
+
+
+def _progress_heartbeat(
+    stop_event: threading.Event,
+    interval_seconds: int,
+    emit: Callable[[str], None],
+) -> None:
+    started = time.monotonic()
+    while not stop_event.wait(max(1, interval_seconds)):
+        elapsed = int(time.monotonic() - started)
+        emit(f"backend still running ({elapsed}s elapsed)")
 
 
 def _structured_brief_section(brief: TaskBrief) -> str:

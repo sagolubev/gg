@@ -67,6 +67,10 @@ class RuntimeConfig:
     max_parallel_candidates: int = 1
     max_parallel_runs: int = 1
     max_attempts: int = 1
+    max_run_duration_seconds: int | None = None
+    max_total_candidates_per_run: int | None = None
+    stop_if_no_progress_after_rounds: int | None = None
+    progress_heartbeat_seconds: int = 30
     repair_candidates: int = 1
     use_sandbox_runtime: bool = True
     require_sandbox_runtime: bool = True
@@ -325,6 +329,10 @@ def default_params(project_path: str | Path, *, agent_backend: str = "codex") ->
             "max_parallel_candidates": 1,
             "max_parallel_runs": 1,
             "max_attempts": 1,
+            "max_run_duration_seconds": None,
+            "max_total_candidates_per_run": None,
+            "stop_if_no_progress_after_rounds": None,
+            "progress_heartbeat_seconds": 30,
             "repair_candidates": 1,
             "use_sandbox_runtime": True,
             "require_sandbox_runtime": True,
@@ -544,6 +552,10 @@ def load_config(project_path: str | Path, *, profile: str | None = None) -> GGCo
                     "max_parallel_candidates": runtime.get("max_parallel_candidates", 1),
                     "max_parallel_runs": runtime.get("max_parallel_runs", 1),
                     "max_attempts": runtime.get("max_attempts", 1),
+                    "max_run_duration_seconds": runtime.get("max_run_duration_seconds"),
+                    "max_total_candidates_per_run": runtime.get("max_total_candidates_per_run"),
+                    "stop_if_no_progress_after_rounds": runtime.get("stop_if_no_progress_after_rounds"),
+                    "progress_heartbeat_seconds": runtime.get("progress_heartbeat_seconds", 30),
                     "repair_candidates": runtime.get("repair_candidates", 1),
                     "use_sandbox_runtime": runtime.get("use_sandbox_runtime", True),
                     "require_sandbox_runtime": runtime.get("require_sandbox_runtime", False),
@@ -742,6 +754,10 @@ def load_config(project_path: str | Path, *, profile: str | None = None) -> GGCo
             max_parallel_candidates=model.runtime.max_parallel_candidates,
             max_parallel_runs=model.runtime.max_parallel_runs,
             max_attempts=model.runtime.max_attempts,
+            max_run_duration_seconds=model.runtime.max_run_duration_seconds,
+            max_total_candidates_per_run=model.runtime.max_total_candidates_per_run,
+            stop_if_no_progress_after_rounds=model.runtime.stop_if_no_progress_after_rounds,
+            progress_heartbeat_seconds=model.runtime.progress_heartbeat_seconds,
             repair_candidates=model.runtime.repair_candidates,
             use_sandbox_runtime=model.runtime.use_sandbox_runtime,
             require_sandbox_runtime=model.runtime.require_sandbox_runtime,
@@ -907,6 +923,10 @@ def _reject_unknown_config_keys(raw: dict[str, Any], location: str) -> None:
             "max_parallel_candidates",
             "max_parallel_runs",
             "max_attempts",
+            "max_run_duration_seconds",
+            "max_total_candidates_per_run",
+            "stop_if_no_progress_after_rounds",
+            "progress_heartbeat_seconds",
             "repair_candidates",
             "use_sandbox_runtime",
             "require_sandbox_runtime",

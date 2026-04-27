@@ -105,6 +105,10 @@ class RuntimeConfigModel(StrictArtifactModel):
     max_parallel_candidates: int = Field(default=1, ge=1)
     max_parallel_runs: int = Field(default=1, ge=1)
     max_attempts: int = Field(default=1, ge=1)
+    max_run_duration_seconds: int | None = Field(default=None, ge=1)
+    max_total_candidates_per_run: int | None = Field(default=None, ge=1)
+    stop_if_no_progress_after_rounds: int | None = Field(default=None, ge=1)
+    progress_heartbeat_seconds: int = Field(default=30, ge=1)
     repair_candidates: int = Field(default=1, ge=1)
     use_sandbox_runtime: bool = True
     require_sandbox_runtime: bool = True
@@ -679,6 +683,25 @@ class RunOutcomeModel(CompatibleArtifactModel):
     @field_validator("completed_at")
     @classmethod
     def _completed_timestamp(cls, value: str) -> str:
+        return _validate_optional_timestamp(value)
+
+
+class FinalVerificationModel(CompatibleArtifactModel):
+    schema_version: Literal[1] = 1
+    run_id: str = ""
+    candidate_id: str = ""
+    verified_at: str = ""
+    publish_ready: bool = False
+    verdict: str = ""
+    traffic_light: str = ""
+    review_dimensions: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    source_artifacts: dict[str, str] = Field(default_factory=dict)
+    blockers: list[str] = Field(default_factory=list)
+    summary: str = ""
+
+    @field_validator("verified_at")
+    @classmethod
+    def _verified_timestamp(cls, value: str) -> str:
         return _validate_optional_timestamp(value)
 
 

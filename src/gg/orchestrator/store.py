@@ -22,6 +22,7 @@ from gg.orchestrator.schemas import (
     ContextSnapshotModel,
     EvaluationArtifactModel,
     ExecutionEvaluationModel,
+    FinalVerificationModel,
     InputArtifactModel,
     InputRequestModel,
     PatchConflictModel,
@@ -789,6 +790,8 @@ def _validate_json_artifact(relative_path: str, data: dict[str, Any]) -> None:
         schema = EvaluationArtifactModel
     elif relative_path == "artifacts/evaluation.json" or relative_path.endswith("/execution-evaluation.json"):
         schema = ExecutionEvaluationModel
+    elif relative_path == "artifacts/final-verification.json":
+        schema = FinalVerificationModel
     elif relative_path == "artifacts/run-outcome.json" or relative_path.endswith("/run-outcome.json"):
         schema = RunOutcomeModel
     elif relative_path == "artifacts/archive-summary.json" or relative_path.endswith("/archive-summary.json"):

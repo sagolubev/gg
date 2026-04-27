@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from datetime import datetime, timezone
 import hashlib
 import json
 import logging
@@ -887,8 +888,17 @@ class OrchestratorPipeline:
         candidate_records: list[dict[str, Any]] = []
         selected: dict[str, Any] | None = None
         repair_context: dict[str, Any] | None = initial_repair_context
+        state.operator.setdefault("candidates_started", 0)
+        state.operator.setdefault("best_score", None)
+        state.operator.setdefault("no_progress_rounds", 0)
+        self.store.write(state)
 
         while state.attempt <= state.max_attempts and selected is None:
+            runtime_limit = self._runtime_limit_error(state)
+            if runtime_limit is not None:
+                state.fail(code=runtime_limit["code"], message=runtime_limit["message"])
+                self.store.write(state)
+                return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
             _increment_stage_attempt(state, "execution")
             self.store.write(state)
             candidate_count = (
@@ -896,6 +906,11 @@ class OrchestratorPipeline:
             )
             if state.attempt == 1:
                 candidate_count = min(candidate_count, int(resource_preflight["allowed_candidates"]))
+            runtime_limit = self._runtime_limit_error(state, next_candidates=candidate_count)
+            if runtime_limit is not None:
+                state.fail(code=runtime_limit["code"], message=runtime_limit["message"])
+                self.store.write(state)
+                return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
             strategies = _candidate_strategies(candidate_count)
             if state.attempt > 1:
                 strategies = [f"repair:{strategy}" for strategy in strategies]
@@ -914,6 +929,7 @@ class OrchestratorPipeline:
                     started_at=_now_placeholder(),
                     port=port,
                 )
+                state.operator["candidates_started"] = int(state.operator.get("candidates_started", 0)) + 1
                 self.store.write(state)
                 planned_candidates.append((index, candidate_id, strategy, repair_context, port))
             attempt_records = self._run_candidate_batch(
@@ -979,6 +995,19 @@ class OrchestratorPipeline:
             evaluation_path = self._write_evaluation(state, evaluation.execution_evaluation)
             state.artifacts["evaluation"] = evaluation_path
             state.artifacts["execution_evaluation"] = evaluation_path
+            if selected is None:
+                if self._record_no_progress_and_should_stop(state, evaluation.artifact):
+                    state.fail(
+                        code="no_progress",
+                        message=(
+                            "repair loop made no measurable progress for "
+                            f"{self.config.runtime.stop_if_no_progress_after_rounds} round(s)"
+                        ),
+                    )
+                    self.store.write(state)
+                    return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
+            else:
+                state.operator["no_progress_rounds"] = 0
             self.store.write(state)
             needs_input = next(
                 (record for record in attempt_records if record["effective_status"] == "needs_input"),
@@ -1586,6 +1615,7 @@ class OrchestratorPipeline:
 
         winner["result_path"] = state.candidate_states.get(winner["candidate_id"], CandidateState(status="")).result_path or ""
         state.artifacts["run_outcome"] = self._write_run_outcome(state, winner)
+        state.artifacts["final_verification"] = self._write_final_verification(state, winner)
         self.store.write(state)
         if not no_pr and state.publishing_step != "result_commented":
             try:
@@ -2306,6 +2336,79 @@ class OrchestratorPipeline:
             build_run_outcome(state, selected_candidate_metadata, completed_at=_now_placeholder()),
         )
 
+    def _write_final_verification(self, state, selected_candidate_metadata: dict[str, Any]) -> str:
+        evaluation_path = state.artifacts.get("execution_evaluation") or state.artifacts.get("evaluation")
+        evaluation = self.store.read_json(evaluation_path) if evaluation_path else {}
+        review_dimensions = dict(evaluation.get("review_dimensions") or {})
+        blockers = [
+            f"{name}: {', '.join(map(str, details.get('reasons') or [])) or details.get('status', 'failed')}"
+            for name, details in review_dimensions.items()
+            if str(details.get("status", "")).lower() != "pass"
+        ]
+        verification_sources = {
+            "candidate_verification": str(selected_candidate_metadata.get("verification_path") or ""),
+            "integration_verification": state.artifacts.get("integration_verification", ""),
+            "execution_evaluation": evaluation_path or "",
+        }
+        payload = {
+            "schema_version": 1,
+            "run_id": state.run_id,
+            "candidate_id": str(selected_candidate_metadata.get("candidate_id") or ""),
+            "verified_at": _now_placeholder(),
+            "publish_ready": not blockers,
+            "verdict": str(evaluation.get("verdict") or ""),
+            "traffic_light": str(evaluation.get("traffic_light") or ""),
+            "review_dimensions": review_dimensions,
+            "source_artifacts": verification_sources,
+            "blockers": blockers,
+            "summary": (
+                "Final verification passed across architecture, code, security, tests, and operability."
+                if not blockers
+                else "Final verification found blocking review dimensions."
+            ),
+        }
+        return self.store.write_json(
+            state.run_id,
+            "artifacts/final-verification.json",
+            payload,
+        )
+
+    def _runtime_limit_error(self, state, *, next_candidates: int = 0) -> dict[str, str] | None:
+        max_duration = self.config.runtime.max_run_duration_seconds
+        if max_duration is not None:
+            elapsed = _elapsed_seconds(state.created_at)
+            if elapsed >= max_duration:
+                return {
+                    "code": "run_timeout",
+                    "message": f"run exceeded max duration of {max_duration}s",
+                }
+        max_candidates = self.config.runtime.max_total_candidates_per_run
+        if max_candidates is not None:
+            launched = int(state.operator.get("candidates_started", 0))
+            if launched + next_candidates > max_candidates:
+                return {
+                    "code": "candidate_limit_exceeded",
+                    "message": (
+                        f"run would exceed max_total_candidates_per_run={max_candidates} "
+                        f"(started={launched}, next_batch={next_candidates})"
+                    ),
+                }
+        return None
+
+    def _record_no_progress_and_should_stop(self, state, artifact: dict[str, Any]) -> bool:
+        threshold = self.config.runtime.stop_if_no_progress_after_rounds
+        if threshold is None:
+            return False
+        candidates = artifact.get("candidates") or []
+        current_best = max((int(item.get("score", 0)) for item in candidates), default=0)
+        previous_best = state.operator.get("best_score")
+        if previous_best is not None and current_best <= int(previous_best):
+            state.operator["no_progress_rounds"] = int(state.operator.get("no_progress_rounds", 0)) + 1
+        else:
+            state.operator["no_progress_rounds"] = 0
+        state.operator["best_score"] = current_best
+        return int(state.operator.get("no_progress_rounds", 0)) >= threshold
+
     def _verification_commands(self) -> list[VerificationCommand]:
         commands: list[VerificationCommand] = []
         configured_categories: set[str] = set()
@@ -2965,3 +3068,11 @@ def _now_placeholder() -> str:
     from gg.orchestrator.state import utc_now
 
     return utc_now()
+
+
+def _elapsed_seconds(started_at: str) -> int:
+    try:
+        started = datetime.strptime(started_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return 0
+    return max(0, int((datetime.now(timezone.utc) - started).total_seconds()))

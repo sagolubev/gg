@@ -480,6 +480,25 @@ class RepairAgent(AgentBackend):
         return True
 
 
+class StagnantRepairAgent(AgentBackend):
+    def __init__(self):
+        self.calls = 0
+
+    def generate(
+        self,
+        prompt: str,
+        *,
+        cwd: str | None = None,
+        timeout: int | None = None,
+        context: str | None = None,
+    ) -> str:
+        self.calls += 1
+        return f"Stagnant repair call {self.calls}"
+
+    def is_available(self) -> bool:
+        return True
+
+
 class NeedsInputAgent(AgentBackend):
     def __init__(self):
         self.calls = 0
@@ -1321,6 +1340,7 @@ def test_pipeline_no_pr_completes_with_one_candidate(tmp_path):
     assert verification["required_passed"] is True
     assert (run_dir / "artifacts" / "candidate-selection.json").exists()
     assert (run_dir / "artifacts" / "evaluation.json").exists()
+    assert (run_dir / "artifacts" / "final-verification.json").exists()
     assert (run_dir / "artifacts" / "run-outcome.json").exists()
     assert (run_dir / "artifacts" / "run-summary.json").exists()
     assert (run_dir / "pipeline.jsonl").exists()
@@ -1375,6 +1395,7 @@ def test_pipeline_no_pr_completes_with_one_candidate(tmp_path):
     ]
 
     summary = json.loads((run_dir / "artifacts" / "run-summary.json").read_text(encoding="utf-8"))
+    final_verification = json.loads((run_dir / "artifacts" / "final-verification.json").read_text(encoding="utf-8"))
     assert summary["state"] == "Completed"
     assert summary["cost"]["source"] == "cost_jsonl"
     assert summary["cost"]["available"] is True
@@ -1383,6 +1404,10 @@ def test_pipeline_no_pr_completes_with_one_candidate(tmp_path):
     assert summary["artifacts"]["run_summary"].endswith("artifacts/run-summary.json")
     assert summary["candidate_states"]["candidate-1"]["status"] == "success"
     assert summary["logs"]["pipeline"].endswith("pipeline.jsonl")
+    assert final_verification["publish_ready"] is True
+    assert set(final_verification["review_dimensions"]) == {
+        "architecture", "code", "security", "tests", "operability",
+    }
 
 
 def test_publish_outcome_failure_does_not_persist_completed(monkeypatch, tmp_path):
@@ -1743,6 +1768,55 @@ def test_pipeline_repairs_after_failed_candidate(tmp_path):
         (tmp_path / state.candidate_states["repair-2-1"].result_path).read_text(encoding="utf-8")
     )
     assert repair_result["repair_context"]["parent_candidate_id"] == "candidate-1"
+
+
+def test_pipeline_stops_when_candidate_limit_would_be_exceeded(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        "verify:\n  tests: ''\nruntime:\n  candidates: 3\n  max_total_candidates_per_run: 2\n",
+        encoding="utf-8",
+    )
+
+    result = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent()).run_issue(
+        42,
+        no_pr=True,
+    )
+
+    assert result["state"] == "TerminalFailure"
+    assert result["error"]["code"] == "candidate_limit_exceeded"
+
+
+def test_pipeline_stops_when_run_duration_is_exceeded(monkeypatch, tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        "verify:\n  tests: ''\nruntime:\n  max_run_duration_seconds: 1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("gg.orchestrator.pipeline._elapsed_seconds", lambda started_at: 2)
+
+    result = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent()).run_issue(
+        42,
+        no_pr=True,
+    )
+
+    assert result["state"] == "TerminalFailure"
+    assert result["error"]["code"] == "run_timeout"
+
+
+def test_pipeline_stops_after_repair_rounds_with_no_progress(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        "verify:\n  tests: ''\nruntime:\n  max_attempts: 3\n  repair_candidates: 1\n  stop_if_no_progress_after_rounds: 1\n",
+        encoding="utf-8",
+    )
+
+    result = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=StagnantRepairAgent()).run_issue(
+        42,
+        no_pr=True,
+    )
+
+    assert result["state"] == "TerminalFailure"
+    assert result["error"]["code"] == "no_progress"
 
 
 def test_pipeline_baseline_failures_can_be_allowed_when_identical(tmp_path):
@@ -3664,6 +3738,10 @@ def test_init_params_generation(tmp_path):
     assert config.runtime.max_parallel_runs == 1
     assert config.runtime.allow_unsafe_direct_exec is False
     assert config.runtime.require_sandbox_runtime is True
+    assert config.runtime.max_run_duration_seconds is None
+    assert config.runtime.max_total_candidates_per_run is None
+    assert config.runtime.stop_if_no_progress_after_rounds is None
+    assert config.runtime.progress_heartbeat_seconds == 30
     assert config.runtime.analysis_timeout_seconds == 900
     assert config.runtime.evaluation_timeout_seconds == 900
     assert config.runtime.setup_timeout_seconds == 600
@@ -3771,6 +3849,10 @@ log:
     assert merged["runtime"]["candidates"] == 2
     assert merged["log"]["max_size_mb"] == 7
     assert merged["runtime"]["allow_unsafe_direct_exec"] is False
+    assert merged["runtime"]["max_run_duration_seconds"] is None
+    assert merged["runtime"]["max_total_candidates_per_run"] is None
+    assert merged["runtime"]["stop_if_no_progress_after_rounds"] is None
+    assert merged["runtime"]["progress_heartbeat_seconds"] == 30
     assert merged["runtime"]["resource"]["max_disk_mb"] == 4096
     assert merged["runtime"]["network"]["default"] == "deny"
     assert merged["runtime"]["port_range"] == [41000, 45000]

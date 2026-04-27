@@ -287,13 +287,19 @@ def _select_init_backend(
         return available[0]
     if non_interactive:
         return "codex" if "codex" in available else available[0]
+    numbered = {str(index): name for index, name in enumerate(available, start=1)}
+    labels = "  ".join(f"{index}. {name}" for index, name in numbered.items())
+    default_choice = next(
+        (index for index, name in numbered.items() if name == "codex"),
+        next(iter(numbered)),
+    )
     choice = Prompt.ask(
-        "  Multiple init backends available. Which one should be used?",
-        choices=available,
-        default="codex" if "codex" in available else available[0],
+        f"  Multiple init backends available. Which one should be used? {labels}",
+        choices=list(numbered),
+        default=default_choice,
         console=console,
     )
-    return choice
+    return numbered[choice]
 
 
 def _run_analyzers(

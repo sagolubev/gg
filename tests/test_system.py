@@ -2,6 +2,7 @@ from unittest.mock import patch
 
 from gg.utils.system import (
     CheckResult,
+    check_claude,
     check_codex,
     check_git,
     check_glab,
@@ -28,6 +29,14 @@ def test_check_codex_not_found(mock_which):
     assert result.ok is False
     assert result.name == "codex"
     assert "npm install" in result.install_hint
+
+
+@patch("gg.utils.system.shutil.which", return_value=None)
+def test_check_claude_not_found(mock_which):
+    result = check_claude()
+    assert result.ok is False
+    assert result.name == "claude"
+    assert "@anthropic-ai/claude-code" in result.install_hint
 
 
 @patch("gg.utils.system.shutil.which", return_value=None)

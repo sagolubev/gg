@@ -233,6 +233,7 @@ class PollingConfig:
 class AgentConfig:
     backend: str = "codex"
     codex_command: str = "codex"
+    claude_command: str = "claude"
     omx_enabled: bool = False
     omx_command: str = "omx"
     use_omx_exec: bool = False
@@ -277,7 +278,7 @@ def _mapping(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def default_params(project_path: str | Path) -> dict[str, Any]:
+def default_params(project_path: str | Path, *, agent_backend: str = "codex") -> dict[str, Any]:
     root = Path(project_path).resolve()
     return {
         "schema_version": 1,
@@ -319,7 +320,7 @@ def default_params(project_path: str | Path) -> dict[str, Any]:
             "advisory_checks": True,
         },
         "runtime": {
-            "agent_backend": "codex",
+            "agent_backend": agent_backend,
             "candidates": 1,
             "max_parallel_candidates": 1,
             "max_parallel_runs": 1,
@@ -420,9 +421,11 @@ def default_params(project_path: str | Path) -> dict[str, Any]:
             "jitter_seconds": 15,
         },
         "agent": {
-            "backend": "codex",
+            "backend": agent_backend,
             "codex_command": "codex",
-            "omx_enabled": False,
+            "claude_command": "claude",
+                "claude_command": "claude",
+                "omx_enabled": False,
             "omx_command": "omx",
             "use_omx_exec": False,
             "allow_omx_team": False,
@@ -660,10 +663,11 @@ def load_config(project_path: str | Path, *, profile: str | None = None) -> GGCo
                     "poll_interval_seconds": polling.get("poll_interval_seconds", 60),
                     "jitter_seconds": polling.get("jitter_seconds", 15),
                 },
-                "agent": {
-                    "backend": agent.get("backend", "codex"),
-                    "codex_command": agent.get("codex_command", "codex"),
-                    "omx_enabled": agent.get("omx_enabled", False),
+                    "agent": {
+                        "backend": agent.get("backend", "codex"),
+                        "codex_command": agent.get("codex_command", "codex"),
+                        "claude_command": agent.get("claude_command", "claude"),
+                        "omx_enabled": agent.get("omx_enabled", False),
                     "omx_command": agent.get("omx_command", "omx"),
                     "use_omx_exec": agent.get("use_omx_exec", False),
                     "allow_omx_team": agent.get("allow_omx_team", False),
@@ -834,6 +838,7 @@ def load_config(project_path: str | Path, *, profile: str | None = None) -> GGCo
         agent=AgentConfig(
             backend=model.agent.backend,
             codex_command=model.agent.codex_command,
+            claude_command=model.agent.claude_command,
             omx_enabled=model.agent.omx_enabled,
             omx_command=model.agent.omx_command,
             use_omx_exec=model.agent.use_omx_exec,
@@ -967,6 +972,7 @@ def _reject_unknown_config_keys(raw: dict[str, Any], location: str) -> None:
         "agent": {
             "backend",
             "codex_command",
+            "claude_command",
             "omx_enabled",
             "omx_command",
             "use_omx_exec",

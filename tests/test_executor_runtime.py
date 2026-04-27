@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 
 from gg.agents.base import AgentBackend
+from gg.agents.claude import ClaudeAgent
 from gg.orchestrator.config import GGConfig, GitConfig, RuntimeConfig, VerifyConfig
 from gg.orchestrator.executor import CandidateExecutor, CandidateResult
 from gg.orchestrator.schemas import AgentHandoffModel, AgentResultModel
@@ -38,6 +39,25 @@ class MissingSandbox:
 
     def run(self, *args, **kwargs):
         raise AssertionError("sandbox should not run when unavailable")
+
+
+class FakeSandbox:
+    def __init__(self) -> None:
+        self.commands: list[list[str]] = []
+
+    def is_available(self) -> bool:
+        return True
+
+    def run(self, command, *, cwd, timeout, policy=None, env=None, on_process_start=None):
+        self.commands.append(command)
+        if on_process_start is not None:
+            on_process_start(999)
+        Path(cwd, "agent-output.txt").write_text("done\n", encoding="utf-8")
+        return type(
+            "RunResult",
+            (),
+            {"status": "passed", "stdout": "Created agent-output.txt", "stderr": ""},
+        )()
 
 
 def test_required_missing_sandbox_runtime_fails_before_agent_generate(tmp_path):
@@ -76,6 +96,36 @@ def test_allow_unsafe_direct_exec_falls_back_to_agent_generate(tmp_path):
     assert result.status == "success"
     assert result.changed_files == ["agent-output.txt"]
     assert agent.calls == 1
+
+
+def test_claude_agent_declares_backend_capabilities():
+    agent = ClaudeAgent(command="claude")
+
+    assert agent.backend_name() == "claude"
+    assert agent.supports_sandbox_execution() is True
+    assert agent.context_window_tokens() == 200_000
+    assert agent.build_sandbox_command("Implement the task")[:4] == [
+        "claude",
+        "--dangerously-skip-permissions",
+        "--output-format",
+        "text",
+    ]
+
+
+def test_candidate_executor_runs_claude_via_sandbox_stdout(tmp_path):
+    init_repo(tmp_path)
+    sandbox = FakeSandbox()
+    executor = CandidateExecutor(
+        tmp_path,
+        ClaudeAgent(command="claude"),
+        runtime_config(),
+        sandbox=sandbox,
+    )
+
+    result = executor.run(run_id="run-claude-sandbox", issue_number=42, brief=task_brief())
+
+    assert result.status == "success"
+    assert sandbox.commands[0][:2] == ["claude", "--dangerously-skip-permissions"]
 
 
 def test_agent_handoff_and_result_helpers_validate_with_schemas(tmp_path):

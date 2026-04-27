@@ -4,13 +4,14 @@ from collections.abc import Callable
 from pathlib import Path
 
 from gg.agents.base import AgentBackend
+from gg.agents.claude import ClaudeAgent
 from gg.agents.codex import CodexAgent
 from gg.platforms.base import GitPlatform, detect_platform
 from gg.platforms.github import GitHubPlatform
 from gg.platforms.gitlab import GitLabPlatform
 
 PlatformFactory = Callable[..., GitPlatform]
-AgentFactory = Callable[[], AgentBackend]
+AgentFactory = Callable[..., AgentBackend]
 
 
 _PLATFORM_FACTORIES: dict[str, PlatformFactory] = {
@@ -20,6 +21,7 @@ _PLATFORM_FACTORIES: dict[str, PlatformFactory] = {
 
 _AGENT_FACTORIES: dict[str, AgentFactory] = {
     "codex": CodexAgent,
+    "claude": ClaudeAgent,
 }
 
 
@@ -58,13 +60,17 @@ def create_platform(name: str, project_path: str | Path, *, debug: bool = False)
         return factory(project_path)
 
 
-def create_agent_backend(name: str) -> AgentBackend:
+def create_agent_backend(name: str, **kwargs) -> AgentBackend:
     selected = _normalize_name(name)
     try:
-        return _AGENT_FACTORIES[selected]()
+        factory = _AGENT_FACTORIES[selected]
     except KeyError as exc:
         supported = ", ".join(available_agent_backends())
         raise ValueError(f"Unsupported agent backend '{name}'. Supported: {supported}") from exc
+    try:
+        return factory(**kwargs)
+    except TypeError:
+        return factory()
 
 
 def _normalize_name(name: str) -> str:

@@ -6,9 +6,8 @@ import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from gg.agents.codex import CodexAgent
 from gg.orchestrator.config import GGConfig, load_config
-from gg.orchestrator.plugins import create_platform
+from gg.orchestrator.plugins import create_agent_backend, create_platform
 from gg.orchestrator.sandbox import SandboxRuntime
 from gg.utils.git_ops import find_repo_root
 
@@ -51,13 +50,22 @@ def run_doctor(project_path: str | Path) -> dict:
             checks.append(DoctorCheck("params", "fail", str(exc)))
 
     if config is not None:
-        if config.runtime.agent_backend == "codex":
-            codex_available = CodexAgent().is_available()
+        backend_name = config.runtime.agent_backend
+        try:
+            backend = create_agent_backend(
+                backend_name,
+                command=_agent_command(config, backend_name),
+            )
+        except ValueError as exc:
+            checks.append(DoctorCheck("agent_backend", "fail", str(exc)))
+            backend_available = False
+        else:
+            backend_available = backend.is_available()
             checks.append(
                 DoctorCheck(
-                    "codex",
-                    "pass" if codex_available else "fail",
-                    "codex CLI available" if codex_available else "codex CLI not found",
+                    backend_name,
+                    "pass" if backend_available else "fail",
+                    f"{backend_name} CLI available" if backend_available else f"{backend_name} CLI not found",
                 )
             )
         checks.append(_platform_cli_check(config.task_system.platform))
@@ -70,7 +78,7 @@ def run_doctor(project_path: str | Path) -> dict:
                 (
                     "unsafe direct execution is allowed"
                     if config.runtime.allow_unsafe_direct_exec
-                    else "sandbox-runtime required for codex execution"
+                    else f"sandbox-runtime required for {backend_name} execution"
                 ),
             )
         )
@@ -84,7 +92,7 @@ def run_doctor(project_path: str | Path) -> dict:
                 "sandbox-runtime available"
                 if sandbox_available
                 else (
-                    "srt-py not found; safe candidate execution will fail"
+                    f"srt-py not found; safe {backend_name} candidate execution will fail"
                     if sandbox_required
                     else "srt-py not found; unsafe direct execution is configured"
                 ),
@@ -124,6 +132,15 @@ def _platform_cli_check(platform: str) -> DoctorCheck:
         found = "gh" if gh_available else "glab"
         return DoctorCheck("platform_cli", "pass", f"{found} found for auto platform mode")
     return DoctorCheck("platform_cli", "warn", "gh/glab not found; platform operations may fail")
+
+
+def _agent_command(config: GGConfig, backend: str) -> str | None:
+    selected = backend.strip().lower()
+    if selected == "codex":
+        return config.agent.codex_command
+    if selected == "claude":
+        return config.agent.claude_command
+    return None
 
 
 def _platform_auth_check(root: Path, config: GGConfig) -> DoctorCheck:

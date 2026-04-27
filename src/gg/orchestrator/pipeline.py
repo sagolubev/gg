@@ -18,7 +18,6 @@ from typing import Any
 log = logging.getLogger("gg.pipeline")
 
 from gg.agents.base import AgentBackend
-from gg.agents.codex import CodexAgent
 from gg.knowledge.engine import KnowledgeEngine
 from gg.orchestrator.config import GGConfig, load_config
 from gg.orchestrator.context import ContextSnapshotStore
@@ -91,7 +90,11 @@ class OrchestratorPipeline:
         self.platform = platform or create_platform(
             self.config.task_system.platform, self.project_path, debug=debug,
         )
-        self.agent = agent or create_agent_backend(self.config.runtime.agent_backend)
+        self.agent = agent or create_agent_backend(
+            self.config.runtime.agent_backend,
+            command=_agent_command(self.config, self.config.runtime.agent_backend),
+            debug=debug,
+        )
         self.knowledge = KnowledgeEngine(self.project_path)
         self._projects = self._build_projects_client()
         self._state_update_lock = threading.Lock()
@@ -816,15 +819,16 @@ class OrchestratorPipeline:
         no_pr: bool,
         initial_repair_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        log.info("[%s] selecting agent backend", state.run_id)
-        state.transition(TaskState.AGENT_SELECTION, reason="select codex backend")
+        log.info("[%s] selecting agent backend %s", state.run_id, self.config.runtime.agent_backend)
+        state.transition(TaskState.AGENT_SELECTION, reason="select agent backend")
         if not self.agent.is_available():
             state.transition(TaskState.BLOCKED, reason="agent backend unavailable")
             state.blocked_resume_state = TaskState.AGENT_SELECTION
             state.blocked_until = None
-            state.last_error = {"code": "missing_agent", "message": "Codex CLI is not available"}
+            backend_name = self.config.runtime.agent_backend
+            state.last_error = {"code": "missing_agent", "message": f"{backend_name} CLI is not available"}
             self.store.write(state)
-            self._mark_issue_blocked(issue.number, state.run_id, "Codex CLI is not available")
+            self._mark_issue_blocked(issue.number, state.run_id, f"{backend_name} CLI is not available")
             return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
 
         executor = CandidateExecutor(self.project_path, self.agent, self.config)
@@ -2416,8 +2420,6 @@ class OrchestratorPipeline:
         return brief
 
     def _task_analysis_agent(self) -> AgentBackend | None:
-        if isinstance(self.agent, CodexAgent):
-            return self.agent
         if getattr(self.agent, "supports_task_analysis", False):
             return self.agent
         return None
@@ -2791,6 +2793,15 @@ def _agent_context_window_tokens(agent: AgentBackend | None) -> int | None:
     if callable(value):
         value = value()
     return value if isinstance(value, int) and value > 0 else None
+
+
+def _agent_command(config: GGConfig, backend: str) -> str | None:
+    selected = backend.strip().lower()
+    if selected == "codex":
+        return config.agent.codex_command
+    if selected == "claude":
+        return config.agent.claude_command
+    return None
 
 
 def _terminate_process_group(pid: int) -> bool:

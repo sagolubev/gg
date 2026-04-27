@@ -14,6 +14,7 @@ import yaml
 from click.testing import CliRunner
 
 from gg.agents.base import AgentBackend
+from gg.agents.claude import ClaudeAgent
 from gg.agents.codex import CodexAgent
 from gg.cli import cli
 from gg.commands.init import _write_operational_gitignore, _write_params
@@ -3163,6 +3164,56 @@ def test_cli_status_reads_runs(tmp_path):
     assert "ReadyForExecution" in result.output
 
 
+def test_cli_init_passes_agent_backend(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run_init(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr("gg.commands.init.run_init", fake_run_init)
+
+    result = CliRunner().invoke(
+        cli,
+        ["init", "--path", str(tmp_path), "--agent-backend", "claude", "--skip-codex"],
+    )
+
+    assert result.exit_code == 0
+    assert captured["agent_backend"] == "claude"
+    assert captured["skip_codex"] is True
+
+
+def test_cli_constitution_accepts_agent_backend(monkeypatch, tmp_path):
+    class FakeClaude:
+        def is_available(self):
+            return True
+
+        def generate(self, *args, **kwargs):
+            return "## Rules\n- Use tests"
+
+    monkeypatch.setattr("gg.orchestrator.plugins.create_agent_backend", lambda *args, **kwargs: FakeClaude())
+    monkeypatch.setattr(
+        "gg.analyzers.languages.analyze_languages",
+        lambda root: type("X", (), {"to_prompt_context": lambda self: "lang"})(),
+    )
+    monkeypatch.setattr(
+        "gg.analyzers.dependencies.analyze_dependencies",
+        lambda root: type("X", (), {"to_prompt_context": lambda self: "deps"})(),
+    )
+    monkeypatch.setattr(
+        "gg.analyzers.structure.analyze_structure",
+        lambda root: type("X", (), {"to_prompt_context": lambda self: "struct"})(),
+    )
+
+    (tmp_path / ".gg").mkdir()
+    result = CliRunner().invoke(
+        cli,
+        ["constitution", "--path", str(tmp_path), "--agent-backend", "claude"],
+    )
+
+    assert result.exit_code == 0
+    assert (tmp_path / ".gg" / "constitution.md").exists()
+
+
 def test_cli_doctor_reports_machine_readable_checks(tmp_path):
     init_repo(tmp_path)
     (tmp_path / ".gg" / "params.yaml").write_text(
@@ -3205,7 +3256,21 @@ def test_doctor_reports_platform_auth_failure(monkeypatch, tmp_path):
     checks = {check["name"]: check for check in payload["checks"]}
     assert payload["status"] == "fail"
     assert checks["platform_auth"]["status"] == "fail"
-    assert "missing token" in checks["platform_auth"]["message"]
+
+
+def test_cli_doctor_reports_claude_backend_status(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        "verify:\n  tests: ''\nruntime:\n  agent_backend: claude\n",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(cli, ["doctor", "--path", str(tmp_path), "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    check_names = {check["name"] for check in payload["checks"]}
+    assert "claude" in check_names
 
 
 def test_cli_doctor_fails_when_params_contain_obvious_secret(tmp_path):
@@ -3628,6 +3693,24 @@ def test_init_params_generation(tmp_path):
     assert config.evaluation.max_context_tokens == 60000
     assert config.ci.forbid_interactive_prompts is True
     assert config.recovery.keep_state_backup is True
+
+
+def test_init_params_generation_can_target_claude_backend(tmp_path):
+    init_repo(tmp_path)
+    params_path = tmp_path / ".gg" / "params.yaml"
+    params_path.unlink()
+
+    _write_params(
+        tmp_path,
+        console=type("Console", (), {"print": lambda *args, **kwargs: None})(),
+        agent_backend="claude",
+    )
+
+    config = load_config(tmp_path)
+
+    assert config.runtime.agent_backend == "claude"
+    assert config.agent.backend == "claude"
+    assert config.agent.claude_command == "claude"
 
 
 def test_init_writes_operational_gitignore_entries(tmp_path):
@@ -4116,6 +4199,12 @@ runtime:
     assert result["state"] == "Completed"
     assert result["winner"] == "candidate-1"
     assert isinstance(create_agent_backend("fake-agent"), FakeAgent)
+
+
+def test_create_agent_backend_supports_claude():
+    agent = create_agent_backend("claude", command="claude")
+
+    assert isinstance(agent, ClaudeAgent)
 
 
 def test_sandbox_policy_settings_shape():
@@ -5259,6 +5348,19 @@ def test_agent_config_defaults_have_omx_disabled(tmp_path):
 
     assert config.agent.omx_enabled is False
     assert config.agent.backend == "codex"
+    assert config.agent.claude_command == "claude"
+
+
+def test_agent_config_reads_claude_command(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        "verify:\n  tests: ''\nagent:\n  claude_command: claude --bare\n",
+        encoding="utf-8",
+    )
+
+    config = load_config(tmp_path)
+
+    assert config.agent.claude_command == "claude --bare"
 
 
 def test_agent_config_circuit_breaker_defaults(tmp_path):

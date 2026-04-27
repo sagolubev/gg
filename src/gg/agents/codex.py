@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -53,9 +54,12 @@ def _get_fast_mode_flags() -> list[str]:
 
 
 class CodexAgent(AgentBackend):
-    def __init__(self, console=None, debug: bool = False):
+    supports_task_analysis = True
+
+    def __init__(self, console=None, debug: bool = False, command: str = "codex"):
         self._console = console
         self._debug = debug
+        self._command = command
 
     def generate(self, prompt: str, *, cwd: str | None = None, timeout: int | None = None,
                  context: str | None = None) -> str:
@@ -99,7 +103,7 @@ class CodexAgent(AgentBackend):
         full_input = f"{context}\n\n---\n\n{prompt}"
 
         cmd = [
-            "codex", "exec",
+            *self._command_args(), "exec",
             "--sandbox", "read-only",
             "--skip-git-repo-check",
             "--ephemeral",
@@ -142,7 +146,7 @@ class CodexAgent(AgentBackend):
         """Full agent mode: Codex reads files, uses tools."""
         stop_event = threading.Event()
         proc = subprocess.Popen(
-            ["codex", "exec", "-o", str(out_path), prompt],
+            [*self._command_args(), "exec", "-o", str(out_path), prompt],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -188,7 +192,7 @@ class CodexAgent(AgentBackend):
     def _run_silent(self, prompt: str, out_path: Path, cwd: str | None,
                     timeout: int = CODEX_TIMEOUT) -> str:
         result = subprocess.run(
-            ["codex", "exec", "-o", str(out_path), prompt],
+            [*self._command_args(), "exec", "-o", str(out_path), prompt],
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -204,4 +208,23 @@ class CodexAgent(AgentBackend):
         return output
 
     def is_available(self) -> bool:
-        return shutil.which("codex") is not None
+        binary = self._command_args()[0] if self._command_args() else "codex"
+        return shutil.which(binary) is not None
+
+    def supports_sandbox_execution(self) -> bool:
+        return True
+
+    def build_sandbox_command(self, prompt: str, *, output_path: str | None = None) -> list[str]:
+        if not output_path:
+            raise ValueError("Codex sandbox execution requires output_path")
+        return [
+            *self._command_args(),
+            "exec",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "-o",
+            output_path,
+            prompt,
+        ]
+
+    def _command_args(self) -> list[str]:
+        return shlex.split(self._command.strip() or "codex")

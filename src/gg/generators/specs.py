@@ -50,8 +50,8 @@ class UserContext:
 def discover_context_via_codex(
     agent: "AgentBackend", project_path: str, console: Console,
 ) -> UserContext:
-    """Let Codex discover project context instead of asking the user."""
-    console.print("  [bold]Codex researching project context...[/bold]")
+    """Let the configured agent discover project context instead of asking the user."""
+    console.print(f"  [bold]{agent.backend_name()} researching project context...[/bold]")
     try:
         raw = agent.generate(CODEX_RESEARCH_PROMPT, cwd=project_path, timeout=120)
         return _parse_research_output(raw)
@@ -81,7 +81,7 @@ def _parse_research_output(raw: str) -> UserContext:
 
 
 def ask_user_context(console: Console) -> UserContext:
-    """Fallback: ask user manually if Codex is not available."""
+    """Fallback: ask user manually if the selected agent is not available."""
     description = Prompt.ask(
         "[bold]Опишите проект[/bold] в 1-2 предложениях",
         default="",
@@ -133,7 +133,7 @@ def _create_openspec_dirs(project_path: Path) -> None:
 
 
 def _parse_codex_output(raw: str) -> dict[str, str]:
-    """Split Codex output into sections by markdown headers."""
+    """Split agent output into sections by markdown headers."""
     sections: dict[str, str] = {}
     current_key = "constitution"
     current_lines: list[str] = []
@@ -345,7 +345,7 @@ def generate_specs(
         console.print(f"    Found existing CLAUDE.md ({len(existing_claude_md)} chars), will incorporate")
 
     if agent and agent.is_available():
-        console.print("    Sending minimal context to Codex...")
+        console.print(f"    Sending minimal context to {agent.backend_name()}...")
         from gg.analyzers.languages import analyze_languages as _al
         from gg.analyzers.dependencies import analyze_dependencies as _ad
         from gg.analyzers.structure import analyze_structure as _as
@@ -376,7 +376,7 @@ def generate_specs(
         console.print(f"    Context: {len(compact_context)} chars")
         try:
             raw = agent.generate(prompt, context=compact_context, timeout=60)
-            console.print("    Parsing Codex response...")
+            console.print("    Parsing agent response...")
             sections = _parse_codex_output(raw)
             console.print(f"    Found {len(sections)} sections: {', '.join(sections.keys())}")
             console.print("    Writing constitution...")
@@ -385,14 +385,14 @@ def generate_specs(
             _write_specs(root, sections, user_ctx)
             console.print("    Writing concept...")
             spec_files = [f for f in (root / "openspec" / "specs").iterdir() if f.is_file()]
-            console.print(f"  [green]  -> constitution.md + {len(spec_files)} spec files via Codex[/green]")
+            console.print(f"  [green]  -> constitution.md + {len(spec_files)} spec files via {agent.backend_name()}[/green]")
         except RuntimeError as e:
-            console.print(f"    [yellow]Codex failed: {e}[/yellow]")
+            console.print(f"    [yellow]{agent.backend_name()} failed: {e}[/yellow]")
             console.print("    Falling back to local analysis...")
             _generate_local_fallback(root, analyzer_context, user_ctx)
             console.print("  [green]  -> constitution.md from local analysis[/green]")
     else:
-        console.print("    [yellow]Codex not available[/yellow]")
+        console.print("    [yellow]Agent backend not available[/yellow]")
         console.print("    Generating from local analysis...")
         _generate_local_fallback(root, analyzer_context, user_ctx)
         console.print("  [green]  -> constitution.md from local analysis[/green]")

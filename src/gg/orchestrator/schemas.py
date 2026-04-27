@@ -231,6 +231,7 @@ class PollingConfigModel(StrictArtifactModel):
 class AgentConfigModel(StrictArtifactModel):
     backend: str = "codex"
     codex_command: str = "codex"
+    claude_command: str = "claude"
     omx_enabled: bool = False
     omx_command: str = "omx"
     use_omx_exec: bool = False

@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shlex
 import subprocess
 import sys
 import tempfile
@@ -14,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from gg.agents.base import AgentBackend
+from gg.agents.claude import ClaudeAgent
 from gg.agents.codex import CodexAgent
 from gg.orchestrator.config import GGConfig
 from gg.orchestrator.git import changed_files, current_commit, diff, safe_branch_slug
@@ -137,8 +137,8 @@ class CandidateExecutor:
         sandbox: SandboxRuntime | None = None,
     ):
         self.project_path = Path(project_path).resolve()
-        self.agent = agent
         self.config = config
+        self.agent = _configured_agent(agent, config)
         self._sandbox_explicit = sandbox is not None
         self.sandbox = sandbox or SandboxRuntime()
 
@@ -231,7 +231,7 @@ class CandidateExecutor:
         return {
             "schema_version": 1,
             "mode": mode,
-            "backend": self.config.agent.backend,
+            "backend": self.agent.backend_name(),
             "required": required,
             "available": available,
             "use_sandbox_runtime": self.config.runtime.use_sandbox_runtime,
@@ -247,7 +247,7 @@ class CandidateExecutor:
             self.config.runtime.use_sandbox_runtime
             and self.config.runtime.require_sandbox_runtime
             and not self.config.runtime.allow_unsafe_direct_exec
-            and (isinstance(self.agent, CodexAgent) or self._sandbox_explicit)
+            and (self.agent.supports_sandbox_execution() or self._sandbox_explicit)
         )
 
     def run(
@@ -384,7 +384,7 @@ class CandidateExecutor:
         port: int | None = None,
         on_status: CandidateStatusCallback | None = None,
     ) -> str:
-        if self.config.runtime.use_sandbox_runtime and isinstance(self.agent, CodexAgent):
+        if self.config.runtime.use_sandbox_runtime and self.agent.supports_sandbox_execution():
             if self.sandbox.is_available():
                 return self._generate_in_sandbox(prompt, worktree, port=port, on_status=on_status)
         if self.sandbox_preflight_error() is not None:
@@ -404,9 +404,9 @@ class CandidateExecutor:
         on_status: CandidateStatusCallback | None = None,
     ) -> str:
         out_path = Path(tempfile.mktemp(prefix="gg-candidate-", suffix=".md", dir=str(worktree)))
-        codex_command = shlex.split(self.config.agent.codex_command.strip() or "codex")
+        command = list(self.agent.build_sandbox_command(prompt, output_path=str(out_path)))
         result = self.sandbox.run(
-            [*codex_command, "exec", "--dangerously-bypass-approvals-and-sandbox", "-o", str(out_path), prompt],
+            command,
             cwd=worktree,
             timeout=self.config.runtime.candidate_timeout_seconds,
             policy=self._sandbox_policy(),
@@ -415,12 +415,12 @@ class CandidateExecutor:
                 (lambda pid: on_status({"sandbox_pid": pid})) if on_status is not None else None
             ),
         )
-        output = out_path.read_text(encoding="utf-8").strip() if out_path.exists() else ""
+        output = out_path.read_text(encoding="utf-8").strip() if out_path.exists() else result.stdout.strip()
         out_path.unlink(missing_ok=True)
         if result.status == "timeout":
-            raise subprocess.TimeoutExpired("codex exec", self.config.runtime.candidate_timeout_seconds)
+            raise subprocess.TimeoutExpired(" ".join(command[:2]), self.config.runtime.candidate_timeout_seconds)
         if result.status != "passed" and not output:
-            raise RuntimeError(result.stderr.strip() or "sandboxed codex execution failed")
+            raise RuntimeError(result.stderr.strip() or "sandboxed agent execution failed")
         return output
 
     def _sandbox_policy(self) -> SandboxPolicy:
@@ -615,6 +615,22 @@ def _call_optional(target: Any, method_name: str) -> Any:
         return method()
     except Exception:
         return None
+
+
+def _configured_agent(agent: AgentBackend, config: GGConfig) -> AgentBackend:
+    if isinstance(agent, CodexAgent):
+        return CodexAgent(
+            console=getattr(agent, "_console", None),
+            debug=getattr(agent, "_debug", False),
+            command=config.agent.codex_command,
+        )
+    if isinstance(agent, ClaudeAgent):
+        return ClaudeAgent(
+            console=getattr(agent, "_console", None),
+            debug=getattr(agent, "_debug", False),
+            command=config.agent.claude_command,
+        )
+    return agent
 
 
 def _utc_now() -> str:

@@ -16,7 +16,7 @@ The current implementation is centered around a durable state machine, resumable
 
 **How It Works**
 
-1. `gg init` creates `.gg/params.yaml`, operational `.gitignore` entries, and repo-local runtime defaults.
+1. `gg init` creates `.gg/params.yaml`, operational `.gitignore` entries, and repo-local runtime defaults. It can use either Codex or Claude for constitution/spec generation.
 2. `gg issue <n>` or `gg run` creates a run record, claims the task, and writes state transitions into `.gg/runs/<run_id>/state.json`.
 3. Task analysis builds a `task-brief` from the issue, comments, local inputs, and repo context from the knowledge engine.
 4. The orchestrator allocates candidate worktrees, runs agents, captures patches and artifacts, and executes verification commands.
@@ -57,7 +57,7 @@ flowchart TD
 
 - **Durable state**: each run has `state.json`, `pipeline.jsonl`, `errors.jsonl`, `cost.jsonl`, versioned task briefs, context snapshots, candidate artifacts, evaluation artifacts, and run summaries.
 - **Worktree isolation**: every candidate runs in its own git worktree under `.gg-worktrees/`.
-- **Sandbox-aware execution**: Codex execution can run through `sandbox-runtime`; preflight artifacts record whether the sandbox is required and available.
+- **Sandbox-aware execution**: coding backends can run through `sandbox-runtime`; preflight artifacts record whether the sandbox is required and available.
 - **Verification-first evaluation**: candidates are scored only after verification results, policy checks, mutation checks, and baseline comparison.
 - **Idempotent publish flow**: publishing stays in `OutcomePublishing` until all side effects are complete.
 - **Tracker semantics**: PR-backed runs move issues into `in review`; local / no-PR runs mark them done directly.
@@ -67,6 +67,7 @@ flowchart TD
 
 ```bash
 gg init
+gg init --agent-backend claude
 gg doctor --json
 gg issue 42
 gg issue 42 --dry-run
@@ -79,6 +80,7 @@ gg provide <run-id> --message "Use Spanish"
 gg cancel <run-id> --abandon-worktrees
 gg clean --dry-run
 gg status --json
+gg constitution --agent-backend claude
 ```
 
 **Configuration**
@@ -95,7 +97,7 @@ Important sections:
 - `audit`: event hashing, artifact hashing, external audit sink.
 - `cost`: optional budgets for exact token / USD metrics.
 - `cleanup`: `blocked_timeout_days`, `keep_last`, `ttl_days`.
-- `agent`: Codex command and backend retry / breaker settings.
+- `agent`: backend commands (`codex_command`, `claude_command`) and retry / breaker settings.
 
 **Artifacts**
 

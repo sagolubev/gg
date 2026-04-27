@@ -25,19 +25,20 @@ def cli():
 @cli.command()
 @click.option("--path", type=click.Path(exists=True), default=".", help="Target project path.")
 @click.option("--force", is_flag=True, help="Overwrite existing .gg/ directory.")
-@click.option("--skip-codex", is_flag=True, help="Skip Codex analysis, use local-only.")
+@click.option("--skip-codex", is_flag=True, help="Skip agent-backed analysis, use local-only.")
+@click.option("--agent-backend", type=click.Choice(["codex", "claude"]), default="codex", show_default=True, help="LLM backend to use for init-time constitution/spec generation.")
 @click.option("--skip-knowledge", is_flag=True, help="Skip knowledge system build (faster for large repos).")
 @click.option("--non-interactive", is_flag=True, help="No interactive prompts.")
 @click.option("--deep", is_flag=True, help="Run deep code audit (security, quality, error handling).")
-@click.option("--debug", is_flag=True, help="Show Codex input/output and verbose logging.")
-def init(path, force, skip_codex, skip_knowledge, non_interactive, deep, debug):
+@click.option("--debug", is_flag=True, help="Show backend input/output and verbose logging.")
+def init(path, force, skip_codex, agent_backend, skip_knowledge, non_interactive, deep, debug):
     """Initialize project: analyze codebase, generate specs and knowledge."""
     from gg.commands.init import run_init
 
     run_init(
         path=path, force=force, skip_codex=skip_codex,
         skip_knowledge=skip_knowledge, non_interactive=non_interactive,
-        deep=deep, debug=debug,
+        deep=deep, debug=debug, agent_backend=agent_backend,
     )
 
 
@@ -140,24 +141,25 @@ def knowledge_context(issue_title, body, path):
 
 @cli.command()
 @click.option("--path", type=click.Path(exists=True), default=".", help="Project path.")
-@click.option("--debug", is_flag=True, help="Show Codex output.")
-def constitution(path, debug):
-    """Regenerate constitution using Codex (takes 2-5 min)."""
+@click.option("--agent-backend", type=click.Choice(["codex", "claude"]), default="codex", show_default=True, help="LLM backend to use for constitution generation.")
+@click.option("--debug", is_flag=True, help="Show backend output.")
+def constitution(path, agent_backend, debug):
+    """Regenerate constitution using the selected backend (takes 2-5 min)."""
     from rich.console import Console
 
-    from gg.agents.codex import CodexAgent
+    from gg.orchestrator.plugins import create_agent_backend
     from gg.analyzers.dependencies import analyze_dependencies
     from gg.analyzers.languages import analyze_languages
     from gg.analyzers.structure import analyze_structure
 
     console = Console()
-    agent = CodexAgent(console=console, debug=debug)
+    agent = create_agent_backend(agent_backend, console=console, debug=debug)
     if not agent.is_available():
-        console.print("[red]Codex CLI not found.[/red]")
+        console.print(f"[red]{agent_backend} CLI not found.[/red]")
         raise SystemExit(1)
 
-    console.print("[bold]Generating constitution via Codex...[/bold]")
-    console.print("  This sends a compact project summary to Codex (read-only, no file access).")
+    console.print(f"[bold]Generating constitution via {agent_backend}...[/bold]")
+    console.print(f"  This sends a compact project summary to {agent_backend} (read-only, no file access).")
     console.print("  MCP hooks may add startup time. Please wait.\n")
 
     root = Path(path).resolve()
@@ -182,9 +184,9 @@ def constitution(path, debug):
             (gg_dir / "constitution.md").write_text(f"# Project Constitution\n\n{raw}\n", encoding="utf-8")
             console.print(f"\n[green]Constitution written to .gg/constitution.md ({len(raw)} chars)[/green]")
         else:
-            console.print("[yellow]Codex returned empty response. Local constitution unchanged.[/yellow]")
+            console.print(f"[yellow]{agent_backend} returned empty response. Local constitution unchanged.[/yellow]")
     except RuntimeError as e:
-        console.print(f"[red]Codex failed: {e}[/red]")
+        console.print(f"[red]{agent_backend} failed: {e}[/red]")
         console.print("Local constitution in .gg/constitution.md is still valid.")
 
 
@@ -196,11 +198,30 @@ def _build_pipeline(path, *, debug: bool = False, profile: str | None = None):
 
     from rich.console import Console
 
-    from gg.agents.codex import CodexAgent
+    from gg.orchestrator.config import load_config
+    from gg.orchestrator.plugins import create_agent_backend
 
+    config = load_config(path, profile=profile)
     return OrchestratorPipeline(
-        path, agent=CodexAgent(console=Console(), debug=True), profile=profile, debug=True,
+        path,
+        agent=create_agent_backend(
+            config.runtime.agent_backend,
+            command=_backend_command(config, config.runtime.agent_backend),
+            console=Console(),
+            debug=True,
+        ),
+        profile=profile,
+        debug=True,
     )
+
+
+def _backend_command(config, backend: str) -> str | None:
+    selected = backend.strip().lower()
+    if selected == "codex":
+        return config.agent.codex_command
+    if selected == "claude":
+        return config.agent.claude_command
+    return None
 
 
 @cli.command()
@@ -214,7 +235,7 @@ def _build_pipeline(path, *, debug: bool = False, profile: str | None = None):
 @click.option("--repair-fanout", type=int, default=None, help="Override repair candidate fanout.")
 @click.option("--timeout", type=int, default=None, help="Override candidate timeout in seconds.")
 @click.option("--base", default=None, help="Override target default branch for publishing.")
-@click.option("--debug", is_flag=True, help="Show Codex output and verbose agent progress.")
+@click.option("--debug", is_flag=True, help="Show backend output and verbose agent progress.")
 @click.option("--profile", default=None, help="Apply a named config profile from params.yaml profiles section.")
 @click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
 @click.option("--watch", is_flag=True, help="Poll continuously; retry every --poll-interval seconds when no issue found.")
@@ -323,7 +344,7 @@ def run(
 @click.option("--timeout", type=int, default=None, help="Override candidate timeout in seconds.")
 @click.option("--base", default=None, help="Override target default branch for publishing.")
 @click.option("--label", "labels", multiple=True, help="Additional label to apply to the issue.")
-@click.option("--debug", is_flag=True, help="Show Codex output and verbose agent progress.")
+@click.option("--debug", is_flag=True, help="Show backend output and verbose agent progress.")
 @click.option("--profile", default=None, help="Apply a named config profile from params.yaml profiles section.")
 @click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
 def issue(

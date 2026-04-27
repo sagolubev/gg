@@ -62,6 +62,19 @@ def check_codex() -> CheckResult:
     return CheckResult("codex", ok, out if ok else "installed", required=False)
 
 
+def check_claude() -> CheckResult:
+    if not shutil.which("claude"):
+        return CheckResult(
+            "claude",
+            False,
+            "not found",
+            required=False,
+            install_hint="npm install -g @anthropic-ai/claude-code",
+        )
+    ok, out = _run_silent(["claude", "--version"])
+    return CheckResult("claude", ok, out if ok else "installed", required=False)
+
+
 def check_grepai() -> CheckResult:
     if not shutil.which("grepai"):
         hint = "brew install yoanbernabeu/tap/grepai" if platform.system() == "Darwin" else "curl -sSL https://raw.githubusercontent.com/yoanbernabeu/grepai/main/install.sh | sh"
@@ -95,7 +108,17 @@ def check_python_version() -> CheckResult:
     return CheckResult("python", False, f"{version_str} (need >=3.10)", required=True)
 
 
-ALL_CHECKS = [check_python_version, check_git, check_gh, check_glab, check_codex, check_sandbox_runtime, check_openspec, check_grepai]
+ALL_CHECKS = [
+    check_python_version,
+    check_git,
+    check_gh,
+    check_glab,
+    check_codex,
+    check_claude,
+    check_sandbox_runtime,
+    check_openspec,
+    check_grepai,
+]
 
 
 def run_all_checks(*, offer_install: bool = True) -> list[CheckResult]:

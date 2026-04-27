@@ -5614,7 +5614,7 @@ def _make_projects_client(monkeypatch, output: str, *, owner: str = "acme", proj
     return GitHubProjectsClient(owner=owner, project_number=project_number)
 
 
-def test_get_issues_in_status_top_level_status_field(monkeypatch):
+def test_get_issues_in_status_top_level_status_field(monkeypatch, tmp_path):
     from gg.platforms.github_projects import GitHubProjectsClient
 
     gh_output = json.dumps({
@@ -5629,7 +5629,7 @@ def test_get_issues_in_status_top_level_status_field(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    client = GitHubProjectsClient(owner="acme", project_number=1)
+    client = GitHubProjectsClient(owner="acme", project_number=1, cwd=str(tmp_path))
     result = client.get_issues_in_status("Ready")
 
     assert result == {10}
@@ -5658,7 +5658,7 @@ def test_get_issues_in_status_dict_field_values(monkeypatch, tmp_path):
     assert 20 not in result
 
 
-def test_get_issues_in_status_list_field_values(monkeypatch):
+def test_get_issues_in_status_list_field_values(monkeypatch, tmp_path):
     from gg.platforms.github_projects import GitHubProjectsClient
 
     gh_output = json.dumps({
@@ -5685,13 +5685,13 @@ def test_get_issues_in_status_list_field_values(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    client = GitHubProjectsClient(owner="acme", project_number=1)
+    client = GitHubProjectsClient(owner="acme", project_number=1, cwd=str(tmp_path))
     result = client.get_issues_in_status("Ready")
 
     assert result == {5}
 
 
-def test_get_issues_in_status_case_insensitive(monkeypatch):
+def test_get_issues_in_status_case_insensitive(monkeypatch, tmp_path):
     from gg.platforms.github_projects import GitHubProjectsClient
 
     gh_output = json.dumps({
@@ -5705,10 +5705,68 @@ def test_get_issues_in_status_case_insensitive(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    client = GitHubProjectsClient(owner="acme", project_number=1)
+    client = GitHubProjectsClient(owner="acme", project_number=1, cwd=str(tmp_path))
     result = client.get_issues_in_status("ready")
 
     assert 7 in result
+
+
+def test_get_issues_in_status_uses_ttl_cache(monkeypatch, tmp_path):
+    from gg.platforms.github_projects import GitHubProjectsClient
+
+    gh_output = json.dumps({
+        "items": [
+            {"id": "PVTI_1", "content": {"number": 10}, "status": "Ready"},
+        ]
+    })
+    calls = {"count": 0}
+
+    def fake_run(cmd, **kwargs):
+        calls["count"] += 1
+        return subprocess.CompletedProcess(cmd, 0, gh_output, "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    client = GitHubProjectsClient(owner="acme", project_number=1, cwd=str(tmp_path), cache_ttl_seconds=60)
+    first = client.get_issues_in_status("Ready")
+    second = client.get_issues_in_status("Ready")
+
+    assert first == {10}
+    assert second == {10}
+    assert calls["count"] == 1
+
+
+def test_get_issues_in_status_uses_cached_items_when_rate_limited(monkeypatch, tmp_path):
+    from gg.platforms.github_projects import GitHubProjectsClient
+
+    gh_output = json.dumps({
+        "items": [
+            {"id": "PVTI_1", "content": {"number": 10}, "status": "Ready"},
+        ]
+    })
+    calls = {"count": 0}
+
+    def fake_run(cmd, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return subprocess.CompletedProcess(cmd, 0, gh_output, "")
+        return subprocess.CompletedProcess(
+            cmd,
+            1,
+            "",
+            "GraphQL: API rate limit exceeded for user ID 1.",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    client = GitHubProjectsClient(owner="acme", project_number=1, cwd=str(tmp_path), cache_ttl_seconds=1)
+    first = client.get_issues_in_status("Ready")
+    client._items_cache_expires_at = 0
+    second = client.get_issues_in_status("Ready")
+
+    assert first == {10}
+    assert second == {10}
+    assert calls["count"] == 2
 
 
 # ---------------------------------------------------------------------------

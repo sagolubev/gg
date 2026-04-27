@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+import time
 from dataclasses import dataclass, field
 from typing import Any
+
+from gg.orchestrator.rate_limit import RateLimitStore, RateLimitThrottleError, extract_retry_after_seconds
 
 log = logging.getLogger("gg.github_projects")
 
@@ -27,12 +30,18 @@ class GitHubProjectsClient:
         project_number: int,
         status_field: str = "Status",
         cwd: str = ".",
+        rate_limit_store: RateLimitStore | None = None,
+        cache_ttl_seconds: int = 60,
     ):
         self.owner = owner
         self.project_number = project_number
         self.status_field = status_field
         self.cwd = cwd
+        self._rate_limit_store = rate_limit_store or RateLimitStore(cwd)
+        self._cache_ttl_seconds = max(1, cache_ttl_seconds)
         self._cache = _ProjectCache()
+        self._items_cache: list[dict[str, Any]] = []
+        self._items_cache_expires_at: float = 0.0
 
     # ------------------------------------------------------------------ public
 
@@ -104,14 +113,25 @@ class GitHubProjectsClient:
         return ""
 
     def _paginate_items(self) -> list[dict[str, Any]]:
-        out = self._gh(
-            "project", "item-list", str(self.project_number),
-            "--owner", self.owner,
-            "--format", "json",
-            "--limit", "500",
-        )
+        now = time.monotonic()
+        if self._items_cache and now < self._items_cache_expires_at:
+            return list(self._items_cache)
+        try:
+            out = self._gh(
+                "project", "item-list", str(self.project_number),
+                "--owner", self.owner,
+                "--format", "json",
+                "--limit", "500",
+            )
+        except RateLimitThrottleError:
+            if self._items_cache:
+                return list(self._items_cache)
+            raise
         data = json.loads(out) if out else {}
-        return data.get("items") or []
+        items = data.get("items") or []
+        self._items_cache = list(items)
+        self._items_cache_expires_at = now + self._cache_ttl_seconds
+        return items
 
     def _get_field_option(self, status_name: str) -> tuple[str, str, str]:
         if self._cache.project_id and self._cache.field_id and status_name in self._cache.options:
@@ -148,10 +168,33 @@ class GitHubProjectsClient:
         return self._cache.project_id, self._cache.field_id, option_id
 
     def _gh(self, *args: str) -> str:
+        bucket = self._bucket("project-item-list" if args[:2] == ("project", "item-list") else "project-mutation")
+        self._raise_if_throttled(bucket)
         result = subprocess.run(
             ["gh", *args],
             capture_output=True, text=True, timeout=30, cwd=self.cwd,
         )
+        header_text = "\n".join(part for part in (result.stderr, result.stdout) if part)
+        snapshot = self._rate_limit_store.record_http_headers(bucket, header_text)
         if result.returncode != 0:
+            if self._looks_rate_limited(result.stderr) or self._looks_rate_limited(result.stdout):
+                snapshot = snapshot or self._rate_limit_store.backoff(
+                    bucket,
+                    retry_after_seconds=extract_retry_after_seconds(header_text) or 60,
+                )
+                raise RateLimitThrottleError(snapshot)
             raise RuntimeError(f"gh {' '.join(args[:3])} failed: {result.stderr.strip()[:200]}")
         return result.stdout.strip()
+
+    def _bucket(self, scope: str) -> str:
+        return f"github-projects:{self.owner}:{self.project_number}:{scope}"
+
+    def _raise_if_throttled(self, bucket: str) -> None:
+        snapshot = self._rate_limit_store.get(bucket)
+        if snapshot is None or not self._rate_limit_store.should_throttle(bucket):
+            return
+        raise RateLimitThrottleError(snapshot)
+
+    def _looks_rate_limited(self, text: str) -> bool:
+        lowered = text.lower()
+        return "rate limit" in lowered or "too many requests" in lowered

@@ -257,6 +257,7 @@ class OrchestratorPipeline:
             project_number=cfg.project_number,
             status_field=cfg.status_field,
             cwd=str(self.project_path),
+            cache_ttl_seconds=self.config.polling.poll_interval_seconds,
         )
 
     def _move_to_project_status(self, issue_number: int, status: str) -> None:

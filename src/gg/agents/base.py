@@ -2,6 +2,15 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class AgentProfile:
+    backend: str
+    model: str = ""
+    effort: str = ""
+    profile: str = ""
 
 
 class AgentBackend(ABC):
@@ -21,6 +30,14 @@ class AgentBackend(ABC):
     def backend_name(self) -> str:
         """Stable backend identifier used in logs and artifacts."""
         return self.__class__.__name__.removesuffix("Agent").lower()
+
+    def effective_profile(self) -> dict[str, str]:
+        return {
+            "backend": self.backend_name(),
+            "model": "",
+            "effort": "",
+            "profile": "",
+        }
 
     def supports_sandbox_execution(self) -> bool:
         """Whether the backend can execute coding prompts via sandbox-runtime."""

@@ -13,6 +13,7 @@ from gg.analyzers.git_history import GitProfile, analyze_git_history
 from gg.analyzers.languages import LanguageProfile, analyze_languages
 from gg.analyzers.structure import StructureMap, analyze_structure
 from gg.generators.agent_files import generate_agent_files
+from gg.generators.knowledge import write_contributor_exemplars
 from gg.generators.specs import UserContext, generate_specs
 from gg.knowledge.engine import KnowledgeEngine
 from gg.orchestrator.config import default_params
@@ -168,6 +169,8 @@ def run_init(
             "primary_language": languages.primary_language,
             "package_manager": dependencies.package_manager,
         })
+        exemplar_path = write_contributor_exemplars(project_path, git_profile)
+        console.print(f"    Contributor exemplars: {exemplar_path.relative_to(project_path)}")
         console.print(f"  [green]  -> {stats['entities']} entities, {stats['facts']} facts, "
                       f"{stats['events_processed']} events[/green]")
 

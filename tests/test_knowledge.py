@@ -9,6 +9,8 @@ from gg.knowledge.collectors import (
     collect_file_touch_frequency,
 )
 from gg.knowledge.engine import KnowledgeEngine
+from gg.generators.knowledge import rank_contributor_exemplars, write_contributor_exemplars
+from gg.analyzers.git_history import ArchitecturalCommit, Contributor, FileOwnership, GitProfile
 
 
 class TestEventLog:
@@ -119,6 +121,71 @@ class TestCollectors:
         assert facts[0].confidence == 0.9
 
 
+def test_contributor_exemplar_generation_prefers_ownership_and_commits(tmp_path):
+    profile = GitProfile(
+        total_commits=20,
+        contributors=[
+            Contributor(name="Ada", email="ada@example.com", commits=10, last_active="2026-04-01"),
+            Contributor(name="Grace", email="grace@example.com", commits=8, last_active="2026-03-20"),
+        ],
+        hot_files=[("src/core.py", 9), ("src/api.py", 5)],
+        file_ownership=[
+            FileOwnership(path="src/core.py", primary_owner="Ada", ownership_pct=80),
+            FileOwnership(path="src/api.py", primary_owner="Grace", ownership_pct=70),
+        ],
+        architectural_commits=[
+            ArchitecturalCommit(
+                sha="abc123456789",
+                message="refactor: isolate upload validation",
+                date="2026-03-01",
+                files_changed=4,
+                commit_type="refactor",
+            )
+        ],
+    )
+
+    exemplars = rank_contributor_exemplars(profile)
+
+    assert exemplars[0]["name"] == "Ada"
+    assert exemplars[0]["score"] > exemplars[1]["score"]
+
+    path = write_contributor_exemplars(tmp_path, profile)
+    content = path.read_text(encoding="utf-8")
+
+    assert "Strongest Contributors" in content
+    assert "Ada" in content
+    assert "local-fallback" in content
+    assert "refactor: isolate upload validation" in content
+
+
+def test_contributor_exemplars_are_injected_into_issue_context(tmp_path):
+    profile = GitProfile(
+        contributors=[
+            Contributor(name="Ada", email="ada@example.com", commits=10, last_active="2026-04-01"),
+        ],
+        hot_files=[("src/uploads.py", 7)],
+        file_ownership=[
+            FileOwnership(path="src/uploads.py", primary_owner="Ada", ownership_pct=90),
+        ],
+        architectural_commits=[
+            ArchitecturalCommit(
+                sha="abcdef1234567890",
+                message="refactor: centralize upload validation",
+                date="2026-03-01",
+                files_changed=3,
+                commit_type="refactor",
+            )
+        ],
+    )
+    write_contributor_exemplars(tmp_path, profile)
+
+    context = KnowledgeEngine(tmp_path).context_for_issue("Fix upload validation", "Harden src/uploads.py")
+
+    assert "Project Exemplars" in context
+    assert "Ada" in context
+    assert "refactor: centralize upload validation" in context
+
+
 class TestKnowledgeEngine:
     def _make_git_repo(self, path: Path) -> None:
         import subprocess
@@ -170,6 +237,33 @@ class TestKnowledgeEngine:
         types = [e.event_type for e in history]
         assert EventType.ISSUE_PICKED in types
         assert EventType.PR_CREATED in types
+
+    def test_repair_lesson_is_structured_and_reused_in_issue_context(self, tmp_path):
+        self._make_git_repo(tmp_path)
+        engine = KnowledgeEngine(tmp_path)
+
+        engine.record_repair_lesson(
+            issue_number=42,
+            run_id="run-42",
+            candidate_id="candidate-1",
+            strategy="test-first",
+            files_changed=["src/uploads.py"],
+            failure_reason="path traversal was not validated",
+            repair_reason="normalize uploaded file names before writing",
+            verification_failures=["pytest tests/test_uploads.py"],
+            fingerprint="path-traversal:uploads",
+        )
+
+        events = engine.get_all_events()
+        assert events[-1].event_type == EventType.REPAIR_LESSON
+        assert events[-1].data["fingerprint"] == "path-traversal:uploads"
+
+        lessons_md = tmp_path / ".gg" / "knowledge" / "repair-lessons.md"
+        assert "path traversal was not validated" in lessons_md.read_text(encoding="utf-8")
+
+        context = engine.context_for_issue("Fix upload path traversal", "src/uploads.py accepts ../")
+        assert "Similar Past Mistakes" in context
+        assert "normalize uploaded file names" in context
 
     def test_error_patterns_compiled(self, tmp_path):
         self._make_git_repo(tmp_path)

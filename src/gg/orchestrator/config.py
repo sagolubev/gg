@@ -249,6 +249,44 @@ class AgentConfig:
 
 
 @dataclass(frozen=True)
+class ModelRouteConfig:
+    backend: str = ""
+    model: str = ""
+    effort: str = ""
+    profile: str = ""
+
+
+@dataclass(frozen=True)
+class ResolvedModelRoute:
+    phase: str
+    backend: str
+    model: str = ""
+    effort: str = ""
+    profile: str = ""
+    escalated: bool = False
+
+
+@dataclass(frozen=True)
+class RoutingConfig:
+    backend_defaults: dict[str, ModelRouteConfig] = field(default_factory=dict)
+    analysis: ModelRouteConfig = field(default_factory=ModelRouteConfig)
+    execution: ModelRouteConfig = field(default_factory=ModelRouteConfig)
+    repair: ModelRouteConfig = field(default_factory=ModelRouteConfig)
+    evaluation: ModelRouteConfig = field(default_factory=ModelRouteConfig)
+    final_verification: ModelRouteConfig = field(default_factory=ModelRouteConfig)
+
+
+@dataclass(frozen=True)
+class EscalationConfig:
+    enabled: bool = True
+    escalate_after_failed_rounds: int = 2
+    max_escalated_rounds: int = 1
+    escalated_profile: ModelRouteConfig = field(
+        default_factory=lambda: ModelRouteConfig(effort="xhigh", profile="escalated"),
+    )
+
+
+@dataclass(frozen=True)
 class SecretsConfig:
     allow_from_env: bool = True
     allow_from_keyring: bool = False
@@ -273,6 +311,8 @@ class GGConfig:
     recovery: RecoveryConfig = field(default_factory=RecoveryConfig)
     polling: PollingConfig = field(default_factory=PollingConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
+    routing: RoutingConfig = field(default_factory=RoutingConfig)
+    escalation: EscalationConfig = field(default_factory=EscalationConfig)
     secrets: SecretsConfig = field(default_factory=SecretsConfig)
     project_board: ProjectBoardConfig = field(default_factory=ProjectBoardConfig)
     profiles: dict[str, dict] = field(default_factory=dict)
@@ -280,6 +320,49 @@ class GGConfig:
 
 def _mapping(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def _route_payload(value: Any) -> dict[str, str]:
+    raw = _mapping(value)
+    return {
+        "backend": str(raw.get("backend", "") or ""),
+        "model": str(raw.get("model", "") or ""),
+        "effort": str(raw.get("effort", "") or ""),
+        "profile": str(raw.get("profile", "") or ""),
+    }
+
+
+def _route_from_model(value: Any) -> ModelRouteConfig:
+    return ModelRouteConfig(
+        backend=value.backend,
+        model=value.model,
+        effort=value.effort,
+        profile=value.profile,
+    )
+
+
+def resolve_model_route(config: "GGConfig", phase: str, *, escalated: bool = False) -> ResolvedModelRoute:
+    phase_route = getattr(config.routing, phase)
+    backend = phase_route.backend or config.runtime.agent_backend
+    default = config.routing.backend_defaults.get(backend, ModelRouteConfig(backend=backend))
+    backend = phase_route.backend or default.backend or backend
+    model = phase_route.model or default.model
+    effort = phase_route.effort or default.effort
+    profile = phase_route.profile or default.profile or phase
+    if escalated:
+        override = config.escalation.escalated_profile
+        backend = override.backend or backend
+        model = override.model or model
+        effort = override.effort or effort
+        profile = override.profile or f"{profile}:escalated"
+    return ResolvedModelRoute(
+        phase=phase,
+        backend=backend,
+        model=model,
+        effort=effort,
+        profile=profile,
+        escalated=escalated,
+    )
 
 
 def default_params(project_path: str | Path, *, agent_backend: str = "codex") -> dict[str, Any]:
@@ -432,8 +515,7 @@ def default_params(project_path: str | Path, *, agent_backend: str = "codex") ->
             "backend": agent_backend,
             "codex_command": "codex",
             "claude_command": "claude",
-                "claude_command": "claude",
-                "omx_enabled": False,
+            "omx_enabled": False,
             "omx_command": "omx",
             "use_omx_exec": False,
             "allow_omx_team": False,
@@ -441,6 +523,43 @@ def default_params(project_path: str | Path, *, agent_backend: str = "codex") ->
             "circuit_breaker_failures": 5,
             "circuit_breaker_window_seconds": 600,
             "circuit_breaker_cooldown_seconds": 900,
+        },
+        "routing": {
+            "backend_defaults": {
+                "codex": {
+                    "backend": "codex",
+                    "model": "",
+                    "effort": "medium",
+                    "profile": "codex-default",
+                },
+                "claude": {
+                    "backend": "claude",
+                    "model": "",
+                    "effort": "medium",
+                    "profile": "claude-default",
+                },
+            },
+            "analysis": {"backend": agent_backend, "model": "", "effort": "medium", "profile": "analysis"},
+            "execution": {"backend": agent_backend, "model": "", "effort": "medium", "profile": "execution"},
+            "repair": {"backend": agent_backend, "model": "", "effort": "medium", "profile": "repair"},
+            "evaluation": {"backend": agent_backend, "model": "", "effort": "low", "profile": "evaluation"},
+            "final_verification": {
+                "backend": agent_backend,
+                "model": "",
+                "effort": "medium",
+                "profile": "final-verification",
+            },
+        },
+        "escalation": {
+            "enabled": True,
+            "escalate_after_failed_rounds": 2,
+            "max_escalated_rounds": 1,
+            "escalated_profile": {
+                "backend": agent_backend,
+                "model": "",
+                "effort": "xhigh",
+                "profile": "escalated",
+            },
         },
         "secrets": {
             "allow_from_env": True,
@@ -495,12 +614,19 @@ def load_config(project_path: str | Path, *, profile: str | None = None) -> GGCo
     recovery = _mapping(raw.get("recovery"))
     polling = _mapping(raw.get("polling"))
     agent = _mapping(raw.get("agent"))
+    routing = _mapping(raw.get("routing"))
+    escalation = _mapping(raw.get("escalation"))
     secrets = _mapping(raw.get("secrets"))
     project_board = _mapping(raw.get("project_board"))
     profiles: dict[str, dict] = raw.get("profiles") or {}
     sandbox_policy = _mapping(runtime.get("sandbox_policy"))
     resource = _mapping(runtime.get("resource"))
     network = _mapping(runtime.get("network"))
+    backend_defaults = {
+        str(name): _route_payload(value)
+        for name, value in _mapping(routing.get("backend_defaults")).items()
+    }
+    escalated_profile = _mapping(escalation.get("escalated_profile"))
     default_branch = project.get("default_branch") or git.get("default_branch") or get_main_branch(root)
     try:
         model = GGConfigModel.model_validate(
@@ -675,11 +801,11 @@ def load_config(project_path: str | Path, *, profile: str | None = None) -> GGCo
                     "poll_interval_seconds": polling.get("poll_interval_seconds", 60),
                     "jitter_seconds": polling.get("jitter_seconds", 15),
                 },
-                    "agent": {
-                        "backend": agent.get("backend", "codex"),
-                        "codex_command": agent.get("codex_command", "codex"),
-                        "claude_command": agent.get("claude_command", "claude"),
-                        "omx_enabled": agent.get("omx_enabled", False),
+                "agent": {
+                    "backend": agent.get("backend", "codex"),
+                    "codex_command": agent.get("codex_command", "codex"),
+                    "claude_command": agent.get("claude_command", "claude"),
+                    "omx_enabled": agent.get("omx_enabled", False),
                     "omx_command": agent.get("omx_command", "omx"),
                     "use_omx_exec": agent.get("use_omx_exec", False),
                     "allow_omx_team": agent.get("allow_omx_team", False),
@@ -687,6 +813,20 @@ def load_config(project_path: str | Path, *, profile: str | None = None) -> GGCo
                     "circuit_breaker_failures": agent.get("circuit_breaker_failures", 5),
                     "circuit_breaker_window_seconds": agent.get("circuit_breaker_window_seconds", 600),
                     "circuit_breaker_cooldown_seconds": agent.get("circuit_breaker_cooldown_seconds", 900),
+                },
+                "routing": {
+                    "backend_defaults": backend_defaults,
+                    "analysis": _route_payload(routing.get("analysis")),
+                    "execution": _route_payload(routing.get("execution")),
+                    "repair": _route_payload(routing.get("repair")),
+                    "evaluation": _route_payload(routing.get("evaluation")),
+                    "final_verification": _route_payload(routing.get("final_verification")),
+                },
+                "escalation": {
+                    "enabled": escalation.get("enabled", True),
+                    "escalate_after_failed_rounds": escalation.get("escalate_after_failed_rounds", 2),
+                    "max_escalated_rounds": escalation.get("max_escalated_rounds", 1),
+                    "escalated_profile": _route_payload(escalated_profile),
                 },
                 "secrets": {
                     "allow_from_env": secrets.get("allow_from_env", True),
@@ -864,6 +1004,23 @@ def load_config(project_path: str | Path, *, profile: str | None = None) -> GGCo
             circuit_breaker_window_seconds=model.agent.circuit_breaker_window_seconds,
             circuit_breaker_cooldown_seconds=model.agent.circuit_breaker_cooldown_seconds,
         ),
+        routing=RoutingConfig(
+            backend_defaults={
+                name: _route_from_model(route)
+                for name, route in model.routing.backend_defaults.items()
+            },
+            analysis=_route_from_model(model.routing.analysis),
+            execution=_route_from_model(model.routing.execution),
+            repair=_route_from_model(model.routing.repair),
+            evaluation=_route_from_model(model.routing.evaluation),
+            final_verification=_route_from_model(model.routing.final_verification),
+        ),
+        escalation=EscalationConfig(
+            enabled=model.escalation.enabled,
+            escalate_after_failed_rounds=model.escalation.escalate_after_failed_rounds,
+            max_escalated_rounds=model.escalation.max_escalated_rounds,
+            escalated_profile=_route_from_model(model.escalation.escalated_profile),
+        ),
         secrets=SecretsConfig(
             allow_from_env=model.secrets.allow_from_env,
             allow_from_keyring=model.secrets.allow_from_keyring,
@@ -1002,6 +1159,20 @@ def _reject_unknown_config_keys(raw: dict[str, Any], location: str) -> None:
             "circuit_breaker_window_seconds",
             "circuit_breaker_cooldown_seconds",
         },
+        "routing": {
+            "backend_defaults",
+            "analysis",
+            "execution",
+            "repair",
+            "evaluation",
+            "final_verification",
+        },
+        "escalation": {
+            "enabled",
+            "escalate_after_failed_rounds",
+            "max_escalated_rounds",
+            "escalated_profile",
+        },
         "secrets": {"allow_from_env", "allow_from_keyring", "forbid_in_project_config"},
         "project_board": {
             "enabled", "project_number", "owner", "status_field",
@@ -1031,7 +1202,19 @@ def _reject_unknown_config_keys(raw: dict[str, Any], location: str) -> None:
             "deny_read",
             "allow_write",
             "deny_write",
-        }
+        },
+        "routing.backend_defaults.*": {
+            "backend",
+            "model",
+            "effort",
+            "profile",
+        },
+        "routing.analysis": {"backend", "model", "effort", "profile"},
+        "routing.execution": {"backend", "model", "effort", "profile"},
+        "routing.repair": {"backend", "model", "effort", "profile"},
+        "routing.evaluation": {"backend", "model", "effort", "profile"},
+        "routing.final_verification": {"backend", "model", "effort", "profile"},
+        "escalation.escalated_profile": {"backend", "model", "effort", "profile"},
     }
     for key, value in raw.items():
         if key not in allowed:
@@ -1046,6 +1229,19 @@ def _reject_unknown_config_keys(raw: dict[str, Any], location: str) -> None:
                 raise ValueError(f"{location}.{key}.{child_key}: unknown configuration key")
             nested_path = f"{key}.{child_key}"
             nested_children = nested_allowed.get(nested_path)
+            if nested_children is None and key == "routing" and child_key == "backend_defaults":
+                if not isinstance(child_value, dict):
+                    raise ValueError(f"{location}.{nested_path}: expected mapping")
+                for backend_name, backend_route in child_value.items():
+                    if not isinstance(backend_route, dict):
+                        raise ValueError(f"{location}.{nested_path}.{backend_name}: expected mapping")
+                    route_children = nested_allowed["routing.backend_defaults.*"]
+                    for route_key in backend_route:
+                        if route_key not in route_children:
+                            raise ValueError(
+                                f"{location}.{nested_path}.{backend_name}.{route_key}: unknown configuration key"
+                            )
+                continue
             if nested_children is None:
                 continue
             if not isinstance(child_value, dict):

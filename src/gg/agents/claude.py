@@ -14,11 +14,23 @@ CLAUDE_CONTEXT_WINDOW_TOKENS = 200_000
 class ClaudeAgent(AgentBackend):
     supports_task_analysis = True
 
-    def __init__(self, console=None, debug: bool = False, command: str = "claude", progress_callback: Callable[[str], None] | None = None):
+    def __init__(
+        self,
+        console=None,
+        debug: bool = False,
+        command: str = "claude",
+        progress_callback: Callable[[str], None] | None = None,
+        model: str = "",
+        effort: str = "",
+        profile: str = "",
+    ):
         self._console = console
         self._debug = debug
         self._command = command
         self._progress_callback = progress_callback
+        self._model = model
+        self._effort = effort
+        self._profile = profile
 
     def generate(
         self,
@@ -65,6 +77,7 @@ class ClaudeAgent(AgentBackend):
     def _fast_command(self, prompt: str) -> list[str]:
         return [
             *self._command_args(),
+            *self._model_args(),
             "--bare",
             "--output-format",
             "text",
@@ -79,6 +92,7 @@ class ClaudeAgent(AgentBackend):
     def _full_command(self, prompt: str) -> list[str]:
         return [
             *self._command_args(),
+            *self._model_args(),
             "--dangerously-skip-permissions",
             "--output-format",
             "text",
@@ -88,6 +102,19 @@ class ClaudeAgent(AgentBackend):
 
     def _command_args(self) -> list[str]:
         return shlex.split(self._command.strip() or "claude")
+
+    def _model_args(self) -> list[str]:
+        if not self._model:
+            return []
+        return ["--model", self._model]
+
+    def effective_profile(self) -> dict[str, str]:
+        return {
+            "backend": "claude",
+            "model": getattr(self, "_model", ""),
+            "effort": getattr(self, "_effort", ""),
+            "profile": getattr(self, "_profile", "claude"),
+        }
 
     def _emit_progress(self, message: str) -> None:
         if self._progress_callback is not None:

@@ -20,7 +20,7 @@ log = logging.getLogger("gg.pipeline")
 
 from gg.agents.base import AgentBackend
 from gg.knowledge.engine import KnowledgeEngine
-from gg.orchestrator.config import GGConfig, load_config
+from gg.orchestrator.config import GGConfig, load_config, resolve_model_route
 from gg.orchestrator.context import ContextSnapshotStore
 from gg.orchestrator.evaluation import build_run_outcome, CandidateEvaluator
 from gg.orchestrator.executor import CandidateExecutor
@@ -44,6 +44,7 @@ from gg.orchestrator.lock import LockManager
 from gg.orchestrator.logging import mask_secrets
 from gg.orchestrator.plugins import create_agent_backend, create_platform
 from gg.orchestrator.rate_limit import RateLimitThrottleError
+from gg.orchestrator.report import build_run_report
 from gg.orchestrator.state import CandidateState, TaskState
 from gg.orchestrator.state import TERMINAL_STATES
 from gg.orchestrator.store import RunStore
@@ -91,6 +92,7 @@ class OrchestratorPipeline:
         self.platform = platform or create_platform(
             self.config.task_system.platform, self.project_path, debug=debug,
         )
+        self._agent_injected = agent is not None
         self.agent = agent or create_agent_backend(
             self.config.runtime.agent_backend,
             command=_agent_command(self.config, self.config.runtime.agent_backend),
@@ -103,6 +105,33 @@ class OrchestratorPipeline:
         self._port_allocations: dict[str, int] = {}
         self._explicit_base_ref: str | None = None
         self._active_run_id: str | None = None
+
+    def _agent_for_phase(self, phase: str, *, escalated: bool = False) -> AgentBackend:
+        route = resolve_model_route(self.config, phase, escalated=escalated)
+        phase_route = getattr(self.config.routing, phase)
+        if self._agent_injected and not phase_route.backend:
+            log.info(
+                "using injected agent for %s phase (profile=%s)",
+                phase,
+                route.profile,
+            )
+            return self.agent
+        log.info(
+            "routing %s phase to backend=%s model=%s effort=%s profile=%s",
+            phase,
+            route.backend,
+            route.model or "(default)",
+            route.effort or "(default)",
+            route.profile,
+        )
+        return create_agent_backend(
+            route.backend,
+            command=_agent_command(self.config, route.backend),
+            debug=self._debug,
+            model=route.model,
+            effort=route.effort,
+            profile=route.profile,
+        )
 
     def _install_signal_handlers(self) -> None:
         def _handler(signum, frame):
@@ -443,6 +472,9 @@ class OrchestratorPipeline:
     def status(self) -> list[dict[str, Any]]:
         return [run.to_dict() for run in self.store.list_runs()]
 
+    def report(self, run_id: str) -> dict[str, Any]:
+        return build_run_report(self.store, run_id)
+
     def _existing_local_issue_run(self, issue_number: int):
         for run in self.store.list_runs():
             if int(run.issue.get("number", 0)) != issue_number:
@@ -481,19 +513,33 @@ class OrchestratorPipeline:
                 issue = self.platform.get_issue(issue_number)
                 if state.state in {TaskState.BLOCKED, TaskState.NEEDS_INPUT}:
                     if state.blocked_until and not self._timestamp_is_elapsed(state.blocked_until, 0):
+                        resume_plan = self._write_resume_plan(
+                            state,
+                            strategy="wait_for_blocked_until",
+                            reason=f"blocked until {state.blocked_until}",
+                            cached_artifacts=["task_brief", "input_request"],
+                        )
                         return {
                             "run_id": run_id,
                             "state": state.state.value,
                             "resumed": False,
+                            "resume_plan": resume_plan,
                             "message": f"Blocked until {state.blocked_until} (clock skew tolerance: {self.config.ci.clock_skew_tolerance_seconds}s).",
                         }
                     self._ingest_issue_comment_input(state, issue)
                     state = self.store.load(run_id)
                     if _waiting_for_input(state) and not self._has_current_input(state):
+                        resume_plan = self._write_resume_plan(
+                            state,
+                            strategy="wait_for_operator_input",
+                            reason="run is blocked on missing input",
+                            cached_artifacts=["task_brief", "input_request"],
+                        )
                         return {
                             "run_id": run_id,
                             "state": state.state.value,
                             "resumed": False,
+                            "resume_plan": resume_plan,
                             "message": "Waiting for operator input.",
                         }
                 if state.artifacts.get("last_input"):
@@ -504,7 +550,34 @@ class OrchestratorPipeline:
                     if budget_error:
                         return self._handle_context_too_large(state, budget_error)
                 if state.state is TaskState.OUTCOME_PUBLISHING:
-                    return self._resume_publishing(state, issue, no_pr=no_pr)
+                    resume_plan = self._write_resume_plan(
+                        state,
+                        strategy="resume_publishing_side_effects",
+                        reason=f"publishing_step={state.publishing_step or 'unknown'}",
+                        cached_artifacts=["task_brief", "evaluation", "publishing_integration"],
+                    )
+                    return {
+                        **self._resume_publishing(state, issue, no_pr=no_pr),
+                        "resumed": True,
+                        "resume_plan": resume_plan,
+                    }
+                resume_from = state.state
+                running_candidates = [
+                    candidate_id
+                    for candidate_id, candidate in state.candidate_states.items()
+                    if candidate.status == "running"
+                ]
+                resume_plan = self._write_resume_plan(
+                    state,
+                    strategy=(
+                        "rerun_interrupted_candidates"
+                        if running_candidates
+                        else "continue_from_ready_for_execution"
+                    ),
+                    reason=f"resume from {resume_from.value}",
+                    rerun_candidates=running_candidates,
+                    cached_artifacts=["task_brief", "context_snapshot", "baseline_verification"],
+                )
                 for candidate in state.candidate_states.values():
                     if candidate.status == "running":
                         candidate.status = "failed"
@@ -514,7 +587,11 @@ class OrchestratorPipeline:
                     state.recover_to(TaskState.READY_FOR_EXECUTION, reason=f"resume from {state.state.value}")
                     self.store.write(state)
                 state.dry_run = False
-                return self._execute_ready_state(state, issue, brief, no_pr=no_pr)
+                return {
+                    **self._execute_ready_state(state, issue, brief, no_pr=no_pr),
+                    "resumed": True,
+                    "resume_plan": resume_plan,
+                }
         except KeyboardInterrupt:
             self._mark_interrupted(state)
             raise
@@ -623,6 +700,40 @@ class OrchestratorPipeline:
                 candidate.status = "failed"
                 candidate.finished_at = _now_placeholder()
                 candidate.error = reason
+
+    def _write_resume_plan(
+        self,
+        state,
+        *,
+        strategy: str,
+        reason: str,
+        rerun_candidates: list[str] | None = None,
+        cached_artifacts: list[str] | None = None,
+    ) -> str:
+        version = _next_artifact_version(self.store.path_for(state.run_id) / "artifacts", "resume-plan")
+        cached = {
+            name: state.artifacts[name]
+            for name in (cached_artifacts or [])
+            if state.artifacts.get(name)
+        }
+        payload = {
+            "schema_version": 1,
+            "run_id": state.run_id,
+            "created_at": _now_placeholder(),
+            "from_state": state.state.value,
+            "attempt": state.attempt,
+            "strategy": strategy,
+            "reason": reason,
+            "rerun_candidates": rerun_candidates or [],
+            "cached_artifacts": cached,
+            "backend_session_reuse": False,
+            "backend_session_reason": "agent CLIs do not expose durable session continuation metadata",
+        }
+        path = self.store.write_json(state.run_id, f"artifacts/resume-plan-v{version}.json", payload)
+        state.artifacts["resume_plan"] = path
+        self.store.write(state)
+        log.info("[%s] resume plan: %s (%s)", state.run_id, strategy, reason)
+        return path
 
     def _abandon_run_worktrees(self, state) -> list[str]:
         removed: list[str] = []
@@ -821,19 +932,28 @@ class OrchestratorPipeline:
         no_pr: bool,
         initial_repair_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        log.info("[%s] selecting agent backend %s", state.run_id, self.config.runtime.agent_backend)
+        execution_agent = self._agent_for_phase("execution")
+        execution_profile = execution_agent.effective_profile()
+        log.info(
+            "[%s] selecting agent backend %s (model=%s effort=%s profile=%s)",
+            state.run_id,
+            execution_profile.get("backend") or execution_agent.backend_name(),
+            execution_profile.get("model") or "(default)",
+            execution_profile.get("effort") or "(default)",
+            execution_profile.get("profile") or "execution",
+        )
         state.transition(TaskState.AGENT_SELECTION, reason="select agent backend")
-        if not self.agent.is_available():
+        if not execution_agent.is_available():
             state.transition(TaskState.BLOCKED, reason="agent backend unavailable")
             state.blocked_resume_state = TaskState.AGENT_SELECTION
             state.blocked_until = None
-            backend_name = self.config.runtime.agent_backend
+            backend_name = execution_profile.get("backend") or execution_agent.backend_name()
             state.last_error = {"code": "missing_agent", "message": f"{backend_name} CLI is not available"}
             self.store.write(state)
             self._mark_issue_blocked(issue.number, state.run_id, f"{backend_name} CLI is not available")
             return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
 
-        executor = CandidateExecutor(self.project_path, self.agent, self.config)
+        executor = CandidateExecutor(self.project_path, execution_agent, self.config)
         sandbox_preflight = executor.sandbox_preflight()
         sandbox_preflight["checked_at"] = _now_placeholder()
         state.artifacts["sandbox_preflight"] = self.store.write_json(
@@ -899,6 +1019,33 @@ class OrchestratorPipeline:
                 state.fail(code=runtime_limit["code"], message=runtime_limit["message"])
                 self.store.write(state)
                 return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
+            attempt_escalated = self._consume_escalation_marker(state)
+            attempt_phase = "execution" if state.attempt == 1 else "repair"
+            attempt_agent = (
+                execution_agent
+                if attempt_phase == "execution" and not attempt_escalated
+                else self._agent_for_phase(attempt_phase, escalated=attempt_escalated)
+            )
+            attempt_profile = attempt_agent.effective_profile()
+            log.info(
+                "[%s] attempt %d uses backend=%s model=%s effort=%s profile=%s",
+                state.run_id,
+                state.attempt,
+                attempt_profile.get("backend") or attempt_agent.backend_name(),
+                attempt_profile.get("model") or "(default)",
+                attempt_profile.get("effort") or "(default)",
+                attempt_profile.get("profile") or attempt_phase,
+            )
+            if not attempt_agent.is_available():
+                state.transition(TaskState.BLOCKED, reason="agent backend unavailable")
+                state.blocked_resume_state = TaskState.AGENT_SELECTION
+                state.last_error = {
+                    "code": "missing_agent",
+                    "message": f"{attempt_agent.backend_name()} CLI is not available",
+                }
+                self.store.write(state)
+                return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
+            executor = CandidateExecutor(self.project_path, attempt_agent, self.config)
             _increment_stage_attempt(state, "execution")
             self.store.write(state)
             candidate_count = (
@@ -914,6 +1061,8 @@ class OrchestratorPipeline:
             strategies = _candidate_strategies(candidate_count)
             if state.attempt > 1:
                 strategies = [f"repair:{strategy}" for strategy in strategies]
+            if attempt_escalated:
+                strategies = [f"escalated:{strategy}" for strategy in strategies]
             planned_candidates: list[tuple[int, str, str, dict[str, Any] | None, int]] = []
             for index, strategy in enumerate(strategies, start=1):
                 cancelled = self._cancelled_response(state)
@@ -996,6 +1145,7 @@ class OrchestratorPipeline:
             state.artifacts["evaluation"] = evaluation_path
             state.artifacts["execution_evaluation"] = evaluation_path
             if selected is None:
+                self._record_repair_lessons_from_attempt(state, issue, attempt_records, evaluation.execution_evaluation)
                 if self._record_no_progress_and_should_stop(state, evaluation.artifact):
                     state.fail(
                         code="no_progress",
@@ -1044,6 +1194,13 @@ class OrchestratorPipeline:
                 }
             if selected is None and state.attempt < state.max_attempts:
                 repair_context = _build_repair_context(attempt_records, evaluation.execution_evaluation)
+                if self._should_escalate_next_attempt(state):
+                    state.operator["next_attempt_escalated"] = True
+                    log.info(
+                        "[%s] escalation scheduled for attempt %d",
+                        state.run_id,
+                        state.attempt + 1,
+                    )
                 state.attempt += 1
                 state.transition(TaskState.AGENT_RUNNING, reason="repair candidate requested")
                 self.store.write(state)
@@ -2409,6 +2566,62 @@ class OrchestratorPipeline:
         state.operator["best_score"] = current_best
         return int(state.operator.get("no_progress_rounds", 0)) >= threshold
 
+    def _record_repair_lessons_from_attempt(
+        self,
+        state,
+        issue: Issue,
+        attempt_records: list[dict[str, Any]],
+        execution_evaluation: dict[str, Any] | None,
+    ) -> None:
+        if not execution_evaluation:
+            return
+        repair_reason = "; ".join(map(str, execution_evaluation.get("reasons") or [])) or "repair required"
+        for record in attempt_records:
+            if record.get("effective_status") == "needs_input":
+                continue
+            candidate = record["candidate"]
+            failure_reason = str(record.get("error") or candidate.error or "").strip()
+            failed_commands = _failed_commands(record.get("verification") or [])
+            if not failure_reason and failed_commands:
+                failure_reason = f"verification failed: {', '.join(failed_commands)}"
+            if not failure_reason:
+                failure_reason = f"candidate status was {record.get('effective_status') or candidate.status}"
+            fingerprint = _repair_lesson_fingerprint(
+                issue_title=issue.title,
+                files=record.get("final_files") or candidate.changed_files,
+                failure_reason=failure_reason,
+            )
+            self.knowledge.record_repair_lesson(
+                issue_number=issue.number,
+                run_id=state.run_id,
+                candidate_id=candidate.candidate_id,
+                strategy=str(record.get("strategy") or ""),
+                files_changed=list(record.get("final_files") or candidate.changed_files),
+                failure_reason=failure_reason,
+                repair_reason=repair_reason,
+                verification_failures=failed_commands,
+                fingerprint=fingerprint,
+            )
+
+    def _should_escalate_next_attempt(self, state) -> bool:
+        policy = self.config.escalation
+        if not policy.enabled or policy.max_escalated_rounds <= 0:
+            return False
+        used = int(state.operator.get("escalated_rounds_used", 0))
+        if used >= policy.max_escalated_rounds:
+            log.info("[%s] escalation skipped; max escalated rounds exhausted", state.run_id)
+            return False
+        failed_rounds = state.attempt
+        return failed_rounds >= policy.escalate_after_failed_rounds
+
+    def _consume_escalation_marker(self, state) -> bool:
+        if not state.operator.pop("next_attempt_escalated", False):
+            return False
+        used = int(state.operator.get("escalated_rounds_used", 0)) + 1
+        state.operator["escalated_rounds_used"] = used
+        state.operator["last_escalated_attempt"] = state.attempt
+        return True
+
     def _verification_commands(self) -> list[VerificationCommand]:
         commands: list[VerificationCommand] = []
         configured_categories: set[str] = set()
@@ -2527,8 +2740,9 @@ class OrchestratorPipeline:
         return brief
 
     def _task_analysis_agent(self) -> AgentBackend | None:
-        if getattr(self.agent, "supports_task_analysis", False):
-            return self.agent
+        agent = self._agent_for_phase("analysis")
+        if getattr(agent, "supports_task_analysis", False):
+            return agent
         return None
 
     def _load_inputs(self, run_id: str) -> list[dict[str, Any]]:
@@ -2724,6 +2938,13 @@ def _build_repair_context(
         "feedback": feedback,
         "failed_commands": sorted(set(failed_commands)),
     }
+
+
+def _repair_lesson_fingerprint(*, issue_title: str, files: list[str], failure_reason: str) -> str:
+    raw = " ".join([issue_title, *files[:5], failure_reason[:200]]).lower()
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8]
+    slug = safe_branch_slug(raw)[:48] or "repair"
+    return f"{slug}-{digest}"
 
 
 def _repair_context_summary(repair_context: dict[str, Any] | None) -> str:

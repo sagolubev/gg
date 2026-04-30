@@ -6,6 +6,7 @@ from pathlib import Path
 
 from gg.agents.base import AgentBackend
 from gg.agents.claude import ClaudeAgent
+from gg.agents.codex import CodexAgent
 from gg.orchestrator.config import GGConfig, GitConfig, RuntimeConfig, VerifyConfig
 from gg.orchestrator.executor import CandidateExecutor, CandidateResult
 from gg.orchestrator.schemas import AgentHandoffModel, AgentResultModel
@@ -110,6 +111,33 @@ def test_claude_agent_declares_backend_capabilities():
         "--output-format",
         "text",
     ]
+
+
+def test_codex_agent_threads_model_and_effort_into_commands():
+    agent = CodexAgent(command="codex", model="gpt-5.4-mini", effort="medium")
+
+    command = agent.build_sandbox_command("Implement", output_path="/tmp/out.md")
+
+    assert command[:2] == ["codex", "exec"]
+    assert "--model" in command
+    assert command[command.index("--model") + 1] == "gpt-5.4-mini"
+    assert "-c" in command
+    assert "model_reasoning_effort=medium" in command
+
+
+def test_claude_agent_threads_model_into_commands_and_records_effort():
+    agent = ClaudeAgent(command="claude", model="sonnet", effort="fast")
+
+    command = agent.build_sandbox_command("Implement")
+
+    assert "--model" in command
+    assert command[command.index("--model") + 1] == "sonnet"
+    assert agent.effective_profile() == {
+        "backend": "claude",
+        "model": "sonnet",
+        "effort": "fast",
+        "profile": "",
+    }
 
 
 def test_candidate_executor_runs_claude_via_sandbox_stdout(tmp_path):

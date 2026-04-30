@@ -499,6 +499,31 @@ class StagnantRepairAgent(AgentBackend):
         return True
 
 
+class EscalationAgent(AgentBackend):
+    def __init__(self):
+        self.calls = 0
+        self.prompts: list[str] = []
+
+    def generate(
+        self,
+        prompt: str,
+        *,
+        cwd: str | None = None,
+        timeout: int | None = None,
+        context: str | None = None,
+    ) -> str:
+        self.calls += 1
+        self.prompts.append(prompt)
+        assert cwd is not None
+        if "single high-effort escalation pass" in prompt:
+            Path(cwd, "escalated.txt").write_text("fixed on escalation\n", encoding="utf-8")
+            return "Escalated repair succeeded."
+        return f"Unfixed attempt {self.calls}"
+
+    def is_available(self) -> bool:
+        return True
+
+
 class NeedsInputAgent(AgentBackend):
     def __init__(self):
         self.calls = 0
@@ -1768,6 +1793,45 @@ def test_pipeline_repairs_after_failed_candidate(tmp_path):
         (tmp_path / state.candidate_states["repair-2-1"].result_path).read_text(encoding="utf-8")
     )
     assert repair_result["repair_context"]["parent_candidate_id"] == "candidate-1"
+    lessons = (tmp_path / ".gg" / "knowledge" / "repair-lessons.md").read_text(encoding="utf-8")
+    assert "candidate-1" in lessons
+    assert "agent produced no file changes" in lessons
+
+
+def test_pipeline_escalates_once_after_configured_failed_rounds(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        "\n".join(
+            [
+                "verify:",
+                "  tests: ''",
+                "runtime:",
+                "  candidates: 1",
+                "  max_attempts: 3",
+                "  repair_candidates: 1",
+                "escalation:",
+                "  enabled: true",
+                "  escalate_after_failed_rounds: 2",
+                "  max_escalated_rounds: 1",
+                "  escalated_profile:",
+                "    effort: xhigh",
+                "    profile: max-once",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    agent = EscalationAgent()
+    platform = FakePlatform()
+
+    result = OrchestratorPipeline(tmp_path, platform=platform, agent=agent).run_issue(42, no_pr=True)
+
+    assert result["state"] == "Completed"
+    assert agent.calls == 3
+    assert "single high-effort escalation pass" in agent.prompts[-1]
+    state = OrchestratorPipeline(tmp_path, platform=platform, agent=agent).store.load(result["run_id"])
+    assert state.operator["escalated_rounds_used"] == 1
+    assert state.operator["last_escalated_attempt"] == 3
 
 
 def test_pipeline_stops_when_candidate_limit_would_be_exceeded(tmp_path):
@@ -1916,6 +1980,13 @@ def test_resume_ready_run_executes_same_run(tmp_path):
 
     assert result["state"] == "Completed"
     assert result["run_id"] == ready["run_id"]
+    assert result["resumed"] is True
+    state = pipeline.store.load(ready["run_id"])
+    resume_plan_path = tmp_path / state.artifacts["resume_plan"]
+    resume_plan = json.loads(resume_plan_path.read_text(encoding="utf-8"))
+    assert resume_plan["from_state"] == "ReadyForExecution"
+    assert resume_plan["strategy"] == "continue_from_ready_for_execution"
+    assert resume_plan["backend_session_reuse"] is False
 
 
 def test_task_analysis_includes_issue_comments_and_local_inputs(tmp_path):
@@ -3238,6 +3309,33 @@ def test_cli_status_reads_runs(tmp_path):
     assert "ReadyForExecution" in result.output
 
 
+def test_run_report_summarizes_completed_run_and_cli_json(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        "verify:\n  tests: ''\n",
+        encoding="utf-8",
+    )
+    pipeline = OrchestratorPipeline(tmp_path, platform=FakePlatform(), agent=FakeAgent())
+    completed = pipeline.run_issue(42, no_pr=True)
+
+    report = pipeline.report(completed["run_id"])
+
+    assert report["state"] == "Completed"
+    assert report["winner"] == "candidate-1"
+    assert report["candidate_count"] == 1
+    assert report["files_changed"] == ["greeting.txt"]
+    assert report["verification"]["checks"][0]["status"] == "skipped"
+    assert report["cost"]["source"] == "cost_jsonl"
+    assert any(stage["name"] == "TaskAnalysis" for stage in report["stages"])
+
+    result = CliRunner().invoke(cli, ["report", completed["run_id"], "--path", str(tmp_path), "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["run_id"] == completed["run_id"]
+    assert payload["current"]["active_stage"] == "Completed"
+
+
 def test_cli_init_passes_agent_backend(monkeypatch, tmp_path):
     captured = {}
 
@@ -3806,6 +3904,60 @@ def test_init_params_generation_can_target_claude_backend(tmp_path):
     assert config.runtime.agent_backend == "claude"
     assert config.agent.backend == "claude"
     assert config.agent.claude_command == "claude"
+
+
+def test_config_loads_phase_model_routing_and_escalation_policy(tmp_path):
+    init_repo(tmp_path)
+    (tmp_path / ".gg" / "params.yaml").write_text(
+        """
+runtime:
+  agent_backend: codex
+routing:
+  backend_defaults:
+    codex:
+      model: gpt-5.4-mini
+      effort: medium
+    claude:
+      model: sonnet
+      effort: fast
+  analysis:
+    backend: claude
+    model: haiku
+    effort: fast
+  execution:
+    model: gpt-5.4
+    effort: high
+  repair:
+    effort: medium
+  evaluation:
+    backend: codex
+    model: gpt-5.4-mini
+    effort: low
+  final_verification:
+    backend: codex
+    model: gpt-5.5
+    effort: high
+escalation:
+  enabled: true
+  escalate_after_failed_rounds: 2
+  max_escalated_rounds: 1
+  escalated_profile:
+    backend: codex
+    model: gpt-5.5
+    effort: xhigh
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(tmp_path)
+
+    assert config.routing.backend_defaults["codex"].model == "gpt-5.4-mini"
+    assert config.routing.analysis.backend == "claude"
+    assert config.routing.analysis.model == "haiku"
+    assert config.routing.execution.backend == ""
+    assert config.routing.execution.model == "gpt-5.4"
+    assert config.escalation.escalate_after_failed_rounds == 2
+    assert config.escalation.escalated_profile.model == "gpt-5.5"
 
 
 def test_init_writes_operational_gitignore_entries(tmp_path):

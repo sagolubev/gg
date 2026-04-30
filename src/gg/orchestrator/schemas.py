@@ -246,6 +246,31 @@ class AgentConfigModel(StrictArtifactModel):
     circuit_breaker_cooldown_seconds: int = Field(default=900, ge=1)
 
 
+class ModelRouteConfigModel(StrictArtifactModel):
+    backend: str = ""
+    model: str = ""
+    effort: str = ""
+    profile: str = ""
+
+
+class RoutingConfigModel(StrictArtifactModel):
+    backend_defaults: dict[str, ModelRouteConfigModel] = Field(default_factory=dict)
+    analysis: ModelRouteConfigModel = Field(default_factory=ModelRouteConfigModel)
+    execution: ModelRouteConfigModel = Field(default_factory=ModelRouteConfigModel)
+    repair: ModelRouteConfigModel = Field(default_factory=ModelRouteConfigModel)
+    evaluation: ModelRouteConfigModel = Field(default_factory=ModelRouteConfigModel)
+    final_verification: ModelRouteConfigModel = Field(default_factory=ModelRouteConfigModel)
+
+
+class EscalationConfigModel(StrictArtifactModel):
+    enabled: bool = True
+    escalate_after_failed_rounds: int = Field(default=2, ge=1)
+    max_escalated_rounds: int = Field(default=1, ge=0)
+    escalated_profile: ModelRouteConfigModel = Field(
+        default_factory=lambda: ModelRouteConfigModel(effort="xhigh", profile="escalated"),
+    )
+
+
 class SecretsConfigModel(StrictArtifactModel):
     allow_from_env: bool = True
     allow_from_keyring: bool = False
@@ -281,6 +306,8 @@ class GGConfigModel(StrictArtifactModel):
     recovery: RecoveryConfigModel = Field(default_factory=RecoveryConfigModel)
     polling: PollingConfigModel = Field(default_factory=PollingConfigModel)
     agent: AgentConfigModel = Field(default_factory=AgentConfigModel)
+    routing: RoutingConfigModel = Field(default_factory=RoutingConfigModel)
+    escalation: EscalationConfigModel = Field(default_factory=EscalationConfigModel)
     secrets: SecretsConfigModel = Field(default_factory=SecretsConfigModel)
     project_board: ProjectBoardConfigModel = Field(default_factory=ProjectBoardConfigModel)
     profiles: dict[str, Any] = Field(default_factory=dict)

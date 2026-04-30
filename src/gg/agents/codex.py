@@ -61,11 +61,23 @@ def _get_fast_mode_flags() -> list[str]:
 class CodexAgent(AgentBackend):
     supports_task_analysis = True
 
-    def __init__(self, console=None, debug: bool = False, command: str = "codex", progress_callback: Callable[[str], None] | None = None):
+    def __init__(
+        self,
+        console=None,
+        debug: bool = False,
+        command: str = "codex",
+        progress_callback: Callable[[str], None] | None = None,
+        model: str = "",
+        effort: str = "",
+        profile: str = "",
+    ):
         self._console = console
         self._debug = debug
         self._command = command
         self._progress_callback = progress_callback
+        self._model = model
+        self._effort = effort
+        self._profile = profile
 
     def generate(self, prompt: str, *, cwd: str | None = None, timeout: int | None = None,
                  context: str | None = None) -> str:
@@ -117,6 +129,7 @@ class CodexAgent(AgentBackend):
 
         cmd = [
             *self._command_args(), "exec",
+            *self._model_args(),
             "--sandbox", "read-only",
             "--skip-git-repo-check",
             "--ephemeral",
@@ -159,7 +172,7 @@ class CodexAgent(AgentBackend):
         """Full agent mode: Codex reads files, uses tools."""
         stop_event = threading.Event()
         proc = subprocess.Popen(
-            [*self._command_args(), "exec", "-o", str(out_path), prompt],
+            [*self._command_args(), "exec", *self._model_args(), "-o", str(out_path), prompt],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -205,7 +218,7 @@ class CodexAgent(AgentBackend):
     def _run_silent(self, prompt: str, out_path: Path, cwd: str | None,
                     timeout: int = CODEX_TIMEOUT) -> str:
         result = subprocess.run(
-            [*self._command_args(), "exec", "-o", str(out_path), prompt],
+            [*self._command_args(), "exec", *self._model_args(), "-o", str(out_path), prompt],
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -233,6 +246,7 @@ class CodexAgent(AgentBackend):
         return [
             *self._command_args(),
             "exec",
+            *self._model_args(),
             "--dangerously-bypass-approvals-and-sandbox",
             "-o",
             output_path,
@@ -241,6 +255,22 @@ class CodexAgent(AgentBackend):
 
     def _command_args(self) -> list[str]:
         return shlex.split(self._command.strip() or "codex")
+
+    def _model_args(self) -> list[str]:
+        args: list[str] = []
+        if self._model:
+            args.extend(["--model", self._model])
+        if self._effort:
+            args.extend(["-c", f"model_reasoning_effort={self._effort}"])
+        return args
+
+    def effective_profile(self) -> dict[str, str]:
+        return {
+            "backend": "codex",
+            "model": getattr(self, "_model", ""),
+            "effort": getattr(self, "_effort", ""),
+            "profile": getattr(self, "_profile", "codex"),
+        }
 
     def _emit_progress(self, message: str) -> None:
         if self._progress_callback is not None:

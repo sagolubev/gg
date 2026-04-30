@@ -432,6 +432,26 @@ def status(run_id, path, as_json):
 
 
 @cli.command()
+@click.argument("run_id")
+@click.option("--path", type=click.Path(exists=True), default=".", help="Project path.")
+@click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
+def report(run_id, path, as_json):
+    """Show a durable run report with stages, verification, winner, and cost."""
+    import json
+
+    from rich.console import Console
+
+    from gg.orchestrator.pipeline import OrchestratorPipeline
+    from gg.orchestrator.report import format_run_report
+
+    payload = OrchestratorPipeline(path).report(run_id)
+    if as_json:
+        click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
+    Console().print(format_run_report(payload))
+
+
+@cli.command()
 @click.argument("run_id", required=False, default=None)
 @click.option("--path", type=click.Path(exists=True), default=".", help="Project path.")
 @click.option("--dry-run/--execute", default=True, help="Preview cleanup unless --execute is used.")

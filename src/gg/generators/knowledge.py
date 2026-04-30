@@ -20,6 +20,7 @@ def build_knowledge(
     _create_dirs(knowledge)
     _write_entities(knowledge / "entities", structure, git_profile)
     _write_fact_registry(knowledge / "fact-registry.md", git_profile)
+    write_contributor_exemplars(root, git_profile)
     _write_resolver(knowledge / "RESOLVER.md")
     _write_init_session(knowledge / "sessions", git_profile, structure)
 
@@ -119,6 +120,111 @@ def _write_fact_registry(path: Path, git: GitProfile) -> None:
         lines.append("")
 
     path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def rank_contributor_exemplars(git: GitProfile, *, limit: int = 5) -> list[dict]:
+    ownership_by_owner: dict[str, list[dict[str, str | float]]] = {}
+    for ownership in git.file_ownership:
+        ownership_by_owner.setdefault(ownership.primary_owner, []).append(
+            {
+                "path": ownership.path,
+                "ownership_pct": round(ownership.ownership_pct, 2),
+            }
+        )
+    hot_files = {path: count for path, count in git.hot_files}
+    ranked: list[dict] = []
+    for contributor in git.contributors:
+        owned = ownership_by_owner.get(contributor.name, [])
+        hot_owned = sum(hot_files.get(str(item["path"]), 0) for item in owned)
+        score = contributor.commits + hot_owned * 0.5 + len(owned) * 2
+        ranked.append(
+            {
+                "name": contributor.name,
+                "email": contributor.email,
+                "commits": contributor.commits,
+                "last_active": contributor.last_active,
+                "owned_files": owned[:10],
+                "hot_owned_changes": hot_owned,
+                "score": round(score, 2),
+                "reason": _contributor_reason(contributor.commits, owned, hot_owned),
+            }
+        )
+    return sorted(ranked, key=lambda item: (-float(item["score"]), str(item["name"])))[:limit]
+
+
+def write_contributor_exemplars(project_path: str | Path, git: GitProfile) -> Path:
+    root = Path(project_path).resolve()
+    knowledge = root / ".gg" / "knowledge"
+    knowledge.mkdir(parents=True, exist_ok=True)
+    ranked = rank_contributor_exemplars(git)
+    local_exemplars = [
+        {
+            "source": "local-fallback",
+            "sha": commit.sha,
+            "message": commit.message,
+            "date": commit.date,
+            "commit_type": commit.commit_type,
+            "files_changed": commit.files_changed,
+        }
+        for commit in git.architectural_commits[:10]
+    ]
+    payload = {
+        "schema_version": 1,
+        "source": "local-fallback",
+        "contributors": ranked,
+        "exemplars": local_exemplars,
+    }
+    (knowledge / "exemplars.json").write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    lines = ["# Contributor Exemplars", "", "Source: local-fallback", ""]
+    lines.append("## Strongest Contributors")
+    if not ranked:
+        lines.append("")
+        lines.append("Insufficient git history for contributor ranking.")
+    for item in ranked:
+        lines.extend(
+            [
+                "",
+                f"### {item['name']}",
+                f"- Score: {item['score']}",
+                f"- Commits: {item['commits']}",
+                f"- Last active: {item['last_active']}",
+                f"- Why: {item['reason']}",
+            ]
+        )
+        owned = item.get("owned_files") or []
+        if owned:
+            lines.append("- Owned hot files:")
+            for owned_file in owned[:5]:
+                lines.append(f"  - {owned_file['path']} ({owned_file['ownership_pct']}%)")
+    lines.extend(["", "## Good Local Examples"])
+    if not local_exemplars:
+        lines.append("")
+        lines.append("No architectural/refactor commits were detected; use current project constitution as fallback.")
+    for exemplar in local_exemplars:
+        lines.extend(
+            [
+                "",
+                f"- `{exemplar['sha'][:12]}` {exemplar['message']}",
+                f"  - Type: {exemplar['commit_type']}",
+                f"  - Date: {exemplar['date']}",
+                f"  - Files changed: {exemplar['files_changed']}",
+            ]
+        )
+    path = knowledge / "exemplars.md"
+    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    return path
+
+
+def _contributor_reason(commits: int, owned: list[dict[str, str | float]], hot_owned: int) -> str:
+    reasons = [f"{commits} commits"]
+    if owned:
+        reasons.append(f"{len(owned)} owned files")
+    if hot_owned:
+        reasons.append(f"{hot_owned} hot-file changes")
+    return ", ".join(reasons)
 
 
 def _write_resolver(path: Path) -> None:

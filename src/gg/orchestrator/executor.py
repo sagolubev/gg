@@ -544,12 +544,18 @@ class CandidateExecutor:
             "conservative": "Minimize the diff and prefer existing patterns. Do not add abstractions unless required.",
             "test-first": "Prefer adding or updating a regression test before the implementation when practical.",
             "architecture-aware": "Consider module boundaries and make small structural improvements only when they reduce risk.",
-        }.get(strategy, strategy)
-        if strategy.startswith("repair:"):
-            base_strategy = strategy.split(":", 1)[1]
+        }.get(strategy.removeprefix("escalated:"), strategy)
+        normalized_strategy = strategy.removeprefix("escalated:")
+        if normalized_strategy.startswith("repair:"):
+            base_strategy = normalized_strategy.split(":", 1)[1]
             strategy_text = (
                 "Repair a previous failed candidate. Focus on producing a passing, minimal patch. "
                 f"Base strategy hint: {base_strategy}."
+            )
+        if strategy.startswith("escalated:"):
+            strategy_text = (
+                f"{strategy_text} This is the single high-effort escalation pass; spend more care on root cause, "
+                "but keep the patch bounded."
             )
         repair_section = _repair_context_section(repair_context)
         structured_context = _structured_brief_section(brief)
@@ -675,17 +681,24 @@ def _call_optional(target: Any, method_name: str) -> Any:
 
 
 def _configured_agent(agent: AgentBackend, config: GGConfig) -> AgentBackend:
+    profile = agent.effective_profile()
     if isinstance(agent, CodexAgent):
         return CodexAgent(
             console=getattr(agent, "_console", None),
             debug=getattr(agent, "_debug", False),
             command=config.agent.codex_command,
+            model=profile.get("model", ""),
+            effort=profile.get("effort", ""),
+            profile=profile.get("profile", ""),
         )
     if isinstance(agent, ClaudeAgent):
         return ClaudeAgent(
             console=getattr(agent, "_console", None),
             debug=getattr(agent, "_debug", False),
             command=config.agent.claude_command,
+            model=profile.get("model", ""),
+            effort=profile.get("effort", ""),
+            profile=profile.get("profile", ""),
         )
     return agent
 
@@ -694,12 +707,16 @@ def _with_progress_callback(
     agent: AgentBackend,
     progress_callback: Callable[[str], None] | None,
 ) -> AgentBackend:
+    profile = agent.effective_profile()
     if isinstance(agent, CodexAgent):
         return CodexAgent(
             console=getattr(agent, "_console", None),
             debug=getattr(agent, "_debug", False),
             command=" ".join(agent._command_args()),
             progress_callback=progress_callback,
+            model=profile.get("model", ""),
+            effort=profile.get("effort", ""),
+            profile=profile.get("profile", ""),
         )
     if isinstance(agent, ClaudeAgent):
         return ClaudeAgent(
@@ -707,6 +724,9 @@ def _with_progress_callback(
             debug=getattr(agent, "_debug", False),
             command=" ".join(agent._command_args()),
             progress_callback=progress_callback,
+            model=profile.get("model", ""),
+            effort=profile.get("effort", ""),
+            profile=profile.get("profile", ""),
         )
     return agent
 

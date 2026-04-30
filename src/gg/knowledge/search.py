@@ -125,9 +125,49 @@ class KnowledgeSearch:
             ]
         return results
 
+    def find_repair_lessons(
+        self,
+        *,
+        issue_title: str,
+        issue_body: str = "",
+        file_paths: list[str] | None = None,
+        limit: int = 5,
+    ) -> list[SearchResult]:
+        tokens = _tokenize(f"{issue_title} {issue_body} {' '.join(file_paths or [])}")
+        results: list[SearchResult] = []
+        for ev in self._log.read_all():
+            if ev.event_type is not EventType.REPAIR_LESSON:
+                continue
+            data = ev.data
+            files = [str(path) for path in data.get("files_changed") or []]
+            text = _dict_to_text(data)
+            score = _score(tokens, text)
+            overlap = set(file_paths or []) & set(files)
+            if overlap:
+                score += 1.0 + len(overlap) * 0.5
+            if score <= 0:
+                continue
+            results.append(
+                SearchResult(
+                    kind="repair_lesson",
+                    title=str(data.get("fingerprint") or data.get("candidate_id") or "repair lesson"),
+                    snippet=str(data.get("repair_reason") or data.get("failure_reason") or "")[:180],
+                    score=score * 2.0,
+                    issue_number=ev.issue_number,
+                    metadata=dict(data),
+                )
+            )
+        return sorted(results, key=lambda item: -item.score)[:limit]
+
     def build_context_for_issue(self, issue_title: str, issue_body: str = "") -> str:
         """Build a knowledge context string for agent prompts."""
         results = self.find_related_to_issue(issue_title, issue_body)
+        repair_lessons = self.find_repair_lessons(
+            issue_title=issue_title,
+            issue_body=issue_body,
+            file_paths=[],
+            limit=3,
+        )
 
         sections: list[str] = []
 
@@ -146,11 +186,26 @@ class KnowledgeSearch:
                 for line in high_risks[:5]:
                     sections.append(line)
 
-        if not results and not sections:
+        if not results and not repair_lessons and not sections:
             return ""
 
-        if results:
+        if results or repair_lessons:
             sections.append("\n## Relevant Knowledge")
+
+        if repair_lessons:
+            sections.append("\n### Similar Past Mistakes")
+            for lesson in repair_lessons:
+                failure = str(lesson.metadata.get("failure_reason") or "").strip()
+                repair = str(lesson.metadata.get("repair_reason") or lesson.snippet).strip()
+                files = ", ".join(map(str, lesson.metadata.get("files_changed") or []))
+                sections.append(
+                    f"- {lesson.title}: avoid repeating `{failure}`; prefer `{repair}`"
+                    + (f" (files: {files})" if files else "")
+                )
+
+        exemplar_section = self._build_exemplar_context()
+        if exemplar_section:
+            sections.append(exemplar_section)
 
         entities = [r for r in results if r.kind == "entity"]
         if entities:
@@ -186,6 +241,39 @@ class KnowledgeSearch:
                     sections.append(f"- Issue #{r.issue_number}: {r.title}")
 
         return "\n".join(sections)
+
+    def _build_exemplar_context(self) -> str:
+        exemplar_path = self._knowledge / "exemplars.json"
+        if not exemplar_path.exists():
+            return ""
+        try:
+            import json
+
+            payload = json.loads(exemplar_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return ""
+        contributors = payload.get("contributors") if isinstance(payload, dict) else None
+        exemplars = payload.get("exemplars") if isinstance(payload, dict) else None
+        lines = ["\n### Project Exemplars"]
+        if contributors:
+            lines.append("Strong contributors to mirror:")
+            for contributor in list(contributors)[:3]:
+                if not isinstance(contributor, dict):
+                    continue
+                name = str(contributor.get("name") or "").strip()
+                reason = str(contributor.get("reason") or "").strip()
+                if name:
+                    lines.append(f"- {name}" + (f": {reason}" if reason else ""))
+        if exemplars:
+            lines.append("Reference local examples:")
+            for exemplar in list(exemplars)[:3]:
+                if not isinstance(exemplar, dict):
+                    continue
+                sha = str(exemplar.get("sha") or "")[:12]
+                message = str(exemplar.get("message") or "").strip()
+                if sha or message:
+                    lines.append(f"- `{sha}` {message}".rstrip())
+        return "\n".join(lines) if len(lines) > 1 else ""
 
     # -- Internal search methods --
 

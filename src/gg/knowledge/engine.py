@@ -146,6 +146,36 @@ class KnowledgeEngine:
             source="error",
         )
 
+    def record_repair_lesson(
+        self,
+        *,
+        issue_number: int | None,
+        run_id: str,
+        candidate_id: str,
+        strategy: str,
+        files_changed: list[str],
+        failure_reason: str,
+        repair_reason: str,
+        verification_failures: list[str] | None = None,
+        fingerprint: str = "",
+    ) -> None:
+        ev = self._emit(
+            EventType.REPAIR_LESSON,
+            issue_number=issue_number,
+            data={
+                "run_id": run_id,
+                "candidate_id": candidate_id,
+                "strategy": strategy,
+                "files_changed": files_changed,
+                "failure_reason": failure_reason,
+                "repair_reason": repair_reason,
+                "verification_failures": verification_failures or [],
+                "fingerprint": fingerprint or _lesson_fingerprint(files_changed, failure_reason),
+            },
+            source="orchestrator",
+        )
+        self._write_repair_lessons()
+
     def record_decision(
         self, *, issue_number: int | None = None, title: str, context: str, decision: str, consequences: str = "",
     ) -> None:
@@ -292,6 +322,21 @@ class KnowledgeEngine:
         """Find recurring error patterns."""
         return self._search.find_error_history(pattern)
 
+    def find_repair_lessons(
+        self,
+        *,
+        issue_title: str,
+        issue_body: str = "",
+        file_paths: list[str] | None = None,
+        limit: int = 5,
+    ) -> list[SearchResult]:
+        return self._search.find_repair_lessons(
+            issue_title=issue_title,
+            issue_body=issue_body,
+            file_paths=file_paths or [],
+            limit=limit,
+        )
+
     def get_goals(self) -> str:
         """Read project goals. Agent should call this before every task."""
         goals_path = self._root / ".gg" / "goals.md"
@@ -358,3 +403,38 @@ class KnowledgeEngine:
                         entity_type="module",
                         files=[f],
                     )
+
+    def _write_repair_lessons(self) -> None:
+        lessons = [
+            ev
+            for ev in self._log.read_all()
+            if ev.event_type is EventType.REPAIR_LESSON
+        ]
+        lines = ["# Repair Lessons", ""]
+        if not lessons:
+            lines.append("No repair lessons recorded yet.")
+        for ev in lessons:
+            data = ev.data
+            files = ", ".join(map(str, data.get("files_changed") or [])) or "unknown files"
+            failures = ", ".join(map(str, data.get("verification_failures") or [])) or "none"
+            lines.extend(
+                [
+                    f"## {data.get('fingerprint') or data.get('candidate_id')}",
+                    "",
+                    f"- Issue: #{ev.issue_number}" if ev.issue_number else "- Issue: unknown",
+                    f"- Run: `{data.get('run_id', '')}`",
+                    f"- Candidate: `{data.get('candidate_id', '')}`",
+                    f"- Strategy: `{data.get('strategy', '')}`",
+                    f"- Files: {files}",
+                    f"- Failure: {data.get('failure_reason', '')}",
+                    f"- Repair: {data.get('repair_reason', '')}",
+                    f"- Verification failures: {failures}",
+                    "",
+                ]
+            )
+        (self._knowledge / "repair-lessons.md").write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+
+
+def _lesson_fingerprint(files: list[str], failure_reason: str) -> str:
+    joined = " ".join([*files[:5], failure_reason[:200]])
+    return joined.lower().replace("/", ":")[:120] or "repair-lesson"

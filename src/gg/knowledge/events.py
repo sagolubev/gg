@@ -42,6 +42,7 @@ class EventType(str, Enum):
     EVALUATION_DONE = "evaluation_done"
     PUBLISHING_STARTED = "publishing_started"
     PUBLISHING_DONE = "publishing_done"
+    REPAIR_LESSON = "repair_lesson"
 
 
 @dataclass(frozen=True)

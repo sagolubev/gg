@@ -15,6 +15,8 @@ from gg.platforms.github import GitHubPlatform
 class ReviewAgent(AgentBackend):
     def __init__(self) -> None:
         self.prompts: list[str] = []
+        self.contexts: list[str | None] = []
+        self.cwd_values: list[str | None] = []
 
     def generate(
         self,
@@ -25,9 +27,13 @@ class ReviewAgent(AgentBackend):
         context: str | None = None,
     ) -> str:
         self.prompts.append(prompt)
+        self.contexts.append(context)
+        self.cwd_values.append(cwd)
         assert cwd is not None
-        assert "PR #7" in prompt
-        assert "diff --git a/app.py b/app.py" in prompt
+        assert "PR #7" not in prompt
+        assert context is not None
+        assert "PR #7" in context
+        assert "diff --git a/app.py b/app.py" in context
         return "No blocking findings.\n\n- Tests are present."
 
     def is_available(self) -> bool:
@@ -93,7 +99,8 @@ def test_review_pull_request_uses_agent_and_can_comment(tmp_path):
     assert result["artifact"].startswith(".gg/reviews/pr-7-review-")
     assert (tmp_path / result["artifact"]).read_text(encoding="utf-8").startswith("# Review PR #7")
     assert platform.comments == [(7, result["review"])]
-    assert "Base: main" in agent.prompts[0]
+    assert "Base: main" in (agent.contexts[0] or "")
+    assert agent.cwd_values[0] != str(tmp_path.resolve())
 
 
 def test_cli_review_prints_machine_readable_result(monkeypatch, tmp_path):

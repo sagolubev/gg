@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from gg.platforms.base import GitPlatform, Issue, IssueComment, PlatformCapabilities
+from gg.platforms.base import GitPlatform, Issue, IssueComment, PlatformCapabilities, PullRequest
 
 MAX_COMMENTS = 10
 MAX_COMMENT_CHARS = 4000
@@ -108,6 +108,35 @@ class GitLabPlatform(GitPlatform):
         ], bucket=self._bucket("merge-requests:read"))
         items = json.loads(raw) if raw else []
         return items[0].get("web_url") if items else None
+
+    def get_pr(self, number: int) -> PullRequest:
+        raw = self._run(["mr", "view", str(number), "--output", "json"], bucket=self._bucket("merge-requests:read"))
+        data = json.loads(raw)
+        author = data.get("author") or data.get("author_username") or ""
+        if isinstance(author, dict):
+            author = author.get("username") or author.get("name") or ""
+        return PullRequest(
+            number=int(data.get("iid") or data.get("id") or number),
+            title=str(data.get("title") or ""),
+            body=str(data.get("description") or data.get("body") or ""),
+            author=str(author or ""),
+            state=str(data.get("state") or ""),
+            url=str(data.get("web_url") or data.get("url") or ""),
+            head_ref=str(data.get("source_branch") or ""),
+            base_ref=str(data.get("target_branch") or ""),
+        )
+
+    def get_pr_diff(self, number: int) -> str:
+        return self._run(
+            ["mr", "diff", str(number), "--raw", "--color=never"],
+            bucket=self._bucket("merge-requests:read"),
+        )
+
+    def add_pr_comment(self, number: int, body: str) -> None:
+        self._run(
+            ["mr", "note", "create", str(number), "--message", body],
+            bucket=self._bucket("merge-requests:comment"),
+        )
 
     def validate_auth(self) -> None:
         self._run(["auth", "status"], bucket=self._bucket("auth"))

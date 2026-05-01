@@ -59,6 +59,18 @@ class Issue:
 
 
 @dataclass(frozen=True)
+class PullRequest:
+    number: int
+    title: str
+    body: str = ""
+    author: str = ""
+    state: str = ""
+    url: str = ""
+    head_ref: str = ""
+    base_ref: str = ""
+
+
+@dataclass(frozen=True)
 class PlatformCapabilities:
     issue_listing: bool = True
     issue_comments: bool = True
@@ -102,6 +114,18 @@ class GitPlatform(ABC):
     def find_pr(self, *, head: str) -> str | None:
         """Find an existing open pull/merge request by head branch when supported."""
         return None
+
+    def get_pr(self, number: int) -> PullRequest:
+        """Get pull/merge request metadata for review."""
+        raise RuntimeError(f"{self.platform_name()} adapter does not support PR metadata lookup")
+
+    def get_pr_diff(self, number: int) -> str:
+        """Get a pull/merge request patch diff for review."""
+        raise RuntimeError(f"{self.platform_name()} adapter does not support PR diff lookup")
+
+    def add_pr_comment(self, number: int, body: str) -> None:
+        """Add a pull/merge request level comment."""
+        raise RuntimeError(f"{self.platform_name()} adapter does not support PR comments")
 
     def capabilities(self) -> PlatformCapabilities:
         """Describe mutation/read features the adapter supports."""

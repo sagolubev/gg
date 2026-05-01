@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from gg.platforms.base import GitPlatform, Issue, IssueComment, PlatformCapabilities
+from gg.platforms.base import GitPlatform, Issue, IssueComment, PlatformCapabilities, PullRequest
 
 MAX_COMMENTS = 20
 MAX_COMMENT_CHARS = 4000
@@ -108,6 +108,41 @@ class GitHubPlatform(GitPlatform):
         ], bucket=self._bucket("pull-requests:read"))
         items = json.loads(raw) if raw else []
         return items[0]["url"] if items else None
+
+    def get_pr(self, number: int) -> PullRequest:
+        raw = self._run(
+            [
+                "pr", "view", str(number),
+                "--json", "number,title,body,author,state,url,headRefName,baseRefName",
+            ],
+            bucket=self._bucket("pull-requests:read"),
+        )
+        data = json.loads(raw)
+        author = data.get("author") or {}
+        if isinstance(author, dict):
+            author = author.get("login") or author.get("name") or ""
+        return PullRequest(
+            number=int(data.get("number") or number),
+            title=str(data.get("title") or ""),
+            body=str(data.get("body") or ""),
+            author=str(author or ""),
+            state=str(data.get("state") or ""),
+            url=str(data.get("url") or ""),
+            head_ref=str(data.get("headRefName") or ""),
+            base_ref=str(data.get("baseRefName") or ""),
+        )
+
+    def get_pr_diff(self, number: int) -> str:
+        return self._run(
+            ["pr", "diff", str(number), "--patch"],
+            bucket=self._bucket("pull-requests:read"),
+        )
+
+    def add_pr_comment(self, number: int, body: str) -> None:
+        self._run(
+            ["pr", "comment", str(number), "--body", body],
+            bucket=self._bucket("pull-requests:comment"),
+        )
 
     REQUIRED_SCOPES = frozenset({"repo", "read:org"})
 

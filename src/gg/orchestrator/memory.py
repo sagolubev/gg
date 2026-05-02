@@ -22,6 +22,7 @@ SECRET_PATTERNS = (
     re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
     re.compile(r"(?i)\b(token|api[_-]?key|secret|password)\b\s*[:=]\s*['\"]?[^'\"\s]{8,}"),
 )
+MEMORY_STATUSES = {"in_progress", "done", "blocked", "rejected", "pending", "approved", "edited", "ignored", "synced"}
 
 
 @dataclass(frozen=True)
@@ -211,7 +212,7 @@ def validate_entry(entry: MemoryEntry, *, expected_kind: str | None = None) -> l
         errors.append(f"kind must be {expected_kind}, got {entry.kind}")
     if entry.kind not in {"state", "decision", "pattern"}:
         errors.append(f"invalid kind {entry.kind}")
-    if entry.status not in {"in_progress", "done", "blocked", "rejected"}:
+    if entry.status not in MEMORY_STATUSES:
         errors.append(f"invalid status {entry.status}")
     if entry.author not in {"orchestrator", "agent", "human"}:
         errors.append(f"invalid author {entry.author}")

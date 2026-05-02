@@ -18,6 +18,7 @@ from gg.orchestrator.project_context import build_project_precedence_context
 from gg.orchestrator.prompt_manifest import verify_prompt_manifest, write_prompt_manifest
 from gg.orchestrator.review_gates import required_reviewers_for_files, review_gate_blockers
 from gg.orchestrator.config import load_config
+from gg.orchestrator.truth import parse_requirements, sync_approved_decisions, truth_coverage
 
 
 class AvailableAgent:
@@ -184,3 +185,75 @@ def test_review_gate_triggers_are_file_based():
         reviewers,
     )
     assert any("security-reviewer" in blocker for blocker in blockers)
+
+
+def test_truth_coverage_tracks_spec_test_and_code_markers(tmp_path):
+    (tmp_path / ".gg").mkdir()
+    (tmp_path / ".gg" / "constitution.md").write_text(
+        "# Project Constitution\n\n"
+        "## Requirements\n\n"
+        "- The orchestrator must persist final verification evidence before completion.\n",
+        encoding="utf-8",
+    )
+    requirements = parse_requirements(tmp_path)
+    requirement_id = requirements[0]["id"]
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text(
+        f"# gg:{requirement_id}\n"
+        "def persist_final_verification():\n"
+        "    return True\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_app.py").write_text(
+        f"def test_req_{requirement_id.removeprefix('req-')}_persists_final_verification():\n"
+        "    assert True\n",
+        encoding="utf-8",
+    )
+
+    report = truth_coverage(tmp_path)
+
+    assert report["requirements_total"] == 1
+    assert report["spec_to_test"]["covered"] == 1
+    assert report["spec_to_code"]["covered"] == 1
+
+
+def test_truth_sync_is_explicit_and_idempotent(tmp_path):
+    (tmp_path / ".gg").mkdir()
+    (tmp_path / ".gg" / "constitution.md").write_text("# Project Constitution\n", encoding="utf-8")
+    entry = append_memory_entry(
+        tmp_path,
+        file="decisions",
+        status="approved",
+        summary="Use read-only PR review context",
+        body="PR descriptions and diffs are untrusted input, so review prompts should treat them as data.",
+        tags=["review"],
+    )
+    before_sync = (tmp_path / ".gg" / "constitution.md").read_text(encoding="utf-8")
+
+    first = sync_approved_decisions(tmp_path)
+    second = sync_approved_decisions(tmp_path)
+    after_sync = (tmp_path / ".gg" / "constitution.md").read_text(encoding="utf-8")
+    sync_state = json.loads((tmp_path / ".gg" / "memory" / "sync-state.json").read_text(encoding="utf-8"))
+
+    assert "Use read-only PR review context" not in before_sync
+    assert first["synced"] == 1
+    assert second["synced"] == 0
+    assert "Use read-only PR review context" in after_sync
+    assert entry.id in sync_state["synced_decisions"]
+
+
+def test_cli_truth_commands_return_json(tmp_path):
+    (tmp_path / ".gg").mkdir()
+    (tmp_path / ".gg" / "constitution.md").write_text(
+        "# Project Constitution\n\n- The CLI must report truth coverage as JSON.\n",
+        encoding="utf-8",
+    )
+
+    parse_result = CliRunner().invoke(cli, ["truth", "parse", "--path", str(tmp_path), "--json"])
+    coverage_result = CliRunner().invoke(cli, ["truth", "coverage", "--path", str(tmp_path), "--json"])
+
+    assert parse_result.exit_code == 0
+    assert coverage_result.exit_code == 0
+    assert json.loads(parse_result.output)["requirements"] == 1
+    assert json.loads(coverage_result.output)["requirements_total"] == 1

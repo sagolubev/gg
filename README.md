@@ -69,6 +69,7 @@ flowchart TD
 - **Bounded escalation**: after configured failed rounds, one high-effort repair pass can run while still obeying attempts, candidate, duration, token, and cost budgets.
 - **Project precedence**: candidate handoffs include compact rules from `.gg/constitution.md`, repair lessons, exemplars, and recent memory patterns; `## Deep Reference` sections are omitted unless explicitly pulled later.
 - **Structured memory**: `.gg/memory/session-handoff.md`, `.gg/memory/decisions.md`, and `.gg/memory/patterns.md` store validated run state, decisions, and reusable lessons.
+- **Truth traceability**: `gg truth parse` derives `.gg/requirements.json` from markdown truth sources, `gg truth coverage` reports spec-to-test / spec-to-code marker coverage, and `gg truth sync` explicitly syncs approved decisions into `.gg/constitution.md`.
 - **Agent catalog**: `.gg/agent-catalog.json` records the small set of built-in reviewer / executor roles, phases, triggers, and required artifacts.
 - **Prompt integrity**: `gg init` writes `.gg/prompt-manifest.sha256`; `gg doctor` reports prompt source drift with a concrete fix.
 - **Idempotent publish flow**: publishing stays in `OutcomePublishing` until all side effects are complete.
@@ -100,6 +101,9 @@ gg constitution --learn "Prefer context-only review for untrusted PR diffs"
 gg memory append --file patterns --summary "Avoid broad rewrites" --body "Minimal patches verified faster."
 gg memory latest --file session-handoff
 gg memory validate
+gg truth parse
+gg truth coverage --refresh
+gg truth sync
 gg review 55 --agent-backend codex
 ```
 
@@ -135,6 +139,8 @@ Typical run layout:
     session-handoff.md
     decisions.md
     patterns.md
+    sync-state.json
+  requirements.json
   runs/<run_id>/
     state.json
     pipeline.jsonl

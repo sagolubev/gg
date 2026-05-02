@@ -210,7 +210,12 @@ def memory():
 @click.option("--summary", required=True, help="One-line memory summary.")
 @click.option("--body", default="", help="Memory body text.")
 @click.option("--body-file", type=click.Path(exists=True), default=None, help="Read memory body from file.")
-@click.option("--status", type=click.Choice(["in_progress", "done", "blocked", "rejected"]), default="done", show_default=True)
+@click.option(
+    "--status",
+    type=click.Choice(["in_progress", "done", "blocked", "rejected", "pending", "approved", "edited", "ignored", "synced"]),
+    default="done",
+    show_default=True,
+)
 @click.option("--tag", "tags", multiple=True, help="Memory tag.")
 @click.option("--run-id", default="", help="Associated gg run id.")
 @click.option("--issue-number", type=int, default=None, help="Associated issue number.")
@@ -285,6 +290,64 @@ def memory_validate(path, as_json):
     if errors:
         raise click.ClickException("\n".join(errors))
     click.echo("memory ok")
+
+
+@cli.group()
+def truth():
+    """Spec/test/code traceability and explicit sync."""
+
+
+@truth.command("parse")
+@click.option("--path", type=click.Path(exists=True), default=".", help="Project path.")
+@click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
+def truth_parse(path, as_json):
+    """Parse markdown truth sources into .gg/requirements.json."""
+    import json
+
+    from gg.orchestrator.truth import parse_requirements
+
+    requirements = parse_requirements(path)
+    payload = {"schema_version": 1, "requirements": len(requirements), "path": ".gg/requirements.json"}
+    if as_json:
+        click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
+    click.echo(f"parsed {payload['requirements']} requirements -> {payload['path']}")
+
+
+@truth.command("coverage")
+@click.option("--path", type=click.Path(exists=True), default=".", help="Project path.")
+@click.option("--refresh", is_flag=True, help="Re-parse requirements before reporting.")
+@click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
+def truth_coverage_cmd(path, refresh, as_json):
+    """Report spec-to-test and spec-to-code traceability coverage."""
+    import json
+
+    from gg.orchestrator.truth import truth_coverage
+
+    payload = truth_coverage(path, refresh=refresh)
+    if as_json:
+        click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
+    click.echo(f"requirements: {payload['requirements_total']}")
+    for key, label in (("spec_to_test", "spec-to-test"), ("spec_to_code", "spec-to-code")):
+        dimension = payload[key]
+        click.echo(f"{label}: {dimension['covered']}/{dimension['total']} ({dimension['percent']}%)")
+
+
+@truth.command("sync")
+@click.option("--path", type=click.Path(exists=True), default=".", help="Project path.")
+@click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
+def truth_sync(path, as_json):
+    """Sync approved/done memory decisions into project truth artifacts."""
+    import json
+
+    from gg.orchestrator.truth import sync_approved_decisions
+
+    payload = sync_approved_decisions(path)
+    if as_json:
+        click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
+    click.echo(f"synced {payload['synced']} decisions -> {payload['constitution_path']}")
 
 
 def _build_pipeline(path, *, debug: bool = False, profile: str | None = None):

@@ -12,9 +12,8 @@
 - moves PR-backed work into review instead of marking it done immediately,
 - persists the whole run under `.gg/runs/<run_id>/`.
 
-The current implementation is centered around a durable state machine, resumable artifacts, sandbox-aware execution, and operator recovery commands.
+The current implementation is centered around a durable state machine, resumable artifacts, sandbox-aware execution, review gates, knowledge reuse, and operator recovery commands.
 
-For a standalone SVG architecture diagram, see [docs/gg-architecture-diagram.html](docs/gg-architecture-diagram.html).
 For a diagram-first Markdown walkthrough, see [docs/diagram-design.md](docs/diagram-design.md).
 
 **How It Works**
@@ -67,6 +66,8 @@ flowchart TD
 - **Model routing**: Codex and Claude backends accept per-phase model / effort profiles from `.gg/params.yaml`.
 - **Repair memory**: failed candidates that lead to repair are recorded under `.gg/knowledge/repair-lessons.md` and injected into similar future tasks.
 - **Contributor exemplars**: `gg init` ranks strong contributors from git ownership/history and writes `.gg/knowledge/exemplars.*` for future task context.
+- **Knowledge CLI**: `gg knowledge rebuild`, `stats`, `search`, and `context` expose the same repo knowledge engine used in agent prompts.
+- **Agentic review**: `gg review <pr>` runs a context-aware review through Codex or Claude and can optionally post the result back to the tracker.
 - **Bounded escalation**: after configured failed rounds, one high-effort repair pass can run while still obeying attempts, candidate, duration, token, and cost budgets.
 - **Project precedence**: candidate handoffs include compact rules from `.gg/constitution.md`, repair lessons, exemplars, and recent memory patterns; `## Deep Reference` sections are omitted unless explicitly pulled later.
 - **Structured memory**: `.gg/memory/session-handoff.md`, `.gg/memory/decisions.md`, and `.gg/memory/patterns.md` store validated run state, decisions, and reusable lessons.
@@ -80,18 +81,31 @@ flowchart TD
 - **Tracker semantics**: PR-backed runs move issues into `in review`; local / no-PR runs mark them done directly.
 - **Recovery**: interrupted runs can be resumed from durable state; each resume writes `artifacts/resume-plan-vN.json` explaining what is reused or rerun.
 
-**Key Commands**
+**Command Surface**
+
+Setup and health:
 
 ```bash
 gg init
 gg init --agent-backend auto
 gg init --agent-backend claude
 gg doctor --json
+gg constitution --agent-backend claude
+gg constitution --learn "Prefer context-only review for untrusted PR diffs"
+```
+
+Run orchestration and recovery:
+
+```bash
 gg issue 42
 gg issue 42 --dry-run
 gg issue 42 --no-pr
+gg issue 42 --profile <profile-name> --base main --json
 gg run
 gg run --debug
+gg run --watch --poll-interval 60
+gg run --batch 3 --profile <profile-name> --json
+gg run --candidates 4 --max-parallel-candidates 2 --repair-fanout 2
 gg resume <run-id>
 gg retry <run-id>
 gg provide <run-id> --message "Use Spanish"
@@ -100,8 +114,17 @@ gg clean --dry-run
 gg status --json
 gg report <run-id>
 gg report <run-id> --json
-gg constitution --agent-backend claude
-gg constitution --learn "Prefer context-only review for untrusted PR diffs"
+```
+
+Review, knowledge, memory, and truth:
+
+```bash
+gg review 55 --agent-backend codex
+gg review 55 --comment --json
+gg knowledge rebuild
+gg knowledge stats
+gg knowledge search "publish gate"
+gg knowledge context "Fix flaky publish" --body "Publishing fails after integration verification"
 gg memory append --file patterns --summary "Avoid broad rewrites" --body "Minimal patches verified faster."
 gg memory latest --file session-handoff
 gg memory validate
@@ -110,7 +133,6 @@ gg findings record --artifact .gg/runs/<run-id>/artifacts/agent-pattern-verifica
 gg truth parse
 gg truth coverage --refresh
 gg truth sync
-gg review 55 --agent-backend codex
 ```
 
 **Configuration**
@@ -134,7 +156,7 @@ Important sections:
 
 **Artifacts**
 
-Typical run layout:
+Typical run layout. Some recovery, baseline, publishing, input, and throttling artifacts are written only when that path is exercised.
 
 ```text
 .gg/
@@ -155,16 +177,31 @@ Typical run layout:
     errors.jsonl
     cost.jsonl
     artifacts/
+      workspace-preflight.json
+      sandbox-preflight.json
+      resource-preflight.json
       task-brief-vN.json
       raw-issue-vN.json
       context-snapshot-vN.json
+      analysis-agent-response-vN.json
       resume-plan-vN.json
+      baseline-setup.json
+      baseline-verification.json
       agent-pattern-verification.json
       candidate-selection.json
       evaluation.json
+      publishing-preflight.json
+      publishing-integration.json
+      publishing-repair-context-attempt-N.json
+      integration-verification.json
+      input-request.json
+      patch-conflict.json
+      rate-limit.json
       final-verification.json
       run-outcome.json
       run-summary.json
+      inputs/
+        input-v1-*.json
     candidates/<candidate_id>/
       agent-handoff.json
       agent-handoff.md
@@ -182,7 +219,7 @@ Typical run layout:
 - Context budgets are enforced after task analysis.
 - Cleanup respects terminal retention policy and reports reclaimable bytes.
 - Cost budgets activate only when exact `token_usage` or `total_usd` metrics are present.
-- `gg report <run-id>` derives its human-readable output from `state.json`, `pipeline.jsonl`, `run-summary.json`, candidate artifacts, verification artifacts, and `cost.jsonl`.
+- `gg report <run-id>` derives its human-readable output from `state.json`, `pipeline.jsonl`, `run-outcome.json`, `final-verification.json`, selected candidate artifacts, verification artifacts, and cost events.
 - Resume does not promise to continue a live backend session; it resumes the orchestrator phase and reruns interrupted candidate work when needed.
 - Trigger-based review requirements are deterministic: every change requires QA, auth/secrets/admin paths require security review, DB/migration/infra paths require operability review, and frontend paths require code-quality review.
 - Agent-pattern verification records findings with stable `finding_id`, fingerprint, `rule_id`, `reliability`, `severity`, status, suppression flag, location, evidence, and remediation; only unsuppressed high/critical `[P]` findings block publishing by default.

@@ -14,6 +14,8 @@
 
 The current implementation is centered around a durable state machine, resumable artifacts, sandbox-aware execution, and operator recovery commands.
 
+For a diagram-first architecture walkthrough, see [docs/diagram-design.md](docs/diagram-design.md).
+
 **How It Works**
 
 1. `gg init` creates `.gg/params.yaml`, operational `.gitignore` entries, and repo-local runtime defaults. It can use either Codex or Claude for constitution/spec generation, and `--agent-backend auto` picks the available backend automatically.

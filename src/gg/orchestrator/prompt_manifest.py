@@ -4,10 +4,16 @@ import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
-PROMPT_SOURCE_FILES = (
+PROTOCOL_SURFACE_FILES = (
+    "agent_catalog.py",
+    "agent_patterns.py",
+    "protocol.py",
     "prompts.py",
     "executor.py",
+    "finding_feedback.py",
+    "prompt_manifest.py",
     "review.py",
+    "review_gates.py",
     "task_analysis.py",
 )
 
@@ -26,7 +32,7 @@ def write_prompt_manifest(project_path: str | Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
         f"{digest}  {relative}"
-        for relative, digest in _current_prompt_hashes().items()
+        for relative, digest in _current_protocol_surface_hashes().items()
     ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
@@ -43,8 +49,11 @@ def verify_prompt_manifest(project_path: str | Path) -> ManifestCheck:
             mismatched=[],
         )
     expected = _parse_manifest(path)
-    current = _current_prompt_hashes()
-    missing = [relative for relative in expected if relative not in current]
+    current = _current_protocol_surface_hashes()
+    missing = [
+        *(relative for relative in expected if relative not in current),
+        *(relative for relative in current if relative not in expected),
+    ]
     mismatched = [
         relative
         for relative, digest in expected.items()
@@ -57,13 +66,13 @@ def verify_prompt_manifest(project_path: str | Path) -> ManifestCheck:
             missing=missing,
             mismatched=mismatched,
         )
-    return ManifestCheck(status="pass", message="prompt manifest matches installed prompt sources", missing=[], mismatched=[])
+    return ManifestCheck(status="pass", message="prompt manifest matches protocol and prompt sources", missing=[], mismatched=[])
 
 
-def _current_prompt_hashes() -> dict[str, str]:
+def _current_protocol_surface_hashes() -> dict[str, str]:
     base = Path(__file__).resolve().parent
     hashes: dict[str, str] = {}
-    for filename in PROMPT_SOURCE_FILES:
+    for filename in PROTOCOL_SURFACE_FILES:
         path = base / filename
         if path.exists():
             hashes[f"gg/orchestrator/{filename}"] = hashlib.sha256(path.read_bytes()).hexdigest()

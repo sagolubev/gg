@@ -48,6 +48,7 @@ def build_run_report(store: RunStore, run_id: str) -> dict[str, Any]:
             "publish_ready": final_verification.get("publish_ready"),
             "traffic_light": final_verification.get("traffic_light"),
             "review_dimensions": final_verification.get("review_dimensions") or {},
+            "agent_patterns": final_verification.get("agent_patterns") or {},
             "blockers": final_verification.get("blockers") or [],
         },
         "cost": store.aggregate_cost(run_id),
@@ -101,6 +102,15 @@ def format_run_report(report: dict[str, Any]) -> str:
             lines.append(f"  {check.get('command') or check.get('id') or '(no command)':<24} {check.get('status')} {marker}")
     else:
         lines.append("  no verification commands recorded")
+    agent_patterns = (report.get("final_verification") or {}).get("agent_patterns") or {}
+    if agent_patterns:
+        lines.append(
+            "  agent-patterns"
+            f"             {agent_patterns.get('status')} "
+            f"findings={len(agent_patterns.get('findings') or [])} "
+            f"blocking={len(agent_patterns.get('blocking_findings') or [])} "
+            f"suppressed={agent_patterns.get('suppressed_findings') or 0}"
+        )
     files = report.get("files_changed") or []
     lines.append("")
     lines.append(f"Files changed: {len(files)}" + (f" ({', '.join(map(str, files[:8]))})" if files else ""))

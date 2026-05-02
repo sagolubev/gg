@@ -293,6 +293,59 @@ def memory_validate(path, as_json):
 
 
 @cli.group()
+def findings():
+    """Manage finding feedback and accepted-risk suppressions."""
+
+
+@findings.command("list")
+@click.option("--path", type=click.Path(exists=True), default=".", help="Project path.")
+@click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
+def findings_list(path, as_json):
+    """List finding feedback entries."""
+    import json
+
+    from gg.orchestrator.finding_feedback import load_finding_feedback
+
+    entries = [entry.to_dict() for entry in load_finding_feedback(path).values()]
+    payload = {"schema_version": 1, "findings": sorted(entries, key=lambda item: item["fingerprint"])}
+    if as_json:
+        click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
+    for entry in payload["findings"]:
+        click.echo(f"{entry['status']:<14} {entry['finding_id']:<8} {entry['fingerprint']} {entry['reason']}")
+
+
+@findings.command("record")
+@click.option("--path", type=click.Path(exists=True), default=".", help="Project path.")
+@click.option("--artifact", type=click.Path(exists=True), required=True, help="JSON artifact containing findings.")
+@click.option("--id", "finding_id", required=True, help="Finding id or fingerprint to record.")
+@click.option(
+    "--status",
+    type=click.Choice(["accepted", "ignored", "false_positive", "open", "fixed"]),
+    required=True,
+    help="Human feedback status.",
+)
+@click.option("--reason", required=True, help="Why this feedback is valid.")
+@click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
+def findings_record(path, artifact, finding_id, status, reason, as_json):
+    """Record feedback for one finding from a verification artifact."""
+    import json
+
+    from gg.orchestrator.finding_feedback import record_finding_feedback
+
+    payload = json.loads(Path(artifact).read_text(encoding="utf-8"))
+    finding = _find_artifact_finding(payload, finding_id)
+    if not finding:
+        raise click.ClickException(f"finding {finding_id!r} not found in {artifact}")
+    entry = record_finding_feedback(path, finding, status=status, reason=reason)
+    data = entry.to_dict()
+    if as_json:
+        click.echo(json.dumps(data, indent=2, ensure_ascii=False))
+        return
+    click.echo(f"{entry.status} {entry.finding_id} {entry.fingerprint}")
+
+
+@cli.group()
 def truth():
     """Spec/test/code traceability and explicit sync."""
 
@@ -348,6 +401,24 @@ def truth_sync(path, as_json):
         click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
         return
     click.echo(f"synced {payload['synced']} decisions -> {payload['constitution_path']}")
+
+
+def _find_artifact_finding(payload, finding_id: str):
+    if not isinstance(payload, dict):
+        return None
+    candidates = list(payload.get("findings") or [])
+    for check in payload.get("checks") or []:
+        if isinstance(check, dict):
+            candidates.extend(check.get("findings") or [])
+    for finding in candidates:
+        if not isinstance(finding, dict):
+            continue
+        if finding_id in {
+            str(finding.get("finding_id") or ""),
+            str(finding.get("fingerprint") or ""),
+        }:
+            return finding
+    return None
 
 
 def _build_pipeline(path, *, debug: bool = False, profile: str | None = None):

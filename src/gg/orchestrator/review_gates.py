@@ -46,6 +46,16 @@ def required_reviewers_for_files(files: list[str]) -> list[dict[str, Any]]:
                     "tags": ["code", "frontend"],
                 },
             )
+        if any(part in lower for part in ("agent", "prompt", "tool", "langgraph", "crew", "autogen")):
+            reviewers.setdefault(
+                "agent-pattern-verifier",
+                {
+                    "slug": "agent-pattern-verifier",
+                    "dimension": "agent_patterns",
+                    "reason": f"agent/prompt/tool path changed: {file}",
+                    "tags": ["agent-patterns", "prompts", "tools"],
+                },
+            )
     return sorted(reviewers.values(), key=lambda item: item["slug"])
 
 

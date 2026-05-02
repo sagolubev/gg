@@ -1431,8 +1431,20 @@ def test_pipeline_no_pr_completes_with_one_candidate(tmp_path):
     assert summary["logs"]["pipeline"].endswith("pipeline.jsonl")
     assert final_verification["publish_ready"] is True
     assert set(final_verification["review_dimensions"]) == {
-        "architecture", "code", "security", "tests", "operability",
+        "architecture", "code", "security", "tests", "operability", "agent_patterns",
     }
+    assert final_verification["protocol_obligations"]["status"] == "satisfied"
+    assert final_verification["completion_gates"]["protocol_status"] == "satisfied"
+    assert final_verification["completion_gates"]["agent_patterns_status"] in {"passed", "skipped"}
+    assert final_verification["agent_patterns"]["required_passed"] is True
+    assert final_verification["agent_patterns"]["suppressed_findings"] == 0
+    assert final_verification["source_artifacts"]["agent_pattern_verification"].endswith(
+        "artifacts/agent-pattern-verification.json"
+    )
+    assert any(
+        obligation["id"] == "reviewer:qa-verifier"
+        for obligation in final_verification["protocol_obligations"]["obligations"]
+    )
 
 
 def test_publish_outcome_failure_does_not_persist_completed(monkeypatch, tmp_path):
@@ -3325,6 +3337,7 @@ def test_run_report_summarizes_completed_run_and_cli_json(tmp_path):
     assert report["candidate_count"] == 1
     assert report["files_changed"] == ["greeting.txt"]
     assert report["verification"]["checks"][0]["status"] == "skipped"
+    assert report["final_verification"]["agent_patterns"]["required_passed"] is True
     assert report["cost"]["source"] == "cost_jsonl"
     assert any(stage["name"] == "TaskAnalysis" for stage in report["stages"])
 

@@ -6,8 +6,10 @@ import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from gg.orchestrator.agent_catalog import verify_agent_catalog
 from gg.orchestrator.config import GGConfig, load_config
 from gg.orchestrator.plugins import create_agent_backend, create_platform
+from gg.orchestrator.prompt_manifest import verify_prompt_manifest
 from gg.orchestrator.sandbox import SandboxRuntime
 from gg.utils.git_ops import find_repo_root
 
@@ -17,6 +19,7 @@ class DoctorCheck:
     name: str
     status: str
     message: str
+    fix: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -40,7 +43,7 @@ def run_doctor(project_path: str | Path) -> dict:
 
     params_path = root / ".gg" / "params.yaml"
     if not params_path.exists():
-        checks.append(DoctorCheck("params", "fail", ".gg/params.yaml is missing; run gg init"))
+        checks.append(DoctorCheck("params", "fail", ".gg/params.yaml is missing", "run gg init"))
     else:
         try:
             config = load_config(root)
@@ -100,6 +103,8 @@ def run_doctor(project_path: str | Path) -> dict:
         )
         checks.append(_dirty_workspace_check(root))
         checks.append(_secrets_check(root))
+        checks.append(_agent_catalog_check(root))
+        checks.append(_prompt_manifest_check(root))
 
     status = "pass"
     if any(check.status == "fail" for check in checks):
@@ -118,7 +123,7 @@ def _executable_check(name: str, *, required: bool) -> DoctorCheck:
     available = shutil.which(name) is not None
     if available:
         return DoctorCheck(name, "pass", f"{name} found")
-    return DoctorCheck(name, "fail" if required else "warn", f"{name} not found")
+    return DoctorCheck(name, "fail" if required else "warn", f"{name} not found", f"install {name} and retry")
 
 
 def _platform_cli_check(platform: str) -> DoctorCheck:
@@ -245,5 +250,30 @@ def _secrets_check(root: Path) -> DoctorCheck:
         if any(pattern.search(text) for pattern in patterns):
             findings.append(path.name)
     if findings:
-        return DoctorCheck("secrets", "fail", f"potential secrets in .gg yaml: {', '.join(findings)}")
+        return DoctorCheck(
+            "secrets",
+            "fail",
+            f"potential secrets in .gg yaml: {', '.join(findings)}",
+            "move secrets to environment variables or an OS keychain; keep .gg/*.yaml secret-free",
+        )
     return DoctorCheck("secrets", "pass", "no obvious secrets in .gg/*.yaml")
+
+
+def _prompt_manifest_check(root: Path) -> DoctorCheck:
+    result = verify_prompt_manifest(root)
+    fix = ""
+    if result.status == "warn":
+        fix = "run gg init to write .gg/prompt-manifest.sha256"
+    elif result.status == "fail":
+        fix = "verify local prompt source changes, then rerun gg init to refresh the manifest"
+    details = result.message
+    if result.missing:
+        details += f"; missing={', '.join(result.missing)}"
+    if result.mismatched:
+        details += f"; mismatched={', '.join(result.mismatched)}"
+    return DoctorCheck("prompt_manifest", result.status, details, fix)
+
+
+def _agent_catalog_check(root: Path) -> DoctorCheck:
+    result = verify_agent_catalog(root)
+    return DoctorCheck("agent_catalog", result.status, result.message, result.fix)

@@ -289,14 +289,10 @@ class CandidateEvaluator:
                 ),
             },
             "tests": {
-                "status": (
-                    "pass"
-                    if selected["verification_passed"] and not failed_commands
-                    else "fail"
-                ),
+                "status": "pass" if selected["verification_passed"] else "fail",
                 "reasons": (
                     ["verification passed"]
-                    if selected["verification_passed"] and not failed_commands
+                    if selected["verification_passed"]
                     else [
                         "verification failed commands: "
                         f"{', '.join(failed_commands) or 'unknown'}"

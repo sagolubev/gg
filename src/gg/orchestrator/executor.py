@@ -19,6 +19,7 @@ from gg.agents.codex import CodexAgent
 from gg.orchestrator.config import GGConfig
 from gg.orchestrator.git import changed_files, current_commit, diff, safe_branch_slug
 from gg.orchestrator.git import WorktreeManager
+from gg.orchestrator.project_context import build_project_precedence_context
 from gg.orchestrator.sandbox import SandboxPolicy, SandboxRuntime
 from gg.orchestrator.schemas import AgentHandoffModel, AgentResultModel, CandidateResultModel
 from gg.orchestrator.task_analysis import TaskBrief
@@ -64,6 +65,7 @@ class AgentHandoff:
     instructions: str = ""
     port: int | None = None
     artifacts: dict[str, str] | None = None
+    context: dict[str, Any] | None = None
 
     def to_model(self) -> AgentHandoffModel:
         return AgentHandoffModel.model_validate(self.to_dict(validate=False))
@@ -71,6 +73,7 @@ class AgentHandoff:
     def to_dict(self, *, validate: bool = True) -> dict:
         data = asdict(self)
         data["artifacts"] = data["artifacts"] or {}
+        data["context"] = data["context"] or {}
         if validate:
             AgentHandoffModel.model_validate(data)
         return data
@@ -158,7 +161,10 @@ class CandidateExecutor:
         port: int | None = None,
         artifacts: dict[str, str] | None = None,
         created_at: str | None = None,
+        context: dict[str, Any] | None = None,
     ) -> AgentHandoff:
+        project_context = build_project_precedence_context(self.project_path)
+        merged_context = {"project_precedence": project_context, **(context or {})}
         return AgentHandoff(
             schema_version=1,
             run_id=run_id,
@@ -173,6 +179,7 @@ class CandidateExecutor:
             instructions=instructions,
             port=port,
             artifacts=artifacts or {},
+            context=merged_context,
         )
 
     def build_agent_result(
@@ -559,10 +566,13 @@ class CandidateExecutor:
             )
         repair_section = _repair_context_section(repair_context)
         structured_context = _structured_brief_section(brief)
+        project_precedence = str(build_project_precedence_context(self.project_path).get("text") or "")
+        precedence_section = f"{project_precedence}\n\n" if project_precedence else ""
         return (
             "You are implementing a GitHub issue in this repository.\n"
             "Make the smallest correct code change, update tests when needed, and leave the worktree with the patch applied.\n"
             "Do not create commits or push. The orchestrator will commit and publish after verification.\n\n"
+            f"{precedence_section}"
             f"If you cannot continue without a human answer, make no file changes and respond with exactly one line starting with {NEEDS_INPUT_PREFIX!r} followed by the concise question.\n\n"
             f"Strategy: {strategy}\n{strategy_text}\n\n"
             f"{repair_section}"

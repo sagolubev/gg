@@ -42,9 +42,11 @@ from gg.orchestrator.git import safe_branch_slug, WorktreeManager
 from gg.orchestrator.git import workspace_changes as git_workspace_changes
 from gg.orchestrator.lock import LockManager
 from gg.orchestrator.logging import mask_secrets
+from gg.orchestrator.memory import append_constitution_lesson, append_memory_entry
 from gg.orchestrator.plugins import create_agent_backend, create_platform
 from gg.orchestrator.rate_limit import RateLimitThrottleError
 from gg.orchestrator.report import build_run_report
+from gg.orchestrator.review_gates import required_reviewers_for_files, review_gate_blockers
 from gg.orchestrator.state import CandidateState, TaskState
 from gg.orchestrator.state import TERMINAL_STATES
 from gg.orchestrator.store import RunStore
@@ -1361,7 +1363,13 @@ class OrchestratorPipeline:
                 f"{candidate_dir}/agent-handoff.json",
                 handoff.to_dict(),
             )
+            markdown_path = self.store.write_text(
+                state.run_id,
+                f"{candidate_dir}/agent-handoff.md",
+                _format_agent_handoff_markdown(handoff.to_dict()),
+            )
             handoff_artifact["path"] = path
+            handoff_artifact["markdown_path"] = markdown_path
             return path
 
         candidate = executor.run(
@@ -1432,6 +1440,16 @@ class OrchestratorPipeline:
                 "findings": verification_summary["findings"],
             },
         )
+        qa_verdict_path = self.store.write_text(
+            state.run_id,
+            f"{candidate_dir}/qa-verdict.md",
+            _format_qa_verdict(
+                candidate_id=candidate.candidate_id,
+                verification=verification,
+                required_passed=verification_summary["required_passed"],
+                advisory_failed_commands=verification_summary["advisory_failed_commands"],
+            ),
+        )
         verification_passed = _verification_passed(
             verification,
             baseline,
@@ -1481,7 +1499,9 @@ class OrchestratorPipeline:
             ).to_dict(),
         )
         candidate_data["agent_handoff"] = handoff_path
+        candidate_data["agent_handoff_markdown"] = handoff_artifact.get("markdown_path", "")
         candidate_data["agent_result"] = agent_result_path
+        candidate_data["qa_verdict"] = qa_verdict_path
         result_path = self.store.write_json(
             state.run_id,
             f"{candidate_dir}/candidate-result.json",
@@ -1774,6 +1794,13 @@ class OrchestratorPipeline:
         state.artifacts["run_outcome"] = self._write_run_outcome(state, winner)
         state.artifacts["final_verification"] = self._write_final_verification(state, winner)
         self.store.write(state)
+        final_verification = self.store.read_json(state.artifacts["final_verification"])
+        if not final_verification.get("publish_ready"):
+            blockers = "; ".join(map(str, final_verification.get("blockers") or [])) or "final verification gate failed"
+            state.fail(code="final_verification_failed", message=blockers)
+            self.store.write(state)
+            self._mark_issue_failed(issue.number, state.run_id, blockers)
+            return {"run_id": state.run_id, "state": state.state.value, "error": state.last_error}
         if not no_pr and state.publishing_step != "result_commented":
             try:
                 self.platform.publish_outcome(
@@ -1812,6 +1839,7 @@ class OrchestratorPipeline:
         state.publishing_step = "completed"
         state.artifacts["run_outcome"] = self._write_run_outcome(state, winner)
         self.store.write(state)
+        self._record_completion_memory(state, issue, winner)
         log.info("[%s] completed -- PR: %s", state.run_id, state.pr_url or "(no PR)")
         return {
             "run_id": state.run_id,
@@ -2497,16 +2525,31 @@ class OrchestratorPipeline:
         evaluation_path = state.artifacts.get("execution_evaluation") or state.artifacts.get("evaluation")
         evaluation = self.store.read_json(evaluation_path) if evaluation_path else {}
         review_dimensions = dict(evaluation.get("review_dimensions") or {})
+        result_path = str(selected_candidate_metadata.get("result_path") or "")
+        candidate_result = self.store.read_json(result_path) if result_path else {}
+        changed_files = list(candidate_result.get("changed_files") or selected_candidate_metadata.get("changed_files") or [])
+        required_reviewers = required_reviewers_for_files(changed_files)
         blockers = [
             f"{name}: {', '.join(map(str, details.get('reasons') or [])) or details.get('status', 'failed')}"
             for name, details in review_dimensions.items()
             if str(details.get("status", "")).lower() != "pass"
         ]
+        if review_dimensions:
+            blockers.extend(review_gate_blockers(review_dimensions, required_reviewers))
         verification_sources = {
             "candidate_verification": str(selected_candidate_metadata.get("verification_path") or ""),
             "integration_verification": state.artifacts.get("integration_verification", ""),
             "execution_evaluation": evaluation_path or "",
         }
+        required_artifacts = {
+            "candidate_verification": verification_sources["candidate_verification"],
+        }
+        if evaluation_path:
+            required_artifacts["execution_evaluation"] = evaluation_path
+        if result_path:
+            required_artifacts["selected_candidate_result"] = result_path
+        missing_artifacts = [name for name, value in required_artifacts.items() if not value]
+        blockers.extend(f"missing artifact: {name}" for name in missing_artifacts)
         payload = {
             "schema_version": 1,
             "run_id": state.run_id,
@@ -2516,6 +2559,12 @@ class OrchestratorPipeline:
             "verdict": str(evaluation.get("verdict") or ""),
             "traffic_light": str(evaluation.get("traffic_light") or ""),
             "review_dimensions": review_dimensions,
+            "required_reviewers": required_reviewers,
+            "completion_gates": {
+                "required_artifacts": required_artifacts,
+                "missing_artifacts": missing_artifacts,
+                "changed_files": changed_files,
+            },
             "source_artifacts": verification_sources,
             "blockers": blockers,
             "summary": (
@@ -2529,6 +2578,34 @@ class OrchestratorPipeline:
             "artifacts/final-verification.json",
             payload,
         )
+
+    def _record_completion_memory(self, state, issue: Issue, winner: dict[str, Any]) -> None:
+        summary = f"Completed issue #{issue.number}: {issue.title}"[:160]
+        body = (
+            f"Run `{state.run_id}` completed with winner `{winner.get('candidate_id')}`.\n\n"
+            f"PR: {state.pr_url or '(local/no PR)'}\n"
+            f"Run outcome: {state.artifacts.get('run_outcome', '')}\n"
+            f"Final verification: {state.artifacts.get('final_verification', '')}\n"
+        )
+        try:
+            append_memory_entry(
+                self.project_path,
+                file="session-handoff",
+                summary=summary,
+                body=body,
+                tags=["run", "completed"],
+                run_id=state.run_id,
+                issue_number=issue.number,
+                candidate_id=str(winner.get("candidate_id") or ""),
+            )
+            append_constitution_lesson(
+                self.project_path,
+                summary=f"Run {state.run_id} completed issue #{issue.number}",
+                source="gg-run",
+                details=str(winner.get("summary") or ""),
+            )
+        except Exception as exc:
+            log.warning("[%s] completion memory update failed: %s", state.run_id, exc)
 
     def _runtime_limit_error(self, state, *, next_candidates: int = 0) -> dict[str, str] | None:
         max_duration = self.config.runtime.max_run_duration_seconds
@@ -3266,6 +3343,55 @@ def _with_baseline_status(checks, baseline) -> list[CheckResult]:
             baseline_status = "changed_failure"
         annotated.append(replace(check, baseline_status=baseline_status))
     return annotated
+
+
+def _format_agent_handoff_markdown(handoff: dict[str, Any]) -> str:
+    issue = handoff.get("issue") or {}
+    project_precedence = ((handoff.get("context") or {}).get("project_precedence") or {})
+    lines = [
+        f"# Agent Handoff: {handoff.get('candidate_id', '')}",
+        "",
+        f"- Run: `{handoff.get('run_id', '')}`",
+        f"- Attempt: {handoff.get('attempt', '')}",
+        f"- Issue: #{issue.get('number', '')} {issue.get('title', '')}",
+        f"- Worktree: `{handoff.get('worktree_path', '')}`",
+        f"- Base commit: `{handoff.get('base_commit', '')}`",
+        "",
+        "## Instructions",
+        "",
+        str(handoff.get("instructions") or "(none)"),
+        "",
+    ]
+    text = str(project_precedence.get("text") or "")
+    if text:
+        lines.extend(["## Project Precedence", "", text, ""])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _format_qa_verdict(
+    *,
+    candidate_id: str,
+    verification: list[CheckResult],
+    required_passed: bool,
+    advisory_failed_commands: list[str],
+) -> str:
+    verdict = "PASS" if required_passed else "FAIL"
+    lines = [
+        f"# QA Verdict: {verdict}",
+        "",
+        f"- Candidate: `{candidate_id}`",
+        f"- Required gates passed: {str(required_passed).lower()}",
+        "",
+        "## Checks",
+        "",
+    ]
+    for check in verification:
+        lines.append(f"- `{check.command or check.id or '(no command)'}`: {check.status}")
+    if advisory_failed_commands:
+        lines.extend(["", "## Advisory Failures", ""])
+        for command in advisory_failed_commands:
+            lines.append(f"- `{command}`")
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def _check_fingerprint(check) -> tuple:

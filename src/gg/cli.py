@@ -142,10 +142,19 @@ def knowledge_context(issue_title, body, path):
 @cli.command()
 @click.option("--path", type=click.Path(exists=True), default=".", help="Project path.")
 @click.option("--agent-backend", type=click.Choice(["codex", "claude"]), default="codex", show_default=True, help="LLM backend to use for constitution generation.")
+@click.option("--learn", default=None, help="Append a short learned pattern instead of regenerating constitution.")
+@click.option("--source", default="manual", help="Source label for --learn.")
 @click.option("--debug", is_flag=True, help="Show backend output.")
-def constitution(path, agent_backend, debug):
+def constitution(path, agent_backend, learn, source, debug):
     """Regenerate constitution using the selected backend (takes 2-5 min)."""
     from rich.console import Console
+
+    from gg.orchestrator.memory import append_constitution_lesson
+
+    if learn:
+        changed = append_constitution_lesson(path, summary=learn, source=source)
+        Console().print("[green]Constitution updated.[/green]" if changed else "[yellow]Lesson already present.[/yellow]")
+        return
 
     from gg.orchestrator.plugins import create_agent_backend
     from gg.analyzers.dependencies import analyze_dependencies
@@ -188,6 +197,94 @@ def constitution(path, agent_backend, debug):
     except RuntimeError as e:
         console.print(f"[red]{agent_backend} failed: {e}[/red]")
         console.print("Local constitution in .gg/constitution.md is still valid.")
+
+
+@cli.group()
+def memory():
+    """Structured project memory management."""
+
+
+@memory.command("append")
+@click.option("--path", type=click.Path(exists=True), default=".", help="Project path.")
+@click.option("--file", "memory_file", type=click.Choice(["session-handoff", "decisions", "patterns"]), required=True)
+@click.option("--summary", required=True, help="One-line memory summary.")
+@click.option("--body", default="", help="Memory body text.")
+@click.option("--body-file", type=click.Path(exists=True), default=None, help="Read memory body from file.")
+@click.option("--status", type=click.Choice(["in_progress", "done", "blocked", "rejected"]), default="done", show_default=True)
+@click.option("--tag", "tags", multiple=True, help="Memory tag.")
+@click.option("--run-id", default="", help="Associated gg run id.")
+@click.option("--issue-number", type=int, default=None, help="Associated issue number.")
+@click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
+def memory_append(path, memory_file, summary, body, body_file, status, tags, run_id, issue_number, as_json):
+    """Append a validated memory entry."""
+    import json
+
+    from gg.orchestrator.memory import append_memory_entry
+
+    if body_file:
+        body = Path(body_file).read_text(encoding="utf-8")
+    if not body:
+        raise click.UsageError("Provide --body or --body-file")
+    entry = append_memory_entry(
+        path,
+        file=memory_file,
+        status=status,
+        summary=summary,
+        body=body,
+        tags=list(tags),
+        run_id=run_id,
+        issue_number=issue_number,
+    )
+    payload = {
+        "id": entry.id,
+        "file": memory_file,
+        "kind": entry.kind,
+        "summary": entry.summary,
+        "at": entry.at,
+    }
+    if as_json:
+        click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
+    click.echo(entry.id)
+
+
+@memory.command("latest")
+@click.option("--path", type=click.Path(exists=True), default=".", help="Project path.")
+@click.option("--file", "memory_file", type=click.Choice(["session-handoff", "decisions", "patterns"]), required=True)
+@click.option("--limit", default=3, show_default=True)
+@click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
+def memory_latest(path, memory_file, limit, as_json):
+    """Show latest memory entries."""
+    import json
+
+    from gg.orchestrator.memory import latest_memory_entries
+
+    entries = latest_memory_entries(path, file=memory_file, limit=limit)
+    payload = [entry.__dict__ for entry in entries]
+    if as_json:
+        click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
+    for entry in entries:
+        click.echo(f"{entry.at} {entry.id}: {entry.summary}")
+
+
+@memory.command("validate")
+@click.option("--path", type=click.Path(exists=True), default=".", help="Project path.")
+@click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON.")
+def memory_validate(path, as_json):
+    """Validate structured project memory files."""
+    import json
+
+    from gg.orchestrator.memory import validate_memory
+
+    errors = validate_memory(path)
+    payload = {"schema_version": 1, "status": "fail" if errors else "pass", "errors": errors}
+    if as_json:
+        click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
+    if errors:
+        raise click.ClickException("\n".join(errors))
+    click.echo("memory ok")
 
 
 def _build_pipeline(path, *, debug: bool = False, profile: str | None = None):
@@ -589,8 +686,13 @@ def doctor(path, as_json):
     table.add_column("Check")
     table.add_column("Status")
     table.add_column("Message")
+    if any(check.get("fix") for check in result["checks"]):
+        table.add_column("Fix")
     for check in result["checks"]:
-        table.add_row(check["name"], check["status"], check["message"])
+        row = [check["name"], check["status"], check["message"]]
+        if any(item.get("fix") for item in result["checks"]):
+            row.append(check.get("fix", ""))
+        table.add_row(*row)
     console.print(table)
 
 

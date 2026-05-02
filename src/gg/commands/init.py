@@ -16,8 +16,10 @@ from gg.generators.agent_files import generate_agent_files
 from gg.generators.knowledge import write_contributor_exemplars
 from gg.generators.specs import UserContext, generate_specs
 from gg.knowledge.engine import KnowledgeEngine
+from gg.orchestrator.agent_catalog import write_agent_catalog
 from gg.orchestrator.config import default_params
 from gg.orchestrator.plugins import create_agent_backend
+from gg.orchestrator.prompt_manifest import write_prompt_manifest
 from gg.platforms.base import detect_platform
 from gg.utils.git_ops import find_repo_root, get_main_branch, get_remote_url, parse_remote_url
 from gg.utils.system import run_all_checks
@@ -221,6 +223,10 @@ def run_init(
     # 10. Write config
     _write_config(project_path, platform, console)
     _write_params(project_path, console, agent_backend=selected_backend)
+    catalog_path = write_agent_catalog(project_path, backend=selected_backend)
+    console.print(f"  [green]  -> {catalog_path.relative_to(project_path)}[/green]")
+    manifest_path = write_prompt_manifest(project_path)
+    console.print(f"  [green]  -> {manifest_path.relative_to(project_path)}[/green]")
     _write_operational_gitignore(project_path, console)
 
     # 11. Summary
@@ -531,6 +537,10 @@ def _print_final(project_path: Path, console: Console) -> None:
             created.append(".gg/constitution.md")
         if (gg / "knowledge").exists():
             created.append(".gg/knowledge/")
+        if (gg / "agent-catalog.json").exists():
+            created.append(".gg/agent-catalog.json")
+        if (gg / "prompt-manifest.sha256").exists():
+            created.append(".gg/prompt-manifest.sha256")
     if openspec.exists():
         created.append("openspec/")
     if (project_path / "AGENTS.md").exists():

@@ -25,7 +25,8 @@ The current implementation is centered around a durable state machine, resumable
 7. Publishing applies the winning patch in an integration worktree, optionally pushes a branch, creates or reuses a PR, posts result comments, and:
    for `--no-pr` marks the issue done, for PR mode swaps `work_label` to `in_review_label`.
 8. Selection can also filter by project-board status and will fetch board-listed issues that were missed by the initial `list_issues` limit.
-9. `gg resume`, `gg retry`, `gg provide`, `gg cancel`, `gg clean`, `gg status`, and `gg report` operate entirely from durable state.
+9. Completion gates require final verification, reviewer-trigger coverage, run outcome, and candidate handoff artifacts before a run can become `Completed`.
+10. `gg resume`, `gg retry`, `gg provide`, `gg cancel`, `gg clean`, `gg status`, `gg report`, and `gg memory` operate entirely from durable state.
 
 **State Graph**
 
@@ -64,6 +65,10 @@ flowchart TD
 - **Repair memory**: failed candidates that lead to repair are recorded under `.gg/knowledge/repair-lessons.md` and injected into similar future tasks.
 - **Contributor exemplars**: `gg init` ranks strong contributors from git ownership/history and writes `.gg/knowledge/exemplars.*` for future task context.
 - **Bounded escalation**: after configured failed rounds, one high-effort repair pass can run while still obeying attempts, candidate, duration, token, and cost budgets.
+- **Project precedence**: candidate handoffs include compact rules from `.gg/constitution.md`, repair lessons, exemplars, and recent memory patterns; `## Deep Reference` sections are omitted unless explicitly pulled later.
+- **Structured memory**: `.gg/memory/session-handoff.md`, `.gg/memory/decisions.md`, and `.gg/memory/patterns.md` store validated run state, decisions, and reusable lessons.
+- **Agent catalog**: `.gg/agent-catalog.json` records the small set of built-in reviewer / executor roles, phases, triggers, and required artifacts.
+- **Prompt integrity**: `gg init` writes `.gg/prompt-manifest.sha256`; `gg doctor` reports prompt source drift with a concrete fix.
 - **Idempotent publish flow**: publishing stays in `OutcomePublishing` until all side effects are complete.
 - **Tracker semantics**: PR-backed runs move issues into `in review`; local / no-PR runs mark them done directly.
 - **Recovery**: interrupted runs can be resumed from durable state; each resume writes `artifacts/resume-plan-vN.json` explaining what is reused or rerun.
@@ -89,6 +94,11 @@ gg status --json
 gg report <run-id>
 gg report <run-id> --json
 gg constitution --agent-backend claude
+gg constitution --learn "Prefer context-only review for untrusted PR diffs"
+gg memory append --file patterns --summary "Avoid broad rewrites" --body "Minimal patches verified faster."
+gg memory latest --file session-handoff
+gg memory validate
+gg review 55 --agent-backend codex
 ```
 
 **Configuration**
@@ -117,6 +127,12 @@ Typical run layout:
 ```text
 .gg/
   params.yaml
+  agent-catalog.json
+  prompt-manifest.sha256
+  memory/
+    session-handoff.md
+    decisions.md
+    patterns.md
   runs/<run_id>/
     state.json
     pipeline.jsonl
@@ -134,9 +150,11 @@ Typical run layout:
       run-summary.json
     candidates/<candidate_id>/
       agent-handoff.json
+      agent-handoff.md
       agent-result.json
       candidate-result.json
       patch.diff
+      qa-verdict.md
       verification.json
 ```
 
@@ -149,6 +167,8 @@ Typical run layout:
 - Cost budgets activate only when exact `token_usage` or `total_usd` metrics are present.
 - `gg report <run-id>` derives its human-readable output from `state.json`, `pipeline.jsonl`, `run-summary.json`, candidate artifacts, verification artifacts, and `cost.jsonl`.
 - Resume does not promise to continue a live backend session; it resumes the orchestrator phase and reruns interrupted candidate work when needed.
+- Trigger-based review requirements are deterministic: every change requires QA, auth/secrets/admin paths require security review, DB/migration/infra paths require operability review, and frontend paths require code-quality review.
+- Successful runs append a handoff entry to `.gg/memory/session-handoff.md` and a compact learned-pattern line to `.gg/constitution.md`.
 - Artifact checksums validate persisted sanitized bytes when `audit.hash_artifacts: true`.
 - Board-based selection can supplement the initial issue list with older board-listed issues missing from the first fetch window.
 

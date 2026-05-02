@@ -16,6 +16,48 @@ The current implementation is centered around a durable state machine, resumable
 
 For a diagram-first Markdown walkthrough, see [docs/diagram-design.md](docs/diagram-design.md).
 
+**Architecture Overview**
+
+```mermaid
+flowchart LR
+    Operator["Operator / cron / watch mode"] --> CLI["gg CLI"]
+
+    CLI --> Init["gg init"]
+    CLI --> Run["gg run / gg issue"]
+    CLI --> Recovery["gg resume / retry / provide / cancel"]
+    CLI --> ReadOnly["gg status / report / doctor / clean"]
+    CLI --> KnowledgeCmd["gg knowledge *"]
+    CLI --> Review["gg review"]
+
+    Init --> LocalConfig[".gg/params.yaml<br/>.gg/constitution.md<br/>.gg/knowledge/*"]
+
+    Run --> Pipeline["OrchestratorPipeline"]
+    Recovery --> Pipeline
+    ReadOnly --> Store["RunStore<br/>.gg/runs/&lt;run_id&gt;"]
+
+    Pipeline --> Platform["GitHub / GitLab adapter"]
+    Pipeline --> Store
+    Pipeline --> Knowledge["KnowledgeEngine<br/>events, search, repair lessons"]
+    Pipeline --> Routing["phase routing<br/>analysis / execution / repair / evaluation / final_verification"]
+
+    Routing --> Agents["AgentBackend<br/>Codex / Claude"]
+    Pipeline --> Executor["CandidateExecutor"]
+    Executor --> Worktrees["isolated worktrees<br/>.gg-worktrees/*"]
+    Executor --> Agents
+    Executor --> Sandbox["sandbox-runtime<br/>or direct execution"]
+    Executor --> Verify["VerificationRunner<br/>setup / test / lint / typecheck / security / custom"]
+
+    Verify --> Evaluator["CandidateEvaluator"]
+    Evaluator --> Pipeline
+
+    Pipeline --> Publish["publish winner"]
+    Publish --> Platform
+    Publish --> IntegrationWT["integration worktree"]
+    Publish --> GitRemote["git remote branch / PR"]
+
+    Store --> Report["gg report"]
+```
+
 **How It Works**
 
 1. `gg init` creates `.gg/params.yaml`, operational `.gitignore` entries, and repo-local runtime defaults. It can use either Codex or Claude for constitution/spec generation, and `--agent-backend auto` picks the available backend automatically.
